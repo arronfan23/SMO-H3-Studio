@@ -1,0 +1,74 @@
+:root {
+  color: #17211d;
+  background: #f4f7f5;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  letter-spacing: 0;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+}
+
+.brand-screen {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  max-width: 100%;
+}
+
+.brand-logo {
+  width: 112px;
+  height: 112px;
+  flex: 0 0 auto;
+}
+
+.brand-copy {
+  border-left: 3px solid #32a87d;
+  padding-left: 28px;
+}
+
+.brand-copy h1 {
+  margin: 0;
+  font-size: 36px;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.brand-copy p {
+  margin: 10px 0 0;
+  color: #53635b;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+@media (max-width: 520px) {
+  .brand-screen {
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .brand-copy {
+    border-left: 0;
+    border-top: 3px solid #32a87d;
+    padding: 24px 0 0;
+  }
+
+  .brand-copy h1 {
+    font-size: 30px;
+  }
+}
