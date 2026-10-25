@@ -3,9 +3,10 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { Store } from '../../src/main/store';
-import type { NewWork, VideoMode } from '../../src/shared/types';
+import type { NewWork, VideoMode, WorkStatus } from '../../src/shared/types';
 
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const temporaryDirectories: string[] = [];
@@ -18,6 +19,13 @@ function withStore<T>(run: (store: Store) => T, databasePath = ':memory:'): T {
   } finally {
     store.close();
   }
+}
+
+function makeTemporaryDatabasePath(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'smo-h3-store-'));
+  temporaryDirectories.push(directory);
+
+  return join(directory, 'library.db');
 }
 
 function makeWork(avatarId: string, id = 'work-1'): NewWork {
@@ -148,13 +156,84 @@ describe('work library', () => {
       expect(store.listWorks()).toEqual([]);
     });
   });
+
+  test.each([
+    { scenario: 'empty', id: '' },
+    { scenario: 'whitespace-only', id: ' \t ' },
+  ])('rejects an $scenario work id', ({ id }) => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+
+      expect(() => store.addWork(makeWork(avatar.id, id))).toThrow('Work id must not be empty');
+      expect(store.listWorks()).toEqual([]);
+    });
+  });
+
+  test('rejects an invalid status through the SQL constraint', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const input = { ...makeWork(avatar.id), status: 'archived' as WorkStatus };
+
+      expect(() => store.addWork(input)).toThrow(/CHECK constraint failed/i);
+      expect(store.listWorks()).toEqual([]);
+    });
+  });
+
+  test('rejects a duplicate work primary key without replacing the original', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const original = store.addWork(makeWork(avatar.id, 'duplicate'));
+
+      expect(() => store.addWork(makeWork(avatar.id, 'duplicate'))).toThrow(
+        /UNIQUE constraint failed: works\.id/i,
+      );
+      expect(store.listWorks()).toEqual([original]);
+    });
+  });
+
+  test('stores a pending work with a null output path', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const input: NewWork = {
+        ...makeWork(avatar.id, 'pending'),
+        outputPath: null,
+        status: 'pending',
+      };
+      const work = store.addWork(input);
+
+      expect(work).toMatchObject(input);
+      expect(store.listWorks()).toEqual([work]);
+    });
+  });
+});
+
+describe('schema initialization', () => {
+  test('closes the database after a failure so the file can be recreated', () => {
+    const databasePath = makeTemporaryDatabasePath();
+    const database = new DatabaseSync(databasePath);
+
+    try {
+      database.exec(`
+        CREATE TABLE schema_conflict (id INTEGER);
+        CREATE INDEX avatars ON schema_conflict(id);
+      `);
+     } finally {
+       database.close();
+     }
+
+    expect(() => new Store(databasePath)).toThrow();
+    rmSync(databasePath);
+
+    withStore((store) => {
+      expect(store.listAvatars()).toEqual([]);
+      expect(store.listWorks()).toEqual([]);
+    }, databasePath);
+  });
 });
 
 describe('file persistence', () => {
   test('retains avatars and works after closing and reopening the database', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'smo-h3-store-'));
-    temporaryDirectories.push(directory);
-    const databasePath = join(directory, 'library.db');
+    const databasePath = makeTemporaryDatabasePath();
 
     const { avatar, work } = withStore((store) => {
       const createdAvatar = store.createAvatar({

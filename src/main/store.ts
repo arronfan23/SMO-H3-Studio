@@ -12,27 +12,35 @@ export class Store {
   private readonly db: DatabaseSync;
 
   constructor(path: string) {
-    this.db = new DatabaseSync(path);
-    this.db.exec(`
-      PRAGMA foreign_keys = ON;
+    const db = new DatabaseSync(path);
 
-      CREATE TABLE IF NOT EXISTS avatars (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        photoPath TEXT NOT NULL,
-        createdAt TEXT NOT NULL
-      );
+    try {
+      db.exec(`
+        PRAGMA foreign_keys = ON;
 
-      CREATE TABLE IF NOT EXISTS works (
-        id TEXT PRIMARY KEY NOT NULL,
-        avatarId TEXT NOT NULL,
-        mode TEXT NOT NULL CHECK (mode IN ('text', 'audio')),
-        outputPath TEXT,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
-        createdAt TEXT NOT NULL,
-        FOREIGN KEY (avatarId) REFERENCES avatars(id) ON DELETE RESTRICT
-      );
-    `);
+        CREATE TABLE IF NOT EXISTS avatars (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          photoPath TEXT NOT NULL,
+          createdAt TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS works (
+          id TEXT PRIMARY KEY NOT NULL,
+          avatarId TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK (mode IN ('text', 'audio')),
+          outputPath TEXT,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
+          createdAt TEXT NOT NULL,
+          FOREIGN KEY (avatarId) REFERENCES avatars(id) ON DELETE RESTRICT
+        );
+      `);
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+
+    this.db = db;
   }
 
   createAvatar(input: { name: string; photoPath: string }): Avatar {
@@ -70,6 +78,9 @@ export class Store {
   }
 
   addWork(input: NewWork): Work {
+    if (input.id.trim().length === 0) {
+      throw new Error('Work id must not be empty');
+    }
     if (input.mode !== 'text' && input.mode !== 'audio') {
       throw new Error(`Invalid video mode: ${String(input.mode)}`);
     }
