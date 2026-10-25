@@ -190,31 +190,98 @@ export function patchWorkflow<T>(graph: T, changes: Record<string, unknown>): T 
 转换脚本只保留从输出节点可达的节点，先写入直接提示词再遍历，因此本地 Qwen、快速解码分支和 UI 辅助节点不会进入 API 图。文字输出节点为 `180`，音频输出节点为 `65`。文字模板只保留节点 `226` 的第一张模特照片，离线构建时删除 `136` 的 `ref_images.ref_image_1` 与 `ref_images.ref_image_2` 输入，使节点 `255` 和旧硬编码图片不再可达；运行时通过 `226.inputs.image` 注入用户照片。
 
 ```js
-function toApiGraph(workflow, outputId, overrides = {}) {
-  const nodes = new Map(workflow.nodes.map(node => [String(node.id), node]));
-  const links = new Map(workflow.links.map(link => [String(link[0]), link]));
+const FRONTEND_ONLY_FIELDS = new Set([
+  'upload',
+  'preview',
+  'videopreview',
+  'selflift_tiling_plan',
+  'control_after_generate',
+]);
+
+export function toApiGraph(workflow, outputId, overrides = {}) {
+  const nodes = new Map(workflow.nodes.map((node) => [String(node.id), node]));
+  const links = new Map(workflow.links.map((link) => [String(link[0]), link]));
   const graph = {};
+
+  function resolveApiLink(linkId, visitedReroutes = new Set()) {
+    const link = links.get(String(linkId));
+    if (!link) throw new Error(`Missing link ${linkId}`);
+
+    const sourceId = String(link[1]);
+    const sourceNode = nodes.get(sourceId);
+    if (!sourceNode) throw new Error(`Missing node ${sourceId}`);
+
+    if (sourceNode.type !== 'Reroute') {
+      return [sourceId, link[2]];
+    }
+
+    if (visitedReroutes.has(sourceId)) {
+      throw new Error(`Reroute cycle at node ${sourceId}`);
+    }
+    visitedReroutes.add(sourceId);
+
+    const input = (sourceNode.inputs ?? []).find((candidate) => candidate.link != null);
+    if (!input) throw new Error(`Reroute node ${sourceId} has no input link`);
+
+    return resolveApiLink(input.link, visitedReroutes);
+  }
+
   function visit(id) {
     if (graph[id]) return;
+
     const node = nodes.get(id);
     if (!node) throw new Error(`Missing node ${id}`);
     if (node.mode === 4) throw new Error(`Required node ${id} is bypassed`);
-    const linked = new Set(node.inputs.filter(input => input.link != null).map(input => input.name));
-    const inputs = Object.fromEntries(Object.entries(node.widgets_values_named ?? {}).filter(([name]) => !linked.has(name)));
-    for (const input of node.inputs) {
-      if (input.link == null) continue;
-      const link = links.get(String(input.link));
-      inputs[input.name] = [String(link[1]), link[2]];
+
+    const nodeInputs = node.inputs ?? [];
+    const nodeOverrides = overrides[id] ?? {};
+    const linkedNames = new Set(
+      nodeInputs
+        .filter((input) => !Object.hasOwn(nodeOverrides, input.name) && input.link != null)
+        .map((input) => input.name),
+    );
+    const inputs = Object.fromEntries(
+      Object.entries(node.widgets_values_named ?? {}).filter(
+        ([name]) => !linkedNames.has(name) && !FRONTEND_ONLY_FIELDS.has(name),
+      ),
+    );
+
+    const dependencies = new Map();
+    for (const input of nodeInputs) {
+      if (Object.hasOwn(nodeOverrides, input.name)) continue;
+      if (input.link != null) {
+        const apiLink = resolveApiLink(input.link);
+        inputs[input.name] = apiLink;
+        dependencies.set(input.name, apiLink[0]);
+      }
     }
-    Object.assign(inputs, overrides[id] ?? {});
+
+    Object.assign(inputs, nodeOverrides);
+    for (const field of FRONTEND_ONLY_FIELDS) delete inputs[field];
+
     graph[id] = { class_type: node.type, inputs };
-    for (const value of Object.values(inputs)) {
-      if (Array.isArray(value) && value.length === 2 && typeof value[0] === 'string' && Number.isInteger(value[1])) visit(value[0]);
-    }
+
+    // Only real UI connections are dependencies; direct overrides sever their input links.
+    for (const dependencyId of dependencies.values()) visit(dependencyId);
   }
+
   visit(String(outputId));
   return graph;
 }
+
+function removeNodeInputs(workflow, id, names) {
+  const node = workflow.nodes.find((candidate) => String(candidate.id) === id);
+  if (!node) throw new Error(`Missing node ${id}`);
+
+  const removed = new Set(names);
+  node.inputs = (node.inputs ?? []).filter((input) => !removed.has(input.name));
+}
+
+// main() 中，在文字模板转换前删除第二、第三参考图输入。
+removeNodeInputs(textWorkflow, '136', [
+  'ref_images.ref_image_1',
+  'ref_images.ref_image_2',
+]);
 ```
 
 文字模板离线应用 `127` 的 INT8 主模型、`194` 的 INT8 视频 VAE、`184` 的根目录音频 VAE、`145` 与 `261` 的根目录 LoRA、`115` 的 `0.7` MP、`136` 的 `match`，并把 `195` 与 `196` 的 `mode` 设为 `0`。音频模板保留已确认配置，只把 `42.inputs.prompt` 改为直接文本。
