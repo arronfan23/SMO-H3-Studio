@@ -243,6 +243,44 @@ describe('UI workflow conversion', () => {
     });
   });
 
+  test('only traverses real input links when a widget looks like an API link', async () => {
+    const toApiGraph = await loadWorkflowConverter();
+    const fixture = {
+      nodes: [
+        {
+          id: 1,
+          type: 'Unexpected',
+          mode: 0,
+          inputs: [],
+          widgets_values_named: {},
+        },
+        {
+          id: 2,
+          type: 'PrimitiveFloat',
+          mode: 0,
+          inputs: [],
+          widgets_values_named: { value: 7 },
+        },
+        {
+          id: 3,
+          type: 'Sink',
+          mode: 0,
+          inputs: [{ name: 'connected', type: 'FLOAT', link: 9 }],
+          widgets_values_named: { connected: 99, ordinary: ['1', 0] },
+        },
+      ],
+      links: [[9, 2, 0, 3, 0, 'FLOAT']],
+    };
+
+    const graph = toApiGraph(fixture, 3);
+
+    expect(graph['3'].inputs.ordinary).toEqual(['1', 0]);
+    expect(graph['3'].inputs.connected).toEqual(['2', 0]);
+    expect(graph['2'].inputs.value).toBe(7);
+    expect(graph).not.toHaveProperty('1');
+    expect(Object.keys(graph).sort()).toEqual(['2', '3']);
+  });
+
   test('rejects a required node in bypass mode', async () => {
     const toApiGraph = await loadWorkflowConverter();
     const fixture = createLinkedWorkflowFixture();

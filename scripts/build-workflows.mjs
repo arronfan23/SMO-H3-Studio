@@ -26,15 +26,6 @@ const TEXT_OVERRIDES = {
   '261': { lora_name: 'H3_speed_slider_1.1.safetensors' },
 };
 
-function isApiLink(value) {
-  return (
-    Array.isArray(value) &&
-    value.length === 2 &&
-    typeof value[0] === 'string' &&
-    Number.isInteger(value[1])
-  );
-}
-
 export function toApiGraph(workflow, outputId, overrides = {}) {
   const nodes = new Map(workflow.nodes.map((node) => [String(node.id), node]));
   const links = new Map(workflow.links.map((link) => [String(link[0]), link]));
@@ -81,21 +72,24 @@ export function toApiGraph(workflow, outputId, overrides = {}) {
       ),
     );
 
+    const dependencies = new Map();
     for (const input of nodeInputs) {
       if (input.link != null) {
-        inputs[input.name] = resolveApiLink(input.link);
+        const apiLink = resolveApiLink(input.link);
+        inputs[input.name] = apiLink;
+        dependencies.set(input.name, apiLink[0]);
       }
     }
 
-    Object.assign(inputs, overrides[id] ?? {});
+    const nodeOverrides = overrides[id] ?? {};
+    Object.assign(inputs, nodeOverrides);
+    for (const name of Object.keys(nodeOverrides)) dependencies.delete(name);
     for (const field of FRONTEND_ONLY_FIELDS) delete inputs[field];
 
     graph[id] = { class_type: node.type, inputs };
 
-    // Only final inputs are traversed, so direct prompts prune their old upstream branches.
-    for (const value of Object.values(inputs)) {
-      if (isApiLink(value)) visit(value[0]);
-    }
+    // Only real UI connections are dependencies; direct overrides sever their input links.
+    for (const dependencyId of dependencies.values()) visit(dependencyId);
   }
 
   visit(String(outputId));
