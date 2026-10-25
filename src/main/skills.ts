@@ -46,7 +46,21 @@ const SKILL_DESCRIPTIONS: Record<SkillName, string> = {
 };
 
 const GENERATION_MAX_TOKENS = 8192;
+const SYSTEM_PROMPT_MAX_CHARS = 72_000;
 const REFERENCE_LABEL_PATTERN = /^<(?:Picture|Video|Audio|Subject) [1-9]\d*>$/;
+const STYLE_REFERENCES: Partial<Record<SkillName, readonly string[]>> = {
+  '3d-animation-short-generator': [
+    'references/fallback-policy.md',
+    'references/model-selection.md',
+    'references/qc-checklist.md',
+    'references/shot-table-spec.md',
+    'references/storyboard-guidelines.md',
+  ],
+  'co-op-game-intro-generator': [
+    'references/h3-confirmation-image-template.md',
+    'references/h3-video-prompt-template.md',
+  ],
+};
 
 export interface ChatCompletionClient {
   chatCompletion(
@@ -165,14 +179,17 @@ export function parseModeSelection(text: string, imageCount: number): H3Mode {
     throw new Error('Automatic image mode routing requires one or two images');
   }
 
-  const normalized = text.trim().toLowerCase();
-  if ((choices as readonly string[]).includes(normalized)) {
-    return normalized as H3Mode;
-  }
-  const matches = choices.filter((mode) =>
-    new RegExp(`\\b${mode}\\b`, 'i').test(normalized),
+  const selected = parseWrappedRouterId(text);
+  return selected && (choices as readonly string[]).includes(selected)
+    ? (selected as H3Mode)
+    : 'ref2va';
+}
+
+function parseWrappedRouterId(text: string): string | null {
+  const match = /^[\s\p{P}\p{S}]*([a-z0-9]+(?:-[a-z0-9]+)*)[\s\p{P}\p{S}]*$/u.exec(
+    text.trim().toLowerCase(),
   );
-  return matches.length === 1 ? matches[0] : 'ref2va';
+  return match?.[1] ?? null;
 }
 
 export function routerPrompt(
@@ -199,12 +216,8 @@ export function routerPrompt(
 }
 
 export function parseSkillSelection(text: string): SkillName {
-  const normalized = text.trim().toLowerCase();
-  if (isSkillName(normalized)) {
-    return normalized;
-  }
-  const matches = SKILL_NAMES.filter((name) => normalized.includes(name));
-  return matches.length === 1 ? matches[0] : 'h3-prompt-writing';
+  const selected = parseWrappedRouterId(text);
+  return selected && isSkillName(selected) ? selected : 'h3-prompt-writing';
 }
 
 function read(path: string): string {
@@ -231,60 +244,104 @@ function referenceFiles(directory: string): string[] {
   return files.sort();
 }
 
-export function skillInstructions(
+interface SkillPromptResult {
+  skill: SkillName;
+  text: string;
+}
+
+class PromptBudgetError extends Error {}
+
+function assertPromptBudget(text: string, maxChars: number): void {
+  if (text.length > maxChars) {
+    throw new PromptBudgetError(
+      `H3 prompt required content exceeds ${maxChars} characters (required: ${text.length})`,
+    );
+  }
+}
+
+function skillReferenceNames(skill: SkillName, root: string): string[] {
+  const required = STYLE_REFERENCES[skill] ?? [];
+  for (const name of required) {
+    if (!existsSync(join(root, name))) {
+      throw new Error(`Bundled Skill reference is missing: ${skill}/${name}`);
+    }
+  }
+  const discovered = referenceFiles(join(root, 'references')).map((path) =>
+    relative(root, path).split(sep).join('/'),
+  );
+  return [...new Set([...required, ...discovered])].sort();
+}
+
+function loadSkillInstructions(
   skill: SkillName,
   mode: H3Mode,
-  maxChars = 72_000,
-  skillsRoot = defaultSkillsRoot(),
-): string {
+  maxChars: number,
+  skillsRoot: string,
+  includeStyleGuide: boolean,
+): SkillPromptResult {
   if (!isSkillName(skill)) {
     throw new Error(`Unknown skill: ${String(skill)}`);
   }
 
-  const baseRoot = resolve(skillsRoot);
-  const root = resolve(baseRoot, skill);
-  if (dirname(root) !== baseRoot || !existsSync(root)) {
-    throw new Error(`Bundled skill is missing: ${skill}`);
-  }
-
-  const parts = [
-    `# Official MiniMax Skill: ${skill}\n\n${read(join(root, 'SKILL.md'))}`,
-  ];
-  if (skill === 'h3-prompt-writing') {
-    const guide = mode === 'ref2va' ? 'ref-en.txt' : 'base-en.txt';
-    parts.push(
-      `# Required reference: ${guide}\n\n${read(join(root, 'references', guide))}`,
-    );
-  } else {
-    let used = parts[0].length;
-    for (const path of referenceFiles(join(root, 'references'))) {
-      const name = relative(root, path).split(sep).join('/');
-      const addition = `# Official reference: ${name}\n\n${read(path)}`;
-      if (used + addition.length > maxChars) {
-        break;
-      }
-      parts.push(addition);
-      used += addition.length;
+  try {
+    const baseRoot = resolve(skillsRoot);
+    const root = resolve(baseRoot, skill);
+    if (dirname(root) !== baseRoot || !existsSync(root)) {
+      throw new Error(`Bundled skill is missing: ${skill}`);
     }
+
+    const guide = mode === 'ref2va' ? 'ref-en.txt' : 'base-en.txt';
+    const required = [`# Official MiniMax Skill: ${skill}\n\n${read(join(root, 'SKILL.md'))}`];
+    if (skill === 'h3-prompt-writing') {
+      required.push(
+        `# Required reference: ${guide}\n\n${read(join(root, 'references', guide))}`,
+      );
+    } else if (includeStyleGuide) {
+      required.push(
+        `# Required final H3 prompt format: ${guide}\n\n${read(
+          join(baseRoot, 'h3-prompt-writing', 'references', guide),
+        )}`,
+      );
+    }
+
+    let text = required.join('\n\n');
+    assertPromptBudget(text, maxChars);
+    if (skill !== 'h3-prompt-writing') {
+      for (const name of skillReferenceNames(skill, root)) {
+        const addition = `# Official reference: ${name}\n\n${read(join(root, name))}`;
+        const candidate = `${text}\n\n${addition}`;
+        if (candidate.length > maxChars) {
+          break;
+        }
+        text = candidate;
+      }
+    }
+    return { skill, text };
+  } catch (error) {
+    if (skill !== 'h3-prompt-writing' && !(error instanceof PromptBudgetError)) {
+      return loadSkillInstructions(
+        'h3-prompt-writing',
+        mode,
+        maxChars,
+        skillsRoot,
+        false,
+      );
+    }
+    throw error;
   }
-  return parts.join('\n\n');
 }
 
-export function systemPrompt(
+export function skillInstructions(
   skill: SkillName,
   mode: H3Mode,
-  duration: number,
+  maxChars = SYSTEM_PROMPT_MAX_CHARS,
   skillsRoot = defaultSkillsRoot(),
 ): string {
-  let instructions = skillInstructions(skill, mode, 72_000, skillsRoot);
-  if (skill !== 'h3-prompt-writing') {
-    const guide = mode === 'ref2va' ? 'ref-en.txt' : 'base-en.txt';
-    instructions +=
-      `\n\n# Required final H3 prompt format: ${guide}\n\n` +
-      read(join(skillsRoot, 'h3-prompt-writing', 'references', guide));
-  }
+  return loadSkillInstructions(skill, mode, maxChars, skillsRoot, false).text;
+}
 
-  const localContract = `
+function localContract(mode: H3Mode, duration: number): string {
+  return `
 # Binding SMO single-pass output contract (overrides conflicting workflow instructions above)
 
 This is a single-pass MiniMax H3 video-prompt generator, not an interactive production workflow.
@@ -323,7 +380,34 @@ Return the final prompt only, with no Markdown fences, title, analysis, preface,
 or follow-up text. Preserve every user-provided <d>...</d> block, lyric, and visible scene text exactly. Treat no
 dialogue and no background music as independent constraints.
 `.trim();
-  return `${instructions}\n\n${localContract}`;
+}
+
+function buildSystemPrompt(
+  skill: SkillName,
+  mode: H3Mode,
+  duration: number,
+  skillsRoot: string,
+): SkillPromptResult {
+  const contract = localContract(mode, duration);
+  const instructionsBudget = SYSTEM_PROMPT_MAX_CHARS - contract.length - 2;
+  assertPromptBudget(contract, SYSTEM_PROMPT_MAX_CHARS);
+  const loaded = loadSkillInstructions(
+    skill,
+    mode,
+    instructionsBudget,
+    skillsRoot,
+    true,
+  );
+  return { skill: loaded.skill, text: `${loaded.text}\n\n${contract}` };
+}
+
+export function systemPrompt(
+  skill: SkillName,
+  mode: H3Mode,
+  duration: number,
+  skillsRoot = defaultSkillsRoot(),
+): string {
+  return buildSystemPrompt(skill, mode, duration, skillsRoot).text;
 }
 
 function validatedReferenceLabels(
@@ -345,10 +429,9 @@ function validatedReferenceLabels(
 
 function generationMessages(
   request: PolishRequest,
-  skill: SkillName,
   mode: H3Mode,
   referenceLabels: readonly string[],
-  skillsRoot: string,
+  system: string,
 ): LlmChatMessage[] {
   const user = [
     'Rewrite the original request into exactly one final MiniMax H3 prompt.',
@@ -360,7 +443,7 @@ function generationMessages(
     request.text,
   ].join('\n');
   return [
-    { role: 'system', content: systemPrompt(skill, mode, request.duration, skillsRoot) },
+    { role: 'system', content: system },
     { role: 'user', content: user },
   ];
 }
@@ -423,13 +506,9 @@ export class SkillsService {
       skill = request.skill;
     }
 
-    const messages = generationMessages(
-      request,
-      skill,
-      mode,
-      referenceLabels,
-      this.skillsRoot,
-    );
+    const prompt = buildSystemPrompt(skill, mode, request.duration, this.skillsRoot);
+    skill = prompt.skill;
+    const messages = generationMessages(request, mode, referenceLabels, prompt.text);
     const completeSilence = explicitlyRequestsSilence(request.text);
     let attempts = 1;
     let text = (

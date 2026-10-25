@@ -1,8 +1,14 @@
 // @vitest-environment node
 
-import { existsSync } from 'node:fs';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { LlmService, type LlmChatMessage } from '../../src/main/llm';
@@ -105,9 +111,27 @@ function readSnapshot(relativePath: string): string {
 }
 
 const upstreams: LocalLlmUpstream[] = [];
+const temporarySkillContainers: string[] = [];
+
+function useTemporarySkillsRoot(): string {
+  const container = mkdtempSync(join(tmpdir(), 'smo-h3-skills-'));
+  const root = join(container, 'skills');
+  cpSync(skillsRoot, root, { recursive: true });
+  temporarySkillContainers.push(container);
+  return root;
+}
 
 afterEach(async () => {
   await Promise.all(upstreams.splice(0).map((upstream) => upstream.close()));
+  for (const container of temporarySkillContainers.splice(0)) {
+    if (
+      dirname(container) !== tmpdir() ||
+      !basename(container).startsWith('smo-h3-skills-')
+    ) {
+      throw new Error(`Refusing to clean unexpected test directory: ${container}`);
+    }
+    rmSync(container, { recursive: true, force: true });
+  }
 });
 
 describe('official H3 skill snapshot', () => {
@@ -151,11 +175,57 @@ describe('official H3 skill snapshot', () => {
     expect(baseInstructions).not.toContain('# Required reference: ref-en.txt');
   });
 
-  test('honors the reference character budget without truncating the Skill document', () => {
-    const instructions = skillInstructions('3d-animation-short-generator', 't2va', 1);
+  test('rejects required content that exceeds the character budget', () => {
+    expect(() => skillInstructions('h3-prompt-writing', 'ref2va', 100)).toThrow(
+      /required content.*100 characters/i,
+    );
+  });
 
-    expect(instructions).toContain(readSnapshot('3d-animation-short-generator/SKILL.md'));
-    expect(instructions).not.toContain('# Official reference:');
+  test('caps both instructions and the complete Ref2VA system prompt at 72000 characters', () => {
+    const instructions = skillInstructions('3d-animation-short-generator', 'ref2va');
+    const prompt = systemPrompt('3d-animation-short-generator', 'ref2va', 8);
+
+    expect(instructions.length).toBeLessThanOrEqual(72_000);
+    expect(prompt.length).toBeLessThanOrEqual(72_000);
+    expect(prompt).toContain('# Binding SMO single-pass output contract');
+    for (const reference of EXPECTED_REFERENCES['3d-animation-short-generator']) {
+      const heading = `# Official reference: ${reference}`;
+      if (prompt.includes(heading)) {
+        expect(prompt).toContain(
+          readSnapshot(`3d-animation-short-generator/${reference}`),
+        );
+      }
+    }
+  });
+
+  test.each([
+    '3d-animation-short-generator/SKILL.md',
+    '3d-animation-short-generator/references/qc-checklist.md',
+  ])('falls back to the general Skill when %s cannot be read', (missingDocument) => {
+    const root = useTemporarySkillsRoot();
+    rmSync(join(root, missingDocument));
+
+    const instructions = skillInstructions(
+      '3d-animation-short-generator',
+      'ref2va',
+      72_000,
+      root,
+    );
+    const prompt = systemPrompt('3d-animation-short-generator', 'ref2va', 8, root);
+
+    for (const content of [instructions, prompt]) {
+      expect(content).toContain('# Official MiniMax Skill: h3-prompt-writing');
+      expect(content).not.toContain('# Official MiniMax Skill: 3d-animation-short-generator');
+    }
+  });
+
+  test('throws when the general Skill itself cannot be read', () => {
+    const root = useTemporarySkillsRoot();
+    rmSync(join(root, 'h3-prompt-writing/SKILL.md'));
+
+    expect(() =>
+      skillInstructions('h3-prompt-writing', 'ref2va', 72_000, root),
+    ).toThrow(/h3-prompt-writing/);
   });
 
   test('adds the required final H3 guide and single-pass SMO contract for styles', () => {
@@ -185,20 +255,35 @@ describe('H3 mode and Skill routing', () => {
   });
 
   test('parses only image-appropriate modes and falls back to Ref2VA', () => {
-    expect(parseModeSelection('Use I2VA.', 1)).toBe('i2va');
-    expect(parseModeSelection('fl2va', 2)).toBe('fl2va');
+    expect(parseModeSelection('I2VA.', 1)).toBe('i2va');
+    expect(parseModeSelection('"fl2va"', 2)).toBe('fl2va');
     expect(parseModeSelection('i2va', 2)).toBe('ref2va');
     expect(parseModeSelection('unintelligible', 1)).toBe('ref2va');
   });
+
+  test.each(['Do not use i2va', 'Use I2VA.', 'i2va please', 'The mode is i2va'])(
+    'rejects a non-exact mode router response: %s',
+    (response) => {
+      expect(parseModeSelection(response, 1)).toBe('ref2va');
+    },
+  );
 
   test('falls back to the general Skill when automatic selection cannot be parsed', () => {
     expect(parseSkillSelection('not-a-skill')).toBe('h3-prompt-writing');
     expect(parseSkillSelection('Use h3-prompt-writing or brand-promo-video-generator')).toBe(
       'h3-prompt-writing',
     );
-    expect(parseSkillSelection('BRAND-PROMO-VIDEO-GENERATOR')).toBe(
+    expect(parseSkillSelection('`BRAND-PROMO-VIDEO-GENERATOR`')).toBe(
       'brand-promo-video-generator',
     );
+  });
+
+  test.each([
+    'Do not use brand-promo-video-generator',
+    'brand-promo-video-generator please',
+    'Use brand-promo-video-generator.',
+  ])('rejects a non-exact Skill router response: %s', (response) => {
+    expect(parseSkillSelection(response)).toBe('h3-prompt-writing');
   });
 
   test('routes one or two images through the LLM only when auto mode is requested', async () => {
@@ -282,6 +367,26 @@ describe('H3 mode and Skill routing', () => {
 
     expect(result.skill).toBe('h3-prompt-writing');
     expect(llm.calls).toHaveLength(2);
+  });
+
+  test('reports the general Skill actually used after a style loading failure', async () => {
+    const root = useTemporarySkillsRoot();
+    rmSync(join(root, 'brand-promo-video-generator/SKILL.md'));
+    const llm = new FakeChatCompletion([refPrompt()]);
+    const service = new SkillsService(llm, root);
+
+    const result = await service.polish(profile, {
+      text: 'Animate this presenter photo.',
+      duration: 8,
+      imageCount: 1,
+      skill: 'brand-promo-video-generator',
+    });
+
+    expect(result.skill).toBe('h3-prompt-writing');
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0].messages[0].content).toContain(
+      '# Official MiniMax Skill: h3-prompt-writing',
+    );
   });
 });
 

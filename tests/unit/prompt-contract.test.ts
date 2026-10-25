@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from 'vitest';
 import {
+  explicitlyRequestsSilence,
   validatePrompt,
   type H3Mode,
 } from '../../src/shared/prompt-contract';
@@ -138,6 +139,33 @@ describe('H3 timeline validation', () => {
     );
     expect(validatePrompt(text, 't2va', 12)).toEqual([]);
   });
+
+  test.each([
+    {
+      scenario: 'a later shot has no timestamp',
+      mode: 't2va' as const,
+      text: basePrompt('[Shot 1] Wide shot. [Shot 2] The camera cuts closer.'),
+    },
+    {
+      scenario: 'a later shot uses a one-digit minute',
+      mode: 'ref2va' as const,
+      text: refPrompt('[Shot 1] Wide shot. [Shot 2] At 0:03.000, the camera cuts closer.'),
+    },
+  ])('rejects $scenario', ({ mode, text }) => {
+    expect(joinedIssues(text, mode)).toContain(
+      'Later shots must begin with At MM:SS.mmm',
+    );
+  });
+
+  test('ignores timestamps inside dialogue and visible scene text', () => {
+    const originalDialogue = '<d>[English] At 00:12.000</d>';
+    const original = `${originalDialogue} A sign reads "At 00:12.000"`;
+    const text = basePrompt(
+      `[Shot 1] A sign reads "At 00:12.000" while the presenter (S1) says: ${originalDialogue} The final 2 seconds contain no narration or dialogue; only ambient sound and picture remain.`,
+    );
+
+    expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
 });
 
 describe('H3 dialogue, wrappers, and narration tail', () => {
@@ -154,6 +182,55 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
     const changed = dialogue.replace('你好，世界！', '你好世界!');
     const text = basePrompt(`[Shot 1] The presenter (S1) says: ${changed} ${tail}`);
     expect(joinedIssues(text, 't2va', 12, original)).toContain('Dialogue was modified');
+  });
+
+  test.each([
+    {
+      scenario: 'reordered blocks',
+      original: '<d>[English] One.</d> then <d>[English] Two.</d>',
+      output: '<d>[English] Two.</d> then <d>[English] One.</d>',
+    },
+    {
+      scenario: 'collapsed duplicate blocks',
+      original: '<d>[English] Same.</d> and <d>[English] Same.</d>',
+      output: '<d>[English] Same.</d>',
+    },
+    {
+      scenario: 'an extra duplicate block',
+      original: '<d>[English] Same.</d>',
+      output: '<d>[English] Same.</d> and <d>[English] Same.</d>',
+    },
+  ])('rejects dialogue with $scenario', ({ original, output }) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${output} ${tail}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Dialogue was modified');
+  });
+
+  test.each([
+    {
+      scenario: 'changed text',
+      original: 'A sign reads "营业中"',
+      output: 'A sign reads "Closed"',
+    },
+    {
+      scenario: 'deleted text',
+      original: 'A sign reads "营业中"',
+      output: 'A blank sign',
+    },
+    {
+      scenario: 'reordered text',
+      original: 'Signs read "One" and "Two"',
+      output: 'Signs read "Two" and "One"',
+    },
+    {
+      scenario: 'collapsed duplicate text',
+      original: 'Two signs read "Same" and "Same"',
+      output: 'One sign reads "Same"',
+    },
+  ])('rejects visible scene text with $scenario', ({ original, output }) => {
+    const text = basePrompt(`[Shot 1] ${output}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain(
+      'Visible text was modified',
+    );
   });
 
   test('reports a missing narration tail when dialogue is present', () => {
@@ -173,6 +250,32 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
       `[Shot 1] The presenter (S1) says: ${dialogue} All speech stops before the last two seconds, which retain only music and visuals.`,
     );
     expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
+
+  test.each([
+    'The final 2 seconds contain only music and dialogue.',
+    'The final 2 seconds contain only music and singing.',
+  ])('rejects unnegated vocals in the tail declaration: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
+  });
+
+  test.each([
+    {
+      scenario: 'dialogue',
+      original: '<d>[English] The final 2 seconds contain no dialogue.</d>',
+      output: '<d>[English] The final 2 seconds contain no dialogue.</d>',
+    },
+    {
+      scenario: 'visible text',
+      original:
+        '<d>[English] Hello.</d> A sign reads "The final 2 seconds contain only music."',
+      output:
+        '<d>[English] Hello.</d> A sign reads "The final 2 seconds contain only music."',
+    },
+  ])('does not accept a tail declaration inside $scenario', ({ original, output }) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${output}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
   });
 
   test('rejects Markdown fences', () => {
@@ -211,6 +314,24 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
     );
   });
 
+  test.each([
+    {
+      scenario: 'an appended sentence',
+      text: `${basePrompt()}\n\nThis prompt uses a static camera.`,
+    },
+    {
+      scenario: 'a description-field sentence',
+      text: basePrompt('[Shot 1] A static camera holds. This prompt uses a static camera.'),
+    },
+  ])('rejects an untitled model self-description in $scenario', ({ text }) => {
+    expect(joinedIssues(text, 't2va')).toContain('Remove explanations');
+  });
+
+  test('accepts ordinary description prose that is not prompt self-reference', () => {
+    const text = basePrompt('[Shot 1] This character uses a static camera prop.');
+    expect(validatePrompt(text, 't2va', 12)).toEqual([]);
+  });
+
   test('ignores questions inside preserved dialogue and visible scene text', () => {
     const originalDialogue = '<d>[English] Why?</d>';
     const text = basePrompt(
@@ -222,6 +343,19 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
 
 describe('H3 complete-silence requests', () => {
   const silenceRequest = '完全静音，不要任何声音。';
+
+  test.each([
+    'Not a silent video',
+    'No sound in the opening shot',
+    'A sign reads "No Sound"',
+    '<d>[English] No sound.</d>',
+  ])('does not treat a negated, local, or protected declaration as global silence: %s', (text) => {
+    expect(explicitlyRequestsSilence(text)).toBe(false);
+  });
+
+  test.each(['No sound.', '完全静音'])('recognizes a global silence declaration: %s', (text) => {
+    expect(explicitlyRequestsSilence(text)).toBe(true);
+  });
 
   test('accepts N/A for both audio sections and no audible events', () => {
     const text = basePrompt(
@@ -273,10 +407,22 @@ describe('H3 complete-silence requests', () => {
     '[Shot 1] The singer performs a song.',
     '[Shot 1] Ambient room tone fills the studio.',
     '[Shot 1] Soft piano music.',
+    '[Shot 1] No dialogue, music plays throughout.',
+    '[Shot 1] Rain patters against the window while thunder rumbles.',
+    '[Shot 1] A pianist plays the piano.',
   ])('rejects additional audible expression under complete silence: %s', (description) => {
     const text = basePrompt(description, 'N/A', 'N/A');
     expect(joinedIssues(text, 't2va', 12, silenceRequest)).toContain(
       'Complete silence was requested: remove all audible events',
     );
+  });
+
+  test('allows a music score as a purely visual object under complete silence', () => {
+    const text = basePrompt(
+      '[Shot 1] A music score rests closed on the piano.',
+      'N/A',
+      'N/A',
+    );
+    expect(validatePrompt(text, 't2va', 12, silenceRequest)).toEqual([]);
   });
 });
