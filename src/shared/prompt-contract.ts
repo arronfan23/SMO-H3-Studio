@@ -19,6 +19,7 @@ const REF_FIELDS = [
 
 const DIALOGUE_PATTERN = /<d>[\s\S]*?<\/d>/g;
 const VISIBLE_TEXT_PATTERN = /"[^"\r\n]*"/g;
+const VISIBLE_TEXT_CONTEXT_PATTERN = /\b(?:signs?|reads?|banners?|labels?|subtitles?|titles?|neon|text|written|displays?|captions?|logos?|posters?)\b/i;
 const FIELD_LABEL_PATTERN = /^[ \t]*(?:integrated_multimodal_description|subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music):/gim;
 const EXPLANATION_PREFIX_PATTERN = /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?(?:explanation|analysis|notes?|preface|epilogue)(?:\*\*)?[ \t]*(?::|-|$)/im;
 const SELF_REFERENTIAL_PROMPT_PATTERN = /\bthis\s+(?:final\s+)?prompt\b/i;
@@ -37,6 +38,10 @@ const NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
 );
 const STOPPED_TAIL_VOCAL_PATTERN = new RegExp(
   String.raw`\b${VOCAL_WORDS}\b[^.\n;]{0,80}\b(?:ends?|stops?|finishes?|concludes?)\b[^.\n;]{0,40}\b(?:before|prior\s+to)\b`,
+  'i',
+);
+const VOCAL_DURING_TAIL_PATTERN = new RegExp(
+  String.raw`\b(?:${VOCAL_WORDS}|says?|said|speaks?|speaking|narrates?|narrating|sings?|singing|shouts?|shouting|whispers?|whispering|chants?|chanting|hums?|humming)\b[^.\n;]{0,60}\b(?:during|throughout|in|into)\s+(?:the\s+)?${FINAL_TWO_SECONDS}\b`,
   'i',
 );
 const ONLY_ALLOWED_TAIL_PATTERN = new RegExp(
@@ -65,6 +70,8 @@ const SILENCE_REQUEST_PATTERNS = [
 ];
 const NEGATED_SILENCE_PATTERN = /\b(?:not|isn't|is\s+not|wasn't|never)\s+(?:a\s+)?(?:completely\s+|entirely\s+)?(?:silent|silence|muted)\b/i;
 const LOCAL_SILENCE_SCOPE_PATTERN = /\b(?:in|during|at|for)\s+(?:the\s+)?(?:opening|closing|first|last|beginning|ending|final|start|shot\s+\d+|scene\s+\d+|\d+(?:st|nd|rd|th)?\s+seconds?)\b/i;
+const CHINESE_NEGATED_SILENCE_PATTERN = /(?:不是|并非)\s*(?:完全|全程)?\s*(?:静音|无声视频|无声)/;
+const CHINESE_LOCAL_SILENCE_PATTERN = /(?:仅|只)?\s*(?:开头|第一个镜头|第1个镜头|结尾|最后)[^，。；\n]{0,12}(?:完全静音|全程静音|静音|无声)/;
 const CLAUSE_SEPARATOR_PATTERN = /[,;\n]+|(?<=[.!?])\s+/;
 
 const MUSIC_TERM = String.raw`(?:music|soundtrack|score|songs?|melody|melodies|lyrics)`;
@@ -98,7 +105,9 @@ export function explicitlyRequestsSilence(text: string): boolean {
   return scope.split(/[.!?。！？\n]+|\b(?:but|however)\b/i).some((clause) => {
     if (
       NEGATED_SILENCE_PATTERN.test(clause) ||
-      LOCAL_SILENCE_SCOPE_PATTERN.test(clause)
+      LOCAL_SILENCE_SCOPE_PATTERN.test(clause) ||
+      CHINESE_NEGATED_SILENCE_PATTERN.test(clause) ||
+      CHINESE_LOCAL_SILENCE_PATTERN.test(clause)
     ) {
       return false;
     }
@@ -121,48 +130,108 @@ function extractFieldValue(text: string, field: string): string {
   return nextField ? remainder.slice(0, nextField.index) : remainder;
 }
 
-function protectedItemsMatch(
-  original: string,
-  output: string,
-  pattern: RegExp,
-): boolean {
-  const expected = [...original.matchAll(pattern)].map((match) => match[0]);
+interface TextSpan {
+  value: string;
+  index: number;
+}
+
+function maskDialogue(text: string): string {
+  return text.replace(DIALOGUE_PATTERN, (match) => ' '.repeat(match.length));
+}
+
+function visibleTextSpans(text: string): TextSpan[] {
+  const scope = maskDialogue(text);
+  const spans: TextSpan[] = [];
+  for (const match of scope.matchAll(VISIBLE_TEXT_PATTERN)) {
+    const index = match.index;
+    if (index === undefined) {
+      continue;
+    }
+    const before = scope.slice(0, index).replace(VISIBLE_TEXT_PATTERN, ' ');
+    const sentenceStart =
+      Math.max(
+        ...['.', '!', '?', '\n', '。', '！', '？'].map((mark) =>
+          before.lastIndexOf(mark),
+        ),
+      ) + 1;
+    if (VISIBLE_TEXT_CONTEXT_PATTERN.test(before.slice(sentenceStart))) {
+      spans.push({ value: match[0], index });
+    }
+  }
+  return spans;
+}
+
+function sequencesMatch(expected: readonly string[], actual: readonly string[]): boolean {
   if (expected.length === 0) {
     return true;
   }
-  const actual = [...output.matchAll(pattern)].map((match) => match[0]);
   return (
     expected.length === actual.length &&
     expected.every((value, index) => value === actual[index])
   );
 }
 
+function protectedItemsMatch(
+  original: string,
+  output: string,
+  pattern: RegExp,
+): boolean {
+  return sequencesMatch(
+    [...original.matchAll(pattern)].map((match) => match[0]),
+    [...output.matchAll(pattern)].map((match) => match[0]),
+  );
+}
+
+function visibleTextItemsMatch(original: string, output: string): boolean {
+  return sequencesMatch(
+    visibleTextSpans(original).map((span) => span.value),
+    visibleTextSpans(output).map((span) => span.value),
+  );
+}
+
 function stripDialogueAndVisibleText(text: string): string {
-  return text.replace(DIALOGUE_PATTERN, ' ').replace(VISIBLE_TEXT_PATTERN, ' ');
+  let scope = text;
+  const spans = visibleTextSpans(text);
+  for (let index = spans.length - 1; index >= 0; index -= 1) {
+    const span = spans[index];
+    scope = `${scope.slice(0, span.index)} ${scope.slice(span.index + span.value.length)}`;
+  }
+  return scope.replace(DIALOGUE_PATTERN, ' ');
 }
 
 function hasNonNarrationTail(text: string): boolean {
   const scope = stripDialogueAndVisibleText(text);
-  for (const clause of scope.split(CLAUSE_SEPARATOR_PATTERN)) {
-    const tailMatch = TAIL_PERIOD_PATTERN.exec(clause);
-    if (!tailMatch) {
+  let foundValidDeclaration = false;
+  for (const sentence of scope.split(/(?<=[.!?])\s+|\n+/)) {
+    const clauses = sentence.split(/[,;]+/);
+    if (!clauses.some((clause) => TAIL_PERIOD_PATTERN.test(clause))) {
       continue;
     }
-    const tail = clause.slice(tailMatch.index);
-    const hasNegation = NEGATED_TAIL_VOCAL_PATTERN.test(tail);
-    const hasStoppedVocals = STOPPED_TAIL_VOCAL_PATTERN.test(clause);
-    const hasOnlyAllowedContent = ONLY_ALLOWED_TAIL_PATTERN.test(clause);
-    if (!hasNegation && !hasStoppedVocals && !hasOnlyAllowedContent) {
-      continue;
-    }
-    const remaining = tail
-      .replace(new RegExp(NEGATED_TAIL_VOCAL_PATTERN.source, 'gi'), '')
-      .replace(new RegExp(STOPPED_TAIL_VOCAL_PATTERN.source, 'gi'), '');
-    if (!TAIL_VOCAL_EVENT_PATTERN.test(remaining)) {
-      return true;
+    for (const clause of clauses) {
+      const tailMatch = TAIL_PERIOD_PATTERN.exec(clause);
+      const tail = tailMatch ? clause.slice(tailMatch.index) : clause;
+      const remaining = tail
+        .replace(new RegExp(NEGATED_TAIL_VOCAL_PATTERN.source, 'gi'), '')
+        .replace(new RegExp(STOPPED_TAIL_VOCAL_PATTERN.source, 'gi'), '');
+      if (
+        TAIL_VOCAL_EVENT_PATTERN.test(remaining) ||
+        (tailMatch && VOCAL_DURING_TAIL_PATTERN.test(clause))
+      ) {
+        return false;
+      }
+      if (!tailMatch) {
+        continue;
+      }
+      if (
+        NEGATED_TAIL_VOCAL_PATTERN.test(tail) ||
+        STOPPED_TAIL_VOCAL_PATTERN.test(clause) ||
+        ONLY_ALLOWED_TAIL_PATTERN.test(clause)
+      ) {
+        foundValidDeclaration = true;
+      }
     }
   }
-  return false;
+  return foundValidDeclaration;
 }
 
 function validateShotTimestamps(
@@ -172,7 +241,7 @@ function validateShotTimestamps(
 ): string[] {
   const field = mode === 'ref2va' ? REF_FIELDS[3] : BASE_FIELDS[0];
   const description = stripDialogueAndVisibleText(extractFieldValue(text, field));
-  let previous = -1;
+  let previous = 0;
   for (const match of description.matchAll(SHOT_HEAD_PATTERN)) {
     if (Number(match[1]) <= 1) {
       continue;
@@ -302,7 +371,7 @@ export function validatePrompt(
   if (!protectedItemsMatch(original, stripped, DIALOGUE_PATTERN)) {
     issues.push('Dialogue was modified');
   }
-  if (!protectedItemsMatch(original, stripped, VISIBLE_TEXT_PATTERN)) {
+  if (!visibleTextItemsMatch(original, stripped)) {
     issues.push('Visible text was modified');
   }
 

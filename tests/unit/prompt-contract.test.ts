@@ -140,6 +140,13 @@ describe('H3 timeline validation', () => {
     expect(validatePrompt(text, 't2va', 12)).toEqual([]);
   });
 
+  test('rejects zero as the first later-shot timestamp', () => {
+    const text = basePrompt('[Shot 1] Wide shot. [Shot 2] At 00:00.000, cut closer.');
+    expect(joinedIssues(text, 't2va')).toContain(
+      'Shot timestamps must be strictly increasing',
+    );
+  });
+
   test.each([
     {
       scenario: 'a later shot has no timestamp',
@@ -175,6 +182,14 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
 
   test('preserves original dialogue blocks byte for byte', () => {
     const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${tail}`);
+    expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
+
+  test('does not treat ordinary quoted speech as visible scene text', () => {
+    const original = 'The presenter says "Hello."';
+    const text = basePrompt(
+      `[Shot 1] The presenter (S1) says: <d>[English] Hello.</d> ${tail}`,
+    );
     expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
   });
 
@@ -278,6 +293,15 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
     expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
   });
 
+  test.each([
+    'The final 2 seconds contain no narration, but dialogue continues.',
+    'The final 2 seconds contain no narration; dialogue continues.',
+    `${tail} Dialogue continues during the final 2 seconds.`,
+  ])('rejects a conflicting tail declaration even when another declaration is valid: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
+  });
+
   test('rejects Markdown fences', () => {
     expect(joinedIssues(`\`\`\`text\n${basePrompt()}\n\`\`\``, 't2va')).toContain(
       'Remove Markdown code fences',
@@ -349,6 +373,15 @@ describe('H3 complete-silence requests', () => {
     'No sound in the opening shot',
     'A sign reads "No Sound"',
     '<d>[English] No sound.</d>',
+    '开头完全静音，之后加入环境声。',
+    '不是完全静音，保留环境声。',
+    '不是无声视频，保留环境声。',
+    '并非完全静音',
+    '并非无声视频',
+    '仅开头完全静音',
+    '第一个镜头完全静音',
+    '结尾完全静音',
+    '最后完全静音',
   ])('does not treat a negated, local, or protected declaration as global silence: %s', (text) => {
     expect(explicitlyRequestsSilence(text)).toBe(false);
   });
