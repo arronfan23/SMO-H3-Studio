@@ -192,10 +192,29 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
     );
   });
 
-  test('does not mistake a question inside preserved dialogue for a follow-up request', () => {
-    const originalDialogue = '<d>[English] Can you hear me?</d>';
+  test('rejects an open question appended after an otherwise valid prompt', () => {
+    const text = `${basePrompt()}\n\nWhat is the preferred ending?`;
+    expect(joinedIssues(text, 't2va')).toContain(
+      'Remove all questions, clarifications, confirmations, approval gates, and next-step requests',
+    );
+  });
+
+  test.each([
+    'Explanation: This prompt uses a static camera.',
+    'Analysis: The shot is intentionally restrained.',
+    'Notes: This is an explanatory note.',
+    'Preface: This is extra context.',
+    'Epilogue: This is extra commentary.',
+  ])('rejects an explanatory section appended after a valid prompt: %s', (suffix) => {
+    expect(joinedIssues(`${basePrompt()}\n\n${suffix}`, 't2va')).toContain(
+      'Remove explanations',
+    );
+  });
+
+  test('ignores questions inside preserved dialogue and visible scene text', () => {
+    const originalDialogue = '<d>[English] Why?</d>';
     const text = basePrompt(
-      `[Shot 1] The presenter (S1) says: ${originalDialogue} ${tail}`,
+      `[Shot 1] A sign reads "Can you hear me?" The presenter (S1) says: ${originalDialogue} ${tail}`,
     );
     expect(validatePrompt(text, 't2va', 12, originalDialogue)).toEqual([]);
   });
@@ -236,5 +255,28 @@ describe('H3 complete-silence requests', () => {
 
   test('does not treat a no-background-music request as complete silence', () => {
     expect(validatePrompt(basePrompt(), 't2va', 12, 'No background music.')).toEqual([]);
+  });
+
+  test('treats No sound. as complete silence and rejects wind and music', () => {
+    const text = basePrompt(
+      '[Shot 1] Wind howls loudly while soft music plays.',
+      'N/A',
+      'N/A',
+    );
+    expect(joinedIssues(text, 't2va', 12, 'No sound.')).toContain(
+      'Complete silence was requested: remove all audible events',
+    );
+  });
+
+  test.each([
+    '[Shot 1] Wind howls loudly across the field.',
+    '[Shot 1] The singer performs a song.',
+    '[Shot 1] Ambient room tone fills the studio.',
+    '[Shot 1] Soft piano music.',
+  ])('rejects additional audible expression under complete silence: %s', (description) => {
+    const text = basePrompt(description, 'N/A', 'N/A');
+    expect(joinedIssues(text, 't2va', 12, silenceRequest)).toContain(
+      'Complete silence was requested: remove all audible events',
+    );
   });
 });

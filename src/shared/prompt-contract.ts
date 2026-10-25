@@ -19,6 +19,9 @@ const REF_FIELDS = [
 
 const DIALOGUE_PATTERN = /<d>[\s\S]*?<\/d>/g;
 const TIMESTAMP_PATTERN = /\bAt\s+(\d{2}):(\d{2})\.(\d{3})\b/g;
+const VISIBLE_TEXT_PATTERN = /"[^"\r\n]*"/g;
+const FIELD_LABEL_PATTERN = /^[ \t]*(?:integrated_multimodal_description|subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music):/gim;
+const EXPLANATION_PREFIX_PATTERN = /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?(?:explanation|analysis|notes?|preface|epilogue)(?:\*\*)?[ \t]*(?::|-|$)/im;
 const FINAL_TWO_SECONDS = String.raw`\b(?:final|last)\s+(?:2|two)\s+seconds?\b`;
 const VOCAL_WORDS = String.raw`(?:narration|dialogue|speech|voiceover|voice-over|spoken\s+(?:words?|content)|vocals?)`;
 const NON_NARRATION_TAIL_PATTERNS = [
@@ -52,18 +55,22 @@ const INTERACTIVE_OUTPUT_PATTERNS = [
 ];
 
 const SILENCE_REQUEST_PATTERNS = [
-  /\b(?:completely silent|complete silence|silent video|muted video|no audio|no sound at all|without any (?:audio|sound))\b/i,
+  /\b(?:completely silent|complete silence|silent video|muted video|no audio|no sound(?: at all)?|without any (?:audio|sound))\b/i,
   /(?:完全静音|全程静音|静音视频|视频静音|无声视频|不要任何声音|不需要任何声音)/,
 ];
 
 const AUDIBLE_EVENT_PATTERNS = [
-  /<d>[\s\S]*?<\/d>/,
-  /\b(?:says?|said|speaks?|speaking|narrates?|narrating|sings?|singing|shouts?|shouting|whispers?|whispering|chants?|chanting)\b/i,
-  /\b(?:footsteps?|doorbells?|applause|laughter|panting|heartbeats?)\b/i,
-  /\b(?:slams?|slamming|bangs?|banging|crashes?|crashing|clicks?|clicking|claps?|clapping|knocks?|knocking|rings?|ringing|rustles?|rustling|echoes?|echoing|beeps?|beeping|barks?|barking)\b/i,
+  /\b(?:says?|said|speaks?|speaking|narrates?|narrating|sings?|singing|shouts?|shouting|whispers?|whispering|chants?|chanting|hums?|humming)\b/i,
+  /\b(?:footsteps?|doorbells?|applause|laughter|panting|heartbeats?|sounds?|audio|noise|ambience|ambiance|ambient\s+(?:sound|noise)|room\s+tone|soundscape|sound\s+effects?|music|soundtrack|songs?|melody|melodies|lyrics|voices?|narration|dialogue|speech|vocals?)\b/i,
+  /\b(?:slams?|slamming|bangs?|banging|crashes?|crashing|clicks?|clicking|claps?|clapping|knocks?|knocking|rings?|ringing|rustles?|rustling|echoes?|echoing|beeps?|beeping|barks?|barking|howls?|howling|whistles?|whistling|roars?|roaring)\b/i,
   /\b(?:music|soundtrack|score|ambience|ambiance|room\s+tone|sound\s+effects?)\s+(?:plays?|playing|continues?|continuing|swells?|swelling|fades?|fading|builds?|building)\b/i,
-  /\b(?:retains?|contains?|includes?)\s+only\s+(?:ambient|ambience|ambiance|environmental|music|sound|audio)\b/i,
+  /\b(?:loudly|audibly)\b/i,
 ];
+const SILENT_AUDIO_TERM = String.raw`(?:audible\s+(?:activity|events?)|activity|events?|sounds?|audio|music|ambience|ambiance|room\s+tone|soundscape|songs?|melody|melodies|lyrics|dialogue|narration|speech|voices?|vocals?|footsteps?|noise)`;
+const SILENT_ASSERTION_PATTERN = new RegExp(
+  String.raw`\b(?:no|without|free\s+of)\s+(?:any\s+)?${SILENT_AUDIO_TERM}(?:\s*(?:,|or|and)\s*(?:any\s+)?${SILENT_AUDIO_TERM})*`,
+  'gi',
+);
 
 export function explicitlyRequestsSilence(text: string): boolean {
   return SILENCE_REQUEST_PATTERNS.some((pattern) => pattern.test(text));
@@ -78,13 +85,48 @@ function hasNonNarrationTail(text: string): boolean {
   return NON_NARRATION_TAIL_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function stripDialogueAndVisibleText(text: string): string {
+  return text.replace(DIALOGUE_PATTERN, ' ').replace(VISIBLE_TEXT_PATTERN, ' ');
+}
+
+function validateInteractionAndExplanation(text: string): string[] {
+  const scope = stripDialogueAndVisibleText(text);
+  const issues: string[] = [];
+  if (
+    /[?？]/.test(scope) ||
+    INTERACTIVE_OUTPUT_PATTERNS.some((pattern) => pattern.test(scope))
+  ) {
+    issues.push(
+      'Remove all questions, clarifications, confirmations, approval gates, and next-step requests',
+    );
+  }
+  if (EXPLANATION_PREFIX_PATTERN.test(scope)) {
+    issues.push('Remove explanations, analysis, notes, prefaces, and epilogues');
+  }
+  return issues;
+}
+
 function hasAudibleEvent(text: string): boolean {
-  const withoutSilentAudioFields = text
-    .replace(/^overall_soundscape:[ \t]*N\/A[ \t]*$/gim, '')
-    .replace(/^non_diegetic_music:[ \t]*N\/A[ \t]*$/gim, '');
-  return AUDIBLE_EVENT_PATTERNS.some((pattern) =>
-    pattern.test(withoutSilentAudioFields),
-  );
+  const scope = stripDialogueAndVisibleText(text)
+    .replace(FIELD_LABEL_PATTERN, '')
+    .replace(/\bN\/A\b/g, '')
+    .replace(SILENT_ASSERTION_PATTERN, '');
+  return AUDIBLE_EVENT_PATTERNS.some((pattern) => pattern.test(scope));
+}
+
+function validateCompleteSilence(text: string): string[] {
+  const issues: string[] = [];
+  const soundscapeIsSilent = /^overall_soundscape:[ \t]*N\/A[ \t]*$/im.test(text);
+  const musicIsSilent = /^non_diegetic_music:[ \t]*N\/A[ \t]*$/im.test(text);
+  if (!soundscapeIsSilent || !musicIsSilent) {
+    issues.push(
+      'Complete silence was requested: set both overall_soundscape and non_diegetic_music exactly to N/A',
+    );
+  }
+  if (/<d>[\s\S]*?<\/d>/.test(text) || hasAudibleEvent(text)) {
+    issues.push('Complete silence was requested: remove all audible events');
+  }
+  return issues;
 }
 
 export function validatePrompt(
@@ -104,12 +146,7 @@ export function validatePrompt(
     issues.push('Remove Markdown code fences');
   }
 
-  const interactionScope = stripped.replace(DIALOGUE_PATTERN, '');
-  if (INTERACTIVE_OUTPUT_PATTERNS.some((pattern) => pattern.test(interactionScope))) {
-    issues.push(
-      'Remove all questions, clarifications, confirmations, approval gates, and next-step requests',
-    );
-  }
+  issues.push(...validateInteractionAndExplanation(stripped));
 
   const fields = mode === 'ref2va' ? REF_FIELDS : BASE_FIELDS;
   const positions = fields.map((field) => fieldPosition(stripped, field));
@@ -168,16 +205,7 @@ export function validatePrompt(
   }
 
   if (requireCompleteSilence) {
-    const soundscapeIsSilent = /^overall_soundscape:[ \t]*N\/A[ \t]*$/im.test(stripped);
-    const musicIsSilent = /^non_diegetic_music:[ \t]*N\/A[ \t]*$/im.test(stripped);
-    if (!soundscapeIsSilent || !musicIsSilent) {
-      issues.push(
-        'Complete silence was requested: set both overall_soundscape and non_diegetic_music exactly to N/A',
-      );
-    }
-    if (hasAudibleEvent(stripped)) {
-      issues.push('Complete silence was requested: remove all audible events');
-    }
+    issues.push(...validateCompleteSilence(stripped));
   }
 
   return issues;
