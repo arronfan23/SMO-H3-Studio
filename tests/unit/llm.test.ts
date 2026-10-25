@@ -232,6 +232,23 @@ describe('LlmService failures and privacy', () => {
     );
   });
 
+  test(
+    'aborts a response body that stalls after headers',
+    async () => {
+      const upstream = await useUpstream((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.write(`{"data":[{"id":"${API_KEY}"}`);
+        // Keep the body open after flushing incomplete JSON.
+      });
+
+      await expectSafeRejection(
+        new LlmService(25).listModels({ baseUrl: upstream.baseUrl, apiKey: API_KEY }),
+        /timed out/i,
+      );
+    },
+    500,
+  );
+
   test('reports a connection failure without exposing credentials', async () => {
     const upstream = await useUpstream((_request, response) => {
       response.end();
