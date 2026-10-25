@@ -4,6 +4,8 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import type { Configuration } from 'app-builder-lib';
+import { loadConfig } from 'app-builder-lib/out/util/config/load';
 import type { BrowserWindowConstructorOptions } from 'electron';
 import { describe, expect, test } from 'vitest';
 
@@ -42,6 +44,20 @@ async function loadWindowOptions(): Promise<WindowOptionsModule> {
   expect(existsSync(modulePath), 'window options module should exist').toBe(true);
 
   return import(pathToFileURL(modulePath).href) as Promise<WindowOptionsModule>;
+}
+
+async function readBuilderConfig(): Promise<Configuration> {
+  const config = await loadConfig<Configuration>({
+    packageKey: 'build',
+    configFilename: 'electron-builder',
+    projectDir: projectRoot,
+    packageMetadata: null,
+  });
+  expect(config?.configFile, 'electron-builder.yml should be loaded').toBe(
+    join(projectRoot, 'electron-builder.yml'),
+  );
+
+  return config!.result;
 }
 
 describe('desktop shell manifest', () => {
@@ -126,7 +142,8 @@ describe('desktop shell manifest', () => {
     });
   });
 
-  test('loads the sandbox-compatible preload beside the ESM main process', async () => {
+  test('combines an ESM main process with a sandboxed CommonJS preload', async () => {
+    const manifest = await readManifest();
     const { createWindowOptions } = await loadWindowOptions();
     const moduleDirectory = join(projectRoot, 'dist/main');
     const options = createWindowOptions({
@@ -135,9 +152,16 @@ describe('desktop shell manifest', () => {
       moduleDirectory,
     });
 
-    expect(options.webPreferences?.preload).toBe(
-      join(moduleDirectory, '../preload/index.cjs'),
-    );
+    expect(manifest).toMatchObject({
+      type: 'module',
+      main: 'dist/main/index.js',
+    });
+    expect(options.webPreferences).toMatchObject({
+      preload: join(moduleDirectory, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    });
   });
 
   test.each([
@@ -160,5 +184,41 @@ describe('desktop shell manifest', () => {
     });
 
     expect(options.icon).toBe(expectedIcon);
+  });
+});
+
+describe('electron-builder configuration', () => {
+  test('uses release output without embedding runtime resources in app.asar', async () => {
+    const config = await readBuilderConfig();
+
+    expect(config.directories?.output).toBe('release');
+    expect(config.files).toEqual(['dist/**']);
+  });
+
+  test('externalizes brand, workflow, and skill resources', async () => {
+    const config = await readBuilderConfig();
+
+    expect(config.extraResources).toEqual(
+      expect.arrayContaining([
+        { from: 'resources/brand', to: 'resources/brand' },
+        { from: 'resources/workflows', to: 'resources/workflows' },
+        { from: 'resources/skills', to: 'resources/skills' },
+      ]),
+    );
+  });
+
+  test('has the brand icon referenced by the external resource mapping', async () => {
+    const config = await readBuilderConfig();
+    const resources = Array.isArray(config.extraResources) ? config.extraResources : [];
+    const brandMapping = resources.find(
+      (resource) =>
+        typeof resource !== 'string' && resource.from === 'resources/brand',
+    );
+    expect(brandMapping).toMatchObject({ to: 'resources/brand' });
+
+    const sourceDirectory =
+      brandMapping && typeof brandMapping !== 'string' ? brandMapping.from : undefined;
+    const iconPath = join(projectRoot, sourceDirectory!, 'icon.ico');
+    expect(existsSync(iconPath), 'resources/brand/icon.ico should exist').toBe(true);
   });
 });

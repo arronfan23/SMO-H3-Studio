@@ -36,7 +36,7 @@
 
 ### 任务 1：Electron 工程与 SMO 品牌
 
-**文件：** `package.json`、`electron.vite.config.ts`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/main.tsx`、`scripts/prepare-brand.mjs`、`resources/brand/`、`tests/unit/smoke.test.ts`
+**文件：** `package.json`、`electron.vite.config.ts`、`electron-builder.yml`、`src/main/index.ts`、`src/preload/index.ts`、`src/renderer/main.tsx`、`scripts/prepare-brand.mjs`、`resources/brand/`、`tests/unit/smoke.test.ts`
 
 - [ ] **步骤 1：建立工程并写入品牌冒烟测试**
 
@@ -86,9 +86,11 @@ const icon = app.isPackaged ? join(process.resourcesPath, 'resources/brand/icon.
 new BrowserWindow({
   width: 1280, height: 820, minWidth: 960, minHeight: 640,
   title: 'SMO.H3 Studio', icon,
-  webPreferences: { preload: join(import.meta.dirname, '../preload/index.mjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  webPreferences: { preload: join(import.meta.dirname, '../preload/index.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
 });
 ```
+
+主进程使用 ESM。由于 sandboxed preload 不支持 ESM imports，preload 必须使用 electron-vite 打包后的 CJS `index.cjs`，并始终保持 `sandbox: true`、`contextIsolation: true` 与 `nodeIntegration: false`。
 
 ```ts
 // electron.vite.config.ts
@@ -96,7 +98,13 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 export default defineConfig({
   main: { plugins: [externalizeDepsPlugin()] },
-  preload: { plugins: [externalizeDepsPlugin()] },
+  preload: {
+    plugins: [externalizeDepsPlugin()],
+    build: {
+      lib: { formats: ['cjs'] },
+      rolldownOptions: { output: { entryFileNames: '[name].cjs' } },
+    },
+  },
   renderer: { plugins: [react()] },
 });
 ```
@@ -114,7 +122,7 @@ npx vitest run tests/unit/smoke.test.ts
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add package.json package-lock.json electron.vite.config.ts tsconfig.json src resources/brand scripts/prepare-brand.mjs tests/unit/smoke.test.ts
+git add package.json package-lock.json electron.vite.config.ts electron-builder.yml tsconfig.json src resources/brand scripts/prepare-brand.mjs tests/unit/smoke.test.ts
 git commit -m 'Bootstrap SMO.H3 Studio desktop shell'
 ```
 
@@ -696,15 +704,21 @@ directories:
   output: release
 files:
   - dist/**
-  - resources/brand/**
-  - resources/workflows/**
-  - resources/skills/**
+extraResources:
+  - from: resources/brand
+    to: resources/brand
+  - from: resources/workflows
+    to: resources/workflows
+  - from: resources/skills
+    to: resources/skills
 win:
   target: portable
   icon: resources/brand/icon.ico
 portable:
   artifactName: SMO.H3-Studio-${version}.${ext}
 ```
+
+`extraResources` 的目标路径相对 `process.resourcesPath`，因此品牌、工作流与 Skills 分别位于 `resources/brand`、`resources/workflows` 与 `resources/skills`，不依赖 app.asar 内路径。
 
 - [ ] **步骤 2：构建 portable 应用并检查资源**
 
