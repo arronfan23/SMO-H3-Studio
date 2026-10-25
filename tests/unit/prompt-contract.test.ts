@@ -268,6 +268,14 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
   });
 
   test.each([
+    'The final 2 seconds contain no narration, dialogue, or other speech.',
+    'No dialogue during the final 2 seconds.',
+  ])('accepts a negated non-narration tail: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
+
+  test.each([
     'The final 2 seconds contain only music and dialogue.',
     'The final 2 seconds contain only music and singing.',
   ])('rejects unnegated vocals in the tail declaration: %s', (declaration) => {
@@ -388,6 +396,18 @@ describe('H3 complete-silence requests', () => {
 
   test.each(['No sound.', '完全静音'])('recognizes a global silence declaration: %s', (text) => {
     expect(explicitlyRequestsSilence(text)).toBe(true);
+  });
+
+  test.each([
+    {
+      scenario: 'ordinary quoted speech',
+      text: 'The presenter says "No sound."',
+      expected: false,
+    },
+    { scenario: 'an unquoted global declaration', text: 'No sound.', expected: true },
+    { scenario: 'visible sign text', text: 'A sign reads "No Sound"', expected: false },
+  ])('separates silence intent from quoted content: $scenario', ({ text, expected }) => {
+    expect(explicitlyRequestsSilence(text)).toBe(expected);
   });
 
   test('accepts N/A for both audio sections and no audible events', () => {

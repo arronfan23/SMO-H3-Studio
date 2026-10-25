@@ -33,7 +33,7 @@ const TAIL_VOCAL_EVENT_PATTERN = new RegExp(
   'i',
 );
 const NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
-  String.raw`\b(?:no|without)\s+(?:any\s+)?${VOCAL_WORDS}(?:\s*(?:,|or|and)\s*(?:any\s+)?${VOCAL_WORDS})*`,
+  String.raw`\b(?:no|without)\s+(?:(?:any|other)\s+)*${VOCAL_WORDS}(?:\s*(?:,|or|and)\s*(?:(?:or|and)\s+)?(?:(?:any|other)\s+)*${VOCAL_WORDS})*`,
   'i',
 );
 const STOPPED_TAIL_VOCAL_PATTERN = new RegExp(
@@ -101,7 +101,7 @@ const SIMPLE_SILENT_ASSERTION_PATTERN = new RegExp(
 );
 
 export function explicitlyRequestsSilence(text: string): boolean {
-  const scope = stripDialogueAndVisibleText(text);
+  const scope = stripDialogueAndQuotedText(text);
   return scope.split(/[.!?。！？\n]+|\b(?:but|however)\b/i).some((clause) => {
     if (
       NEGATED_SILENCE_PATTERN.test(clause) ||
@@ -199,23 +199,40 @@ function stripDialogueAndVisibleText(text: string): string {
   return scope.replace(DIALOGUE_PATTERN, ' ');
 }
 
+function stripDialogueAndQuotedText(text: string): string {
+  return text.replace(DIALOGUE_PATTERN, ' ').replace(VISIBLE_TEXT_PATTERN, ' ');
+}
+
+function maskNegatedTailVocals(text: string): string {
+  return text.replace(
+    new RegExp(NEGATED_TAIL_VOCAL_PATTERN.source, 'gi'),
+    (match) =>
+      match.replace(new RegExp(VOCAL_WORDS, 'gi'), (value) =>
+        ' '.repeat(value.length),
+      ),
+  );
+}
+
 function hasNonNarrationTail(text: string): boolean {
   const scope = stripDialogueAndVisibleText(text);
   let foundValidDeclaration = false;
   for (const sentence of scope.split(/(?<=[.!?])\s+|\n+/)) {
-    const clauses = sentence.split(/[,;]+/);
-    if (!clauses.some((clause) => TAIL_PERIOD_PATTERN.test(clause))) {
+    const conflictClauses = maskNegatedTailVocals(sentence).split(/[,;]+|\b(?:but|however)\b/i);
+    const originalClauses = sentence.split(/[,;]+|\b(?:but|however)\b/i);
+    if (!originalClauses.some((clause) => TAIL_PERIOD_PATTERN.test(clause))) {
       continue;
     }
-    for (const clause of clauses) {
+    for (let index = 0; index < originalClauses.length; index += 1) {
+      const clause = originalClauses[index];
+      const conflictClause = conflictClauses[index];
       const tailMatch = TAIL_PERIOD_PATTERN.exec(clause);
-      const tail = tailMatch ? clause.slice(tailMatch.index) : clause;
+      const tail = tailMatch ? conflictClause.slice(tailMatch.index) : conflictClause;
       const remaining = tail
-        .replace(new RegExp(NEGATED_TAIL_VOCAL_PATTERN.source, 'gi'), '')
         .replace(new RegExp(STOPPED_TAIL_VOCAL_PATTERN.source, 'gi'), '');
+      const duringScope = conflictClause.slice(conflictClause.lastIndexOf(':') + 1);
       if (
         TAIL_VOCAL_EVENT_PATTERN.test(remaining) ||
-        (tailMatch && VOCAL_DURING_TAIL_PATTERN.test(clause))
+        (tailMatch && VOCAL_DURING_TAIL_PATTERN.test(duringScope))
       ) {
         return false;
       }
@@ -223,7 +240,7 @@ function hasNonNarrationTail(text: string): boolean {
         continue;
       }
       if (
-        NEGATED_TAIL_VOCAL_PATTERN.test(tail) ||
+        NEGATED_TAIL_VOCAL_PATTERN.test(clause) ||
         STOPPED_TAIL_VOCAL_PATTERN.test(clause) ||
         ONLY_ALLOWED_TAIL_PATTERN.test(clause)
       ) {
