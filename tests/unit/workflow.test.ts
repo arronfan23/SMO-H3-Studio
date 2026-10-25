@@ -92,6 +92,7 @@ function createLinkedWorkflowFixture() {
           value: 99,
           frame_rate: 24,
           upload: 'image',
+          preview: 'UI preview state',
           videopreview: { fullpath: 'F:\\old\\preview.mp4' },
           selflift_tiling_plan: 'UI state',
           control_after_generate: 'fixed',
@@ -99,6 +100,21 @@ function createLinkedWorkflowFixture() {
       },
     ],
     links: [[7, 1, 0, 2, 0, 'FLOAT']],
+  };
+}
+
+function createDirectOverrideFixture(links: unknown[] = []) {
+  return {
+    nodes: [
+      {
+        id: 2,
+        type: 'MiniMaxH3ReferenceToVideo',
+        mode: 0,
+        inputs: [{ name: 'prompt', type: 'STRING', link: 99 }],
+        widgets_values_named: { prompt: '' },
+      },
+    ],
+    links,
   };
 }
 
@@ -139,6 +155,7 @@ describe('patchWorkflow', () => {
       '132': { class_type: 'PrimitiveFloat', inputs: { value: 1 } },
       '136': { class_type: 'MiniMaxH3ReferenceToVideo', inputs: { prompt: '' } },
       '180': { class_type: 'VHS_VideoCombine', inputs: { filename_prefix: 'old' } },
+      '226': { class_type: 'LoadImage', inputs: { image: 'old-text.png' } },
       '269': { class_type: 'SelfLiftAvatarH3Sampler', inputs: { seed: 1 } },
     };
 
@@ -153,6 +170,7 @@ describe('patchWorkflow', () => {
       '132.inputs.value': 12,
       '136.inputs.prompt': 'Text prompt',
       '180.inputs.filename_prefix': 'text-output',
+      '226.inputs.image': 'text-avatar.png',
       '269.inputs.seed': 202,
     });
 
@@ -166,6 +184,7 @@ describe('patchWorkflow', () => {
       '132': { inputs: { value: 12 } },
       '136': { inputs: { prompt: 'Text prompt' } },
       '180': { inputs: { filename_prefix: 'text-output' } },
+      '226': { inputs: { image: 'text-avatar.png' } },
       '269': { inputs: { seed: 202 } },
     });
   });
@@ -223,6 +242,7 @@ describe('UI workflow conversion', () => {
     expect(graph['2'].inputs.frame_rate).toBe(24);
     for (const field of [
       'upload',
+      'preview',
       'videopreview',
       'selflift_tiling_plan',
       'control_after_generate',
@@ -317,6 +337,40 @@ describe('UI workflow conversion', () => {
     expect(graph).not.toHaveProperty('1');
   });
 
+  test('direct overrides skip dangling input links', async () => {
+    const toApiGraph = await loadWorkflowConverter();
+
+    const graph = toApiGraph(createDirectOverrideFixture(), 2, {
+      '2': { prompt: 'Direct prompt' },
+    });
+
+    expect(graph['2'].inputs.prompt).toBe('Direct prompt');
+    expect(Object.keys(graph)).toEqual(['2']);
+  });
+
+  test('direct overrides skip missing upstream nodes', async () => {
+    const toApiGraph = await loadWorkflowConverter();
+    const fixture = createDirectOverrideFixture([[99, 1, 0, 2, 0, 'STRING']]);
+
+    const graph = toApiGraph(fixture, 2, { '2': { prompt: 'Direct prompt' } });
+
+    expect(graph['2'].inputs.prompt).toBe('Direct prompt');
+    expect(Object.keys(graph)).toEqual(['2']);
+  });
+
+  test('unoverridden dangling input links still fail validation', async () => {
+    const toApiGraph = await loadWorkflowConverter();
+
+    expect(() => toApiGraph(createDirectOverrideFixture(), 2)).toThrow('Missing link 99');
+  });
+
+  test('unoverridden missing upstream nodes still fail validation', async () => {
+    const toApiGraph = await loadWorkflowConverter();
+    const fixture = createDirectOverrideFixture([[99, 1, 0, 2, 0, 'STRING']]);
+
+    expect(() => toApiGraph(fixture, 2)).toThrow('Missing node 1');
+  });
+
   test('resolves frontend Reroute nodes to their upstream API links', async () => {
     const toApiGraph = await loadWorkflowConverter();
     const fixture = {
@@ -366,6 +420,51 @@ describe('generated API workflows', () => {
     expectOnlyReachableNodes(graph, outputId);
   });
 
+  test('text workflow keeps only the primary reference image input', async () => {
+    const graph = await readApiGraph('text-ref2va.json');
+    const imageNodeIds = Object.entries(graph)
+      .filter(([, node]) => node.class_type === 'LoadImage')
+      .map(([id]) => id);
+
+    expect(imageNodeIds).toEqual(['226']);
+    expect(graph).not.toHaveProperty('255');
+    expect(graph['136'].inputs).not.toHaveProperty('ref_images.ref_image_1');
+    expect(graph['136'].inputs).not.toHaveProperty('ref_images.ref_image_2');
+    expect(JSON.stringify(graph)).not.toContain('9600355f787e5d893e2c2069691e9cd9.png');
+  });
+
+  test('patchWorkflow replaces the text avatar without changing frozen settings', async () => {
+    const graph = await readApiGraph('text-ref2va.json');
+    const originalImage = graph['226'].inputs.image;
+
+    const patched = patchWorkflow(graph, { '226.inputs.image': 'uploads/text-avatar.png' });
+
+    expect(patched['226'].inputs.image).toBe('uploads/text-avatar.png');
+    expect(patched).not.toHaveProperty('255');
+    expect(JSON.stringify(patched)).not.toContain(String(originalImage));
+    expect(JSON.stringify(patched)).not.toContain('9600355f787e5d893e2c2069691e9cd9.png');
+    expect(patched['127']).toEqual(graph['127']);
+    expect(patched['128']).toEqual(graph['128']);
+    expect(patched['194']).toEqual(graph['194']);
+    expect(patched['269']).toEqual(graph['269']);
+    expect(graph['226'].inputs.image).toBe(originalImage);
+  });
+
+  test('patchWorkflow replaces the audio avatar without changing frozen settings', async () => {
+    const graph = await readApiGraph('audio-digital-human.json');
+    const originalImage = graph['36'].inputs.image;
+
+    const patched = patchWorkflow(graph, { '36.inputs.image': 'uploads/audio-avatar.png' });
+
+    expect(patched['36'].inputs.image).toBe('uploads/audio-avatar.png');
+    expect(JSON.stringify(patched)).not.toContain(String(originalImage));
+    expect(patched['55']).toEqual(graph['55']);
+    expect(patched['54']).toEqual(graph['54']);
+    expect(patched['53']).toEqual(graph['53']);
+    expect(patched['86']).toEqual(graph['86']);
+    expect(graph['36'].inputs.image).toBe(originalImage);
+  });
+
   test('text workflow uses direct prompts and the standard audio/video decoders', async () => {
     const graph = await readApiGraph('text-ref2va.json');
     const classTypes = Object.values(graph).map((node) => node.class_type);
@@ -379,15 +478,6 @@ describe('generated API workflows', () => {
         'VAEDecodeAudio',
       ]),
     );
-    for (const forbidden of [
-      'MiniMaxH3VAEDecodeFast',
-      'RAMCleanup',
-      'QwenH3PromptLocal',
-      'PreviewAny',
-      'Fast Groups Bypasser (rgthree)',
-    ]) {
-      expect(classTypes).not.toContain(forbidden);
-    }
   });
 
   test('text workflow applies the RTX 5080 16GB model configuration', async () => {
@@ -450,10 +540,22 @@ describe('generated API workflows', () => {
     async (filename) => {
       const graph = await readApiGraph(filename);
       const serialized = JSON.stringify(graph);
+      const classTypes = Object.values(graph).map((node) => node.class_type);
+
+      for (const forbidden of [
+        'MiniMaxH3VAEDecodeFast',
+        'RAMCleanup',
+        'QwenH3PromptLocal',
+        'PreviewAny',
+        'Fast Groups Bypasser (rgthree)',
+      ]) {
+        expect(classTypes).not.toContain(forbidden);
+      }
 
       for (const node of Object.values(graph)) {
         for (const field of [
           'upload',
+          'preview',
           'videopreview',
           'selflift_tiling_plan',
           'control_after_generate',

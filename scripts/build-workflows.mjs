@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const FRONTEND_ONLY_FIELDS = new Set([
   'upload',
+  'preview',
   'videopreview',
   'selflift_tiling_plan',
   'control_after_generate',
@@ -63,8 +64,11 @@ export function toApiGraph(workflow, outputId, overrides = {}) {
     if (node.mode === 4) throw new Error(`Required node ${id} is bypassed`);
 
     const nodeInputs = node.inputs ?? [];
+    const nodeOverrides = overrides[id] ?? {};
     const linkedNames = new Set(
-      nodeInputs.filter((input) => input.link != null).map((input) => input.name),
+      nodeInputs
+        .filter((input) => !Object.hasOwn(nodeOverrides, input.name) && input.link != null)
+        .map((input) => input.name),
     );
     const inputs = Object.fromEntries(
       Object.entries(node.widgets_values_named ?? {}).filter(
@@ -74,6 +78,7 @@ export function toApiGraph(workflow, outputId, overrides = {}) {
 
     const dependencies = new Map();
     for (const input of nodeInputs) {
+      if (Object.hasOwn(nodeOverrides, input.name)) continue;
       if (input.link != null) {
         const apiLink = resolveApiLink(input.link);
         inputs[input.name] = apiLink;
@@ -81,9 +86,7 @@ export function toApiGraph(workflow, outputId, overrides = {}) {
       }
     }
 
-    const nodeOverrides = overrides[id] ?? {};
     Object.assign(inputs, nodeOverrides);
-    for (const name of Object.keys(nodeOverrides)) dependencies.delete(name);
     for (const field of FRONTEND_ONLY_FIELDS) delete inputs[field];
 
     graph[id] = { class_type: node.type, inputs };
@@ -108,6 +111,14 @@ function enableRequiredNodes(workflow, ids) {
   }
 }
 
+function removeNodeInputs(workflow, id, names) {
+  const node = workflow.nodes.find((candidate) => String(candidate.id) === id);
+  if (!node) throw new Error(`Missing node ${id}`);
+
+  const removed = new Set(names);
+  node.inputs = (node.inputs ?? []).filter((input) => !removed.has(input.name));
+}
+
 async function main() {
   const projectRoot = fileURLToPath(new URL('../', import.meta.url));
   const outputDirectory = resolve(projectRoot, 'resources/workflows');
@@ -116,6 +127,10 @@ async function main() {
     readWorkflow(AUDIO_SOURCE),
   ]);
 
+  removeNodeInputs(textWorkflow, '136', [
+    'ref_images.ref_image_1',
+    'ref_images.ref_image_2',
+  ]);
   enableRequiredNodes(textWorkflow, ['195', '196']);
 
   const textGraph = toApiGraph(textWorkflow, 180, TEXT_OVERRIDES);

@@ -57,6 +57,7 @@
   "42": {
     "class_type": "MiniMaxH3ReferenceToVideo",
     "inputs": {
+      "prompt": "",
       "ref_image_size": "match",
       "clip": [
         "54",
@@ -74,7 +75,6 @@
         "36",
         0
       ],
-      "prompt": "",
       "width": [
         "61",
         0
@@ -205,7 +205,6 @@
       "suppress_default_preview": true,
       "preview_fps": 12,
       "tiny_vae": "taeh3.safetensors",
-      "preview": "",
       "model": [
         "59",
         0

@@ -11,6 +11,7 @@ export function buildH3Frames(seconds: number, tail: boolean): number {
 
 const ALLOWED_PATHS = new Set([
   '36.inputs.image',
+  '226.inputs.image',
   '34.inputs.audio',
   '42.inputs.prompt',
   '136.inputs.prompt',

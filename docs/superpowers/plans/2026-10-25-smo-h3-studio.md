@@ -174,7 +174,7 @@ export function buildH3Frames(seconds: number, tail: boolean) {
   const grid = (5 - (n % 17) + 17) % 17;
   return n + grid + (tail ? 48 : 0);
 }
-const ALLOWED = new Set(['36.inputs.image', '34.inputs.audio', '42.inputs.prompt', '136.inputs.prompt', '132.inputs.value', '85.inputs.start_time', '85.inputs.duration', '86.inputs.seed', '269.inputs.seed', '65.inputs.filename_prefix', '180.inputs.filename_prefix']);
+const ALLOWED = new Set(['36.inputs.image', '226.inputs.image', '34.inputs.audio', '42.inputs.prompt', '136.inputs.prompt', '132.inputs.value', '85.inputs.start_time', '85.inputs.duration', '86.inputs.seed', '269.inputs.seed', '65.inputs.filename_prefix', '180.inputs.filename_prefix']);
 export function patchWorkflow<T>(graph: T, changes: Record<string, unknown>): T {
   for (const path of Object.keys(changes)) if (!ALLOWED.has(path)) throw new Error(`Workflow path not allowed: ${path}`);
   const copy = structuredClone(graph) as any;
@@ -187,7 +187,7 @@ export function patchWorkflow<T>(graph: T, changes: Record<string, unknown>): T 
 }
 ```
 
-转换脚本只保留从输出节点可达的节点，先写入直接提示词再遍历，因此本地 Qwen、快速解码分支和 UI 辅助节点不会进入 API 图。文字输出节点为 `180`，音频输出节点为 `65`。
+转换脚本只保留从输出节点可达的节点，先写入直接提示词再遍历，因此本地 Qwen、快速解码分支和 UI 辅助节点不会进入 API 图。文字输出节点为 `180`，音频输出节点为 `65`。文字模板只保留节点 `226` 的第一张模特照片，离线构建时删除 `136` 的 `ref_images.ref_image_1` 与 `ref_images.ref_image_2` 输入，使节点 `255` 和旧硬编码图片不再可达；运行时通过 `226.inputs.image` 注入用户照片。
 
 ```js
 function toApiGraph(workflow, outputId, overrides = {}) {
