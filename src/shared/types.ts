@@ -17,6 +17,19 @@ export interface Avatar {
   createdAt: string;
 }
 
+export type WorkStatus = 'pending' | 'running' | 'done' | 'failed';
+
+export interface Work {
+  id: string;
+  avatarId: string;
+  mode: VideoMode;
+  outputPath: string | null;
+  status: WorkStatus;
+  createdAt: string;
+}
+
+export type NewWork = Omit<Work, 'createdAt'>;
+
 export interface LlmProfile {
   baseUrl: string;
   model: string;
