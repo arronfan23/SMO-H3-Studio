@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Configuration } from 'app-builder-lib';
 import { loadConfig } from 'app-builder-lib/out/util/config/load';
 import type { BrowserWindowConstructorOptions } from 'electron';
+import sharp from 'sharp';
 import { describe, expect, test } from 'vitest';
 
 const projectRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -81,6 +82,7 @@ describe('desktop shell manifest', () => {
       build: 'electron-vite build',
       test: 'vitest run',
       'test:e2e': 'playwright test',
+      typecheck: 'tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.renderer.json',
       assets: 'node scripts/prepare-brand.mjs && node scripts/build-workflows.mjs',
       pack: 'npm run build && electron-builder --win portable',
     });
@@ -207,18 +209,37 @@ describe('electron-builder configuration', () => {
     );
   });
 
-  test('has the brand icon referenced by the external resource mapping', async () => {
+  test('uses an existing valid ICO for the Windows executable', async () => {
     const config = await readBuilderConfig();
-    const resources = Array.isArray(config.extraResources) ? config.extraResources : [];
-    const brandMapping = resources.find(
-      (resource) =>
-        typeof resource !== 'string' && resource.from === 'resources/brand',
-    );
-    expect(brandMapping).toMatchObject({ to: 'resources/brand' });
+    const configuredIcon = config.win?.icon;
+    expect(configuredIcon).toBe('resources/brand/icon.ico');
 
-    const sourceDirectory =
-      brandMapping && typeof brandMapping !== 'string' ? brandMapping.from : undefined;
-    const iconPath = join(projectRoot, sourceDirectory!, 'icon.ico');
-    expect(existsSync(iconPath), 'resources/brand/icon.ico should exist').toBe(true);
+    const iconPath = join(projectRoot, configuredIcon!);
+    expect(existsSync(iconPath), 'win.icon file should exist').toBe(true);
+
+    const icon = await readFile(iconPath);
+    expect(icon.length).toBeGreaterThan(22);
+    expect(icon.readUInt16LE(0)).toBe(0);
+    expect(icon.readUInt16LE(2)).toBe(1);
+    expect(icon.readUInt16LE(4)).toBeGreaterThan(0);
+  });
+
+  test('generates 512px PNG variants', async () => {
+    const paths = ['resources/brand/icon.png', 'public/brand/icon.png'];
+
+    for (const path of paths) {
+      const image = sharp(join(projectRoot, path));
+      const metadata = await image.metadata();
+      expect(metadata).toMatchObject({ width: 512, height: 512, format: 'png' });
+    }
+  });
+
+  test('keeps desktop and renderer PNG content identical', async () => {
+    const [desktopPng, rendererPng] = await Promise.all([
+      readFile(join(projectRoot, 'resources/brand/icon.png')),
+      readFile(join(projectRoot, 'public/brand/icon.png')),
+    ]);
+
+    expect(desktopPng.equals(rendererPng)).toBe(true);
   });
 });
