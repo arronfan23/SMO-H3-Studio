@@ -15,7 +15,12 @@ export async function bootstrapApplication(
   const { createMainWindow, ...serviceOptions } = options;
   const services = await createAppServices(serviceOptions);
 
-  registerIpc(services);
-  await createMainWindow();
-  return services;
+  try {
+    registerIpc(services);
+    await createMainWindow();
+    return services;
+  } catch (error) {
+    services.close();
+    throw error;
+  }
 }
