@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw } from 'lucide-react';
 import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
@@ -33,14 +33,27 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [activeFilter, setActiveFilter] = useState<'all' | VideoMode | WorkStatus>('all');
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [retryError, setRetryError] = useState<Record<string, string>>({});
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
       const result = await window.smo.works.list();
+      if (!mountedRef.current) {
+        return;
+      }
       setWorks(result);
       setError(null);
     } catch (refreshError) {
-      setError(errorMessage(refreshError));
+      if (mountedRef.current) {
+        setError(errorMessage(refreshError));
+      }
     }
   }, []);
 
@@ -82,15 +95,22 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     setRetryError((current) => ({ ...current, [work.id]: '' }));
     try {
       await window.smo.jobs.retry(work.id);
+      if (!mountedRef.current) {
+        return;
+      }
       await refresh();
     } catch (retryError) {
-      setRetryError((current) => ({ ...current, [work.id]: errorMessage(retryError) }));
+      if (mountedRef.current) {
+        setRetryError((current) => ({ ...current, [work.id]: errorMessage(retryError) }));
+      }
     } finally {
-      setRetrying((current) => {
-        const next = new Set(current);
-        next.delete(work.id);
-        return next;
-      });
+      if (mountedRef.current) {
+        setRetrying((current) => {
+          const next = new Set(current);
+          next.delete(work.id);
+          return next;
+        });
+      }
     }
   };
 
@@ -101,7 +121,9 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     try {
       await window.smo.files.openFolder(parentPath(work.outputPath));
     } catch (openError) {
-      setRetryError((current) => ({ ...current, [work.id]: errorMessage(openError) }));
+      if (mountedRef.current) {
+        setRetryError((current) => ({ ...current, [work.id]: errorMessage(openError) }));
+      }
     }
   };
 

@@ -799,6 +799,110 @@ describe('main-process IPC handlers', () => {
     });
   });
 
+  test('llm:listModels resolves credentials without modifying the saved profile', async () => {
+    const harness = await createHarness({
+      llm: { listModels: async () => ['model-a'], testModel: async () => ({ ok: true as const, latencyMs: 10, summary: 'OK' }) },
+    });
+    const apiKey = 'sk-preserved';
+
+    await harness.invoke('llm:saveProfile', {
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+
+    await expect(
+      harness.invoke('llm:listModels', {
+        baseUrl: 'https://draft.example.com/v1',
+        model: 'draft-model',
+      }),
+    ).resolves.toEqual(['model-a']);
+
+    await expect(harness.llmConfig.getCredentials()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+  });
+
+  test('llm:testModel resolves credentials without modifying the saved profile', async () => {
+    const harness = await createHarness({
+      llm: { listModels: async () => ['model-a'], testModel: async () => ({ ok: true as const, latencyMs: 10, summary: 'OK' }) },
+    });
+    const apiKey = 'sk-preserved';
+
+    await harness.invoke('llm:saveProfile', {
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+
+    await expect(
+      harness.invoke('llm:testModel', {
+        baseUrl: 'https://draft.example.com/v1',
+        model: 'draft-model',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    await expect(harness.llmConfig.getCredentials()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+  });
+
+  test('llm:listModels failure does not modify the saved profile', async () => {
+    const harness = await createHarness({
+      llm: { listModels: async () => { throw new Error('service unavailable'); }, testModel: async () => ({ ok: true as const, latencyMs: 10, summary: 'OK' }) },
+    });
+    const apiKey = 'sk-preserved';
+
+    await harness.invoke('llm:saveProfile', {
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+
+    await expect(
+      harness.invoke('llm:listModels', {
+        baseUrl: 'https://draft.example.com/v1',
+        model: 'draft-model',
+      }),
+    ).rejects.toThrow(/service unavailable/i);
+
+    await expect(harness.llmConfig.getCredentials()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+  });
+
+  test('llm:testModel failure does not modify the saved profile', async () => {
+    const harness = await createHarness({
+      llm: { listModels: async () => ['model-a'], testModel: async () => { throw new Error('test failed'); } },
+    });
+    const apiKey = 'sk-preserved';
+
+    await harness.invoke('llm:saveProfile', {
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+
+    await expect(
+      harness.invoke('llm:testModel', {
+        baseUrl: 'https://draft.example.com/v1',
+        model: 'draft-model',
+      }),
+    ).rejects.toThrow(/test failed/i);
+
+    await expect(harness.llmConfig.getCredentials()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+  });
+
   test('rejects LLM list/test calls without an API key when no profile is configured', async () => {
     const harness = await createHarness();
 

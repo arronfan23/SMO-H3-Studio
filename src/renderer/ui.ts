@@ -16,6 +16,26 @@ export function fileName(filePath: string): string {
 }
 
 export function parentPath(filePath: string): string {
-  const name = fileName(filePath);
-  return name === filePath ? filePath : filePath.slice(0, -(name.length + 1));
+  const trimmed = filePath.trim();
+  if (trimmed.length === 0) {
+    return '';
+  }
+  const backslash = trimmed.lastIndexOf('\\');
+  const slash = trimmed.lastIndexOf('/');
+  const lastSeparator = Math.max(backslash, slash);
+  if (lastSeparator === -1) {
+    return trimmed;
+  }
+  const name = trimmed.slice(lastSeparator + 1);
+  if (name.length === 0) {
+    return trimmed;
+  }
+  if (!name.includes('.')) {
+    return trimmed;
+  }
+  const candidate = trimmed.slice(0, lastSeparator);
+  if (/^[a-zA-Z]:$/.test(candidate)) {
+    return candidate + '\\';
+  }
+  return candidate;
 }

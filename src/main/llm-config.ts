@@ -18,6 +18,7 @@ interface StoredLlmConfig {
 export interface LlmConfigStore {
   save(credentials: LlmCredentials): Promise<void>;
   saveProfile(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials>;
+  resolveCredentials(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials>;
   getProfile(): Promise<LlmProfile | null>;
   getCredentials(): Promise<LlmCredentials | null>;
 }
@@ -89,6 +90,12 @@ export class FileLlmConfigStore implements LlmConfigStore {
   }
 
   async saveProfile(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials> {
+    const credentials = await this.resolveCredentials(input);
+    await this.save(credentials);
+    return credentials;
+  }
+
+  async resolveCredentials(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials> {
     const baseUrl = input.baseUrl.trim();
     const model = input.model.trim();
     if (baseUrl.length === 0 || model.length === 0) {
@@ -104,9 +111,7 @@ export class FileLlmConfigStore implements LlmConfigStore {
       apiKey = existing.apiKey;
     }
 
-    const credentials: LlmCredentials = { baseUrl, model, apiKey };
-    await this.save(credentials);
-    return credentials;
+    return { baseUrl, model, apiKey };
   }
 
   async getProfile(): Promise<LlmProfile | null> {

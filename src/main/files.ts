@@ -1,4 +1,4 @@
-import { stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { MediaRegistry } from './media';
 
@@ -58,29 +58,36 @@ export class FileService {
   }
 
   async openFolder(path: string): Promise<void> {
-    const resolved = resolve(path);
-    if (!this.isAllowedFolder(resolved)) {
-      throw new Error('Folder path is not allowed');
-    }
+    let resolved: string;
     try {
-      const stats = await stat(resolved);
-      if (!stats.isDirectory()) {
-        throw new Error('Path is not a directory');
-      }
+      resolved = await realpath(path);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new Error('Folder does not exist');
       }
       throw error;
     }
+
+    const realRoots = await Promise.all(
+      [this.outputDirectory, this.dataDirectory].map((root) => realpath(root).catch(() => null)),
+    );
+    if (!this.isAllowedFolder(resolved, realRoots.filter((root): root is string => root !== null))) {
+      throw new Error('Folder path is not allowed');
+    }
+
+    const stats = await stat(resolved);
+    if (!stats.isDirectory()) {
+      throw new Error('Path is not a directory');
+    }
+
     const errorMessage = await this.opener.openPath(resolved);
     if (errorMessage.length > 0) {
       throw new Error(`Could not open folder: ${errorMessage}`);
     }
   }
 
-  private isAllowedFolder(candidate: string): boolean {
-    for (const root of [this.outputDirectory, this.dataDirectory]) {
+  private isAllowedFolder(candidate: string, realRoots: string[]): boolean {
+    for (const root of realRoots) {
       const rel = relative(root, candidate);
       if (
         rel.length > 0 &&
@@ -90,8 +97,11 @@ export class FileService {
       ) {
         return true;
       }
+      if (rel === '') {
+        return true;
+      }
     }
-    return candidate === this.outputDirectory || candidate === this.dataDirectory;
+    return false;
   }
 
   private async select(

@@ -7,7 +7,6 @@ import type {
   GenerationStartResult,
   HardwareInfo,
   HardwareProfile,
-  LlmCredentials,
   LlmProfile,
   Work,
 } from './types';
@@ -90,14 +89,6 @@ const generationRequestSchema = z
       });
     }
   }) satisfies z.ZodType<GenerationRequest>;
-
-const llmCredentialsSchema = z
-  .object({
-    baseUrl: httpUrlSchema,
-    model: nonEmptyString,
-    apiKey: nonEmptyString,
-  })
-  .strict() satisfies z.ZodType<LlmCredentials>;
 
 const llmProfileInputSchema = z
   .object({

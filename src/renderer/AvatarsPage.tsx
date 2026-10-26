@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ImagePlus, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import { AvatarImage } from './AvatarImage';
@@ -34,19 +34,31 @@ export function AvatarsPage({
   const [renameValue, setRenameValue] = useState('');
   const [mutationLoading, setMutationLoading] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const selectPhoto = async (): Promise<void> => {
     setSelecting(true);
     setError(null);
     try {
       const selected = await window.smo.files.selectImage();
-      if (selected !== null) {
+      if (mountedRef.current && selected !== null) {
         setPhotoPath(selected);
       }
     } catch (selectError) {
-      setError(errorMessage(selectError));
+      if (mountedRef.current) {
+        setError(errorMessage(selectError));
+      }
     } finally {
-      setSelecting(false);
+      if (mountedRef.current) {
+        setSelecting(false);
+      }
     }
   };
 
@@ -61,13 +73,19 @@ export function AvatarsPage({
     try {
       const avatar = await window.smo.avatars.create({ name: name.trim(), photoPath });
       await onCreated(avatar);
-      setName('');
-      setPhotoPath(null);
-      setNotice(`已保存并选择 ${avatar.name}`);
+      if (mountedRef.current) {
+        setName('');
+        setPhotoPath(null);
+        setNotice(`已保存并选择 ${avatar.name}`);
+      }
     } catch (saveError) {
-      setError(errorMessage(saveError));
+      if (mountedRef.current) {
+        setError(errorMessage(saveError));
+      }
     } finally {
-      setSaving(false);
+      if (mountedRef.current) {
+        setSaving(false);
+      }
     }
   };
 
@@ -102,11 +120,17 @@ export function AvatarsPage({
     try {
       await window.smo.avatars.update({ id: dialog.avatar.id, name: trimmed });
       await onChanged(dialog.avatar.id);
-      closeDialog();
+      if (mountedRef.current) {
+        closeDialog();
+      }
     } catch (renameError) {
-      setMutationError(errorMessage(renameError));
+      if (mountedRef.current) {
+        setMutationError(errorMessage(renameError));
+      }
     } finally {
-      setMutationLoading(false);
+      if (mountedRef.current) {
+        setMutationLoading(false);
+      }
     }
   };
 
@@ -119,11 +143,17 @@ export function AvatarsPage({
     try {
       await window.smo.avatars.delete(dialog.avatar.id);
       await onChanged();
-      closeDialog();
+      if (mountedRef.current) {
+        closeDialog();
+      }
     } catch (deleteError) {
-      setMutationError(errorMessage(deleteError));
+      if (mountedRef.current) {
+        setMutationError(errorMessage(deleteError));
+      }
     } finally {
-      setMutationLoading(false);
+      if (mountedRef.current) {
+        setMutationLoading(false);
+      }
     }
   };
 

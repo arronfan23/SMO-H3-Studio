@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
@@ -394,7 +394,7 @@ describe('works and settings', () => {
   test('shows understandable health errors and an unconfigured LLM state', async () => {
     smo.comfy.health.mockRejectedValue(new Error('连接被拒绝'));
     smo.llm.getProfile.mockResolvedValue(null);
-  smo.llm.saveProfile.mockResolvedValue(undefined);
+    smo.llm.saveProfile.mockResolvedValue(undefined);
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '设置' }));
 
@@ -547,5 +547,31 @@ describe('works page actions', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开 ComfyUI' }));
 
     expect(smo.comfy.open).toHaveBeenCalled();
+  });
+
+  test('does not refresh or update state after unmounting during a retry', async () => {
+    let resolveRetry: ((value: { id: string }) => void) | undefined;
+    smo.jobs.retry.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRetry = resolve;
+        }),
+    );
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'failed-work', status: 'failed', error: 'ComfyUI 执行失败' }),
+    ]);
+    const view = render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByText('失败（failed）');
+    const listCallsBeforeRetry = smo.works.list.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    await waitFor(() => expect(smo.jobs.retry).toHaveBeenCalledWith('failed-work'));
+    view.unmount();
+    await act(async () => {
+      resolveRetry?.({ id: 'retry-work' });
+    });
+
+    expect(smo.works.list.mock.calls.length).toBe(listCallsBeforeRetry);
   });
 });

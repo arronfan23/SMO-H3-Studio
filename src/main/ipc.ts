@@ -94,11 +94,11 @@ async function dispatch(
     }
     case 'llm:listModels':
       return services.llm.listModels(
-        await services.llmConfig.saveProfile(request.payload),
+        await services.llmConfig.resolveCredentials(request.payload),
       );
     case 'llm:testModel':
       return services.llm.testModel(
-        await services.llmConfig.saveProfile(request.payload),
+        await services.llmConfig.resolveCredentials(request.payload),
       );
     case 'llm:polish': {
       const credentials = await services.llmConfig.getCredentials();

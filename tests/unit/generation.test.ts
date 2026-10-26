@@ -970,6 +970,7 @@ describe('GenerationHandler retry', () => {
     const harness = await createHarness();
     const original = await harness.startGeneration(harness.textRequest);
     await waitForWork(harness.store, original.id, 'done');
+    harness.store.updateWork(original.id, { status: 'failed', error: 'forced failure' });
 
     const retry = await harness.retryWork(original.id);
     const retryWork = await waitForWork(harness.store, retry.id, 'done');
@@ -981,7 +982,7 @@ describe('GenerationHandler retry', () => {
       retryOf: original.id,
     });
     const originalAfterRetry = harness.store.listWorks().find((work) => work.id === original.id);
-    expect(originalAfterRetry?.status).toBe('done');
+    expect(originalAfterRetry?.status).toBe('failed');
     expect(originalAfterRetry?.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
@@ -994,10 +995,7 @@ describe('GenerationHandler retry', () => {
 
     const original = await harness.startGeneration(harness.audioRequest);
     await waitForWork(harness.store, original.id, 'done');
-    harness.mediaRegistry = new MediaRegistry({
-      avatarsDirectory: join(harness.directory, 'avatars'),
-      outputDirectory: harness.outputDirectory,
-    });
+    harness.store.updateWork(original.id, { status: 'failed', error: 'forced failure' });
 
     const retry = await harness.retryWork(original.id);
     const retryWork = await waitForWork(harness.store, retry.id, 'done');
@@ -1023,20 +1021,85 @@ describe('GenerationHandler retry', () => {
 
   test('fails when the original avatar photo is missing', async () => {
     const harness = await createHarness();
-    const original = await harness.startGeneration(harness.textRequest);
-    await waitForWork(harness.store, original.id, 'done');
+    const work = harness.store.addWork({
+      id: 'work-missing-photo',
+      avatarId: harness.avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+      metadata: {
+        request: harness.textRequest,
+        workflowVersion: 'text-ref2va.json',
+      },
+    });
     await rm(harness.avatar.photoPath);
 
-    await expect(harness.retryWork(original.id)).rejects.toThrow(/photo|missing/i);
+    await expect(harness.retryWork(work.id)).rejects.toThrow(/photo|missing/i);
   });
 
   test('fails when the original audio is missing for an audio work', async () => {
     const harness = await createHarness();
-    harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'audio-result.mp4' })];
-    const original = await harness.startGeneration(harness.audioRequest);
-    await waitForWork(harness.store, original.id, 'done');
+    const work = harness.store.addWork({
+      id: 'work-missing-audio',
+      avatarId: harness.avatar.id,
+      mode: 'audio',
+      outputPath: null,
+      status: 'failed',
+      metadata: {
+        request: harness.audioRequest,
+        workflowVersion: 'audio-digital-human.json',
+      },
+    });
     await rm(harness.audioRequest.audioPath!);
 
-    await expect(harness.retryWork(original.id)).rejects.toThrow(/audio|missing/i);
+    await expect(harness.retryWork(work.id)).rejects.toThrow(/audio|missing/i);
   });
+
+  test.each([
+    { scenario: 'missing mode', request: { avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1 } },
+    { scenario: 'invalid mode', request: { mode: 'video', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1 } },
+    { scenario: 'empty avatarId', request: { mode: 'text', avatarId: '', prompt: 'p', duration: 8, seed: 1 } },
+    { scenario: 'empty prompt', request: { mode: 'text', avatarId: 'avatar-1', prompt: '  ', duration: 8, seed: 1 } },
+    { scenario: 'invalid duration', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: -1, seed: 1 } },
+    { scenario: 'invalid seed', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1.5 } },
+    { scenario: 'invalid audioPath type', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 123 } },
+    { scenario: 'invalid trimStart', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', trimStart: -1 } },
+  ])('rejects a work with $scenario in metadata', async ({ request }) => {
+    const harness = await createHarness();
+    const work = harness.store.addWork({
+      id: 'work-invalid-request',
+      avatarId: harness.avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+      metadata: {
+        request,
+        workflowVersion: 'text-ref2va.json',
+      },
+    });
+
+    await expect(harness.retryWork(work.id)).rejects.toThrow(/invalid|metadata/i);
+    expect(harness.store.listWorks()).toHaveLength(1);
+  });
+
+  test.each(['pending', 'running', 'done'] as const)(
+    'rejects retrying a %s work before reading metadata',
+    async (status) => {
+      const harness = await createHarness();
+      const work = harness.store.addWork({
+        id: `work-${status}`,
+        avatarId: harness.avatar.id,
+        mode: 'text',
+        outputPath: status === 'done' ? join(harness.outputDirectory, 'done.mp4') : null,
+        status,
+        metadata: {
+          request: harness.textRequest,
+          workflowVersion: 'text-ref2va.json',
+        },
+      });
+
+      await expect(harness.retryWork(work.id)).rejects.toThrow(/failed/i);
+      expect(harness.store.listWorks()).toHaveLength(1);
+    },
+  );
 });

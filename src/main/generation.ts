@@ -408,6 +408,54 @@ export interface RetryHandlerOptions {
   startGeneration: GenerationHandler;
 }
 
+function isRetryableRequest(value: unknown): value is GenerationRequest {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const request = value as Record<string, unknown>;
+  if (request.mode !== 'text' && request.mode !== 'audio') {
+    return false;
+  }
+  if (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0) {
+    return false;
+  }
+  if (typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
+    return false;
+  }
+  if (
+    typeof request.duration !== 'number' ||
+    !Number.isFinite(request.duration) ||
+    request.duration <= 0
+  ) {
+    return false;
+  }
+  if (
+    typeof request.seed !== 'number' ||
+    !Number.isInteger(request.seed) ||
+    request.seed < 0
+  ) {
+    return false;
+  }
+  if (request.audioPath !== undefined) {
+    if (typeof request.audioPath !== 'string' || request.audioPath.trim().length === 0) {
+      return false;
+    }
+  }
+  if (request.trimStart !== undefined) {
+    if (
+      typeof request.trimStart !== 'number' ||
+      !Number.isFinite(request.trimStart) ||
+      request.trimStart < 0
+    ) {
+      return false;
+    }
+  }
+  if (request.mode === 'audio' && request.audioPath === undefined) {
+    return false;
+  }
+  return true;
+}
+
 function isRetryableMetadata(value: unknown): value is {
   request: GenerationRequest;
   workflowVersion: string;
@@ -419,8 +467,7 @@ function isRetryableMetadata(value: unknown): value is {
   return (
     typeof record.workflowVersion === 'string' &&
     record.workflowVersion.length > 0 &&
-    typeof record.request === 'object' &&
-    record.request !== null
+    isRetryableRequest(record.request)
   );
 }
 
@@ -433,6 +480,9 @@ export function createRetryHandler(
     const work = store.getWork(id);
     if (work === null) {
       throw new Error(`Work not found: ${id}`);
+    }
+    if (work.status !== 'failed') {
+      throw new Error('Only failed works can be retried');
     }
     if (!isRetryableMetadata(work.metadata)) {
       throw new Error('Work metadata is missing request or workflowVersion');

@@ -73,12 +73,19 @@ export function SettingsPage() {
         model: model.trim(),
         apiKey: apiKey.trim(),
       });
+      if (!mountedRef.current) {
+        return;
+      }
       setProfile({ baseUrl: baseUrl.trim(), model: model.trim() });
       setApiKey('');
     } catch (error) {
-      setProfileError(errorMessage(error));
+      if (mountedRef.current) {
+        setProfileError(errorMessage(error));
+      }
     } finally {
-      setSaving(false);
+      if (mountedRef.current) {
+        setSaving(false);
+      }
     }
   };
 
@@ -93,9 +100,13 @@ export function SettingsPage() {
         model: model.trim(),
         apiKey: apiKey.trim(),
       });
-      setLlmStatus({ kind: 'models', models });
+      if (mountedRef.current) {
+        setLlmStatus({ kind: 'models', models });
+      }
     } catch (error) {
-      setLlmStatus({ kind: 'error', message: errorMessage(error) });
+      if (mountedRef.current) {
+        setLlmStatus({ kind: 'error', message: errorMessage(error) });
+      }
     }
   };
 
@@ -110,9 +121,13 @@ export function SettingsPage() {
         model: model.trim(),
         apiKey: apiKey.trim(),
       });
-      setLlmStatus({ kind: 'test', latencyMs: result.latencyMs, summary: result.summary });
+      if (mountedRef.current) {
+        setLlmStatus({ kind: 'test', latencyMs: result.latencyMs, summary: result.summary });
+      }
     } catch (error) {
-      setLlmStatus({ kind: 'error', message: errorMessage(error) });
+      if (mountedRef.current) {
+        setLlmStatus({ kind: 'error', message: errorMessage(error) });
+      }
     }
   };
 

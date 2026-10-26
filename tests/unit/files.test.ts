@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -271,6 +271,58 @@ describe('FileService.openFolder', () => {
 
     try {
       await expect(service.openFolder(join(outputDirectory, 'missing'))).rejects.toThrow(/does not exist/i);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects a junction that points outside the allowed roots', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));
+    const outputDirectory = join(directory, 'output');
+    const dataDirectory = join(directory, 'data');
+    const outside = await mkdtemp(join(tmpdir(), 'smo-open-folder-outside-'));
+    await mkdir(outputDirectory, { recursive: true });
+    const junctionPath = join(outputDirectory, 'junction');
+    await symlink(outside, junctionPath, 'junction');
+
+    const service = new FileService({
+      mediaRegistry: new MediaRegistry({ avatarsDirectory: join(directory, 'avatars'), outputDirectory }),
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory,
+      dataDirectory,
+      opener: { openPath: async () => '' },
+    });
+
+    try {
+      await expect(service.openFolder(junctionPath)).rejects.toThrow(/not allowed/i);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('opens a junction that resolves inside an allowed root', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));
+    const outputDirectory = join(directory, 'output');
+    const dataDirectory = join(directory, 'data');
+    await mkdir(outputDirectory, { recursive: true });
+    const target = join(outputDirectory, 'target');
+    await mkdir(target, { recursive: true });
+    const junctionPath = join(outputDirectory, 'junction');
+    await symlink(target, junctionPath, 'junction');
+
+    const opened: string[] = [];
+    const service = new FileService({
+      mediaRegistry: new MediaRegistry({ avatarsDirectory: join(directory, 'avatars'), outputDirectory }),
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory,
+      dataDirectory,
+      opener: { openPath: async (path) => { opened.push(path); return ''; } },
+    });
+
+    try {
+      await service.openFolder(junctionPath);
+      expect(opened).toEqual([await realpath(junctionPath)]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
