@@ -303,6 +303,61 @@ describe('IPC input schema', () => {
   });
 
   test.each([
+    {
+      scenario: 'node',
+      node: {
+        class_type: 'UNETLoader',
+        inputs: { unet_name: 'int8.safetensors' },
+        unexpected: 'smuggled',
+      },
+    },
+    {
+      scenario: '_meta',
+      node: {
+        class_type: 'UNETLoader',
+        inputs: { unet_name: 'int8.safetensors' },
+        _meta: { title: 'Load model', unexpected: 'smuggled' },
+      },
+    },
+  ])('rejects undeclared fields nested in a Comfy $scenario object', ({ node }) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'hardware:apply',
+        payload: {
+          graph: { '1': node },
+          profile: hardwareProfile,
+          confirmed: true,
+          modelDirectory: 'G:\\models',
+        },
+      }),
+    ).toThrow(/unexpected/i);
+  });
+
+  test.each(['text-ref2va.json', 'audio-digital-human.json'])(
+    'accepts every node in the real %s API graph',
+    async (filename) => {
+      const graph = JSON.parse(
+        await readFile(
+          new URL(`../../resources/workflows/${filename}`, import.meta.url),
+          'utf8',
+        ),
+      ) as ComfyGraph;
+
+      expect(
+        createIpcSchema().parse({
+          channel: 'hardware:apply',
+          payload: {
+            graph,
+            profile: hardwareProfile,
+            confirmed: true,
+            modelDirectory: 'G:\\models',
+          },
+        }).channel,
+      ).toBe('hardware:apply');
+    },
+  );
+
+  test.each([
     { prompt: '' },
     { prompt: '   ' },
     { duration: 0 },
@@ -598,6 +653,35 @@ describe('main-process IPC handlers', () => {
     expect(patched['1'].inputs.unet_name).toBe(unetName);
     expect(patched['2'].inputs.megapixels).toBe(0.7);
     expect(graph['1'].inputs.unet_name).toBe('old.safetensors');
+  });
+
+  test('rejects nested node fields before calling hardware apply', async () => {
+    let calls = 0;
+    const harness = await createHarness({
+      hardware: {
+        detect: async () => hardwareInfo,
+        apply: (graph) => {
+          calls += 1;
+          return graph;
+        },
+      },
+    });
+
+    await expect(
+      harness.invoke('hardware:apply', {
+        graph: {
+          '1': {
+            class_type: 'UNETLoader',
+            inputs: { unet_name: 'int8.safetensors' },
+            unexpected: 'smuggled',
+          },
+        },
+        profile: hardwareProfile,
+        confirmed: true,
+        modelDirectory: 'G:\\models',
+      }),
+    ).rejects.toThrow(/unexpected/i);
+    expect(calls).toBe(0);
   });
 
   test('rejects hardware apply without confirmation', async () => {

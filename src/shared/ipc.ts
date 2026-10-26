@@ -127,8 +127,9 @@ const comfyNodeSchema = z
   .object({
     class_type: nonEmptyString,
     inputs: z.record(z.string(), z.unknown()),
+    _meta: z.object({ title: z.string() }).strict().optional(),
   })
-  .passthrough();
+  .strict();
 
 export type IpcSkillName = (typeof SKILL_NAMES)[number];
 export type ComfyGraph = Record<string, z.infer<typeof comfyNodeSchema>>;
