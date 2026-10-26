@@ -41,6 +41,7 @@ function isWithin(root: string, candidate: string): boolean {
 export class MediaRegistry {
   private readonly roots: string[];
   private readonly selectedFiles = new Set<string>();
+  private readonly selectedImages = new Set<string>();
   private readonly pathsByToken = new Map<string, string>();
   private readonly tokensByPath = new Map<string, string>();
 
@@ -54,6 +55,20 @@ export class MediaRegistry {
 
   async authorizeSelectedFile(filePath: string): Promise<void> {
     this.selectedFiles.add(await this.realMediaFile(filePath));
+  }
+
+  async authorizeSelectedImage(filePath: string): Promise<void> {
+    const canonicalPath = await this.realMediaFile(filePath);
+    this.selectedFiles.add(canonicalPath);
+    this.selectedImages.add(canonicalPath);
+  }
+
+  async isSelectedImage(filePath: string): Promise<boolean> {
+    try {
+      return this.selectedImages.has(await this.realMediaFile(filePath));
+    } catch {
+      return false;
+    }
   }
 
   async createMediaUrl(filePath: string): Promise<string> {

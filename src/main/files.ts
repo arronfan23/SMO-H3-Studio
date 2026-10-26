@@ -18,11 +18,11 @@ export class FileService {
   ) {}
 
   selectImage(): Promise<string | null> {
-    return this.select('选择人物照片', '图片', IMAGE_EXTENSIONS);
+    return this.select('选择人物照片', '图片', IMAGE_EXTENSIONS, 'image');
   }
 
   selectAudio(): Promise<string | null> {
-    return this.select('选择配音音频', '音频', AUDIO_EXTENSIONS);
+    return this.select('选择配音音频', '音频', AUDIO_EXTENSIONS, 'audio');
   }
 
   mediaUrl(filePath: string): Promise<string> {
@@ -33,6 +33,7 @@ export class FileService {
     title: string,
     name: string,
     extensions: string[],
+    kind: 'image' | 'audio',
   ): Promise<string | null> {
     const result = await this.dialog.showOpenDialog({
       title,
@@ -43,7 +44,11 @@ export class FileService {
     if (filePath === undefined) {
       return null;
     }
-    await this.mediaRegistry.authorizeSelectedFile(filePath);
+    if (kind === 'image') {
+      await this.mediaRegistry.authorizeSelectedImage(filePath);
+    } else {
+      await this.mediaRegistry.authorizeSelectedFile(filePath);
+    }
     return filePath;
   }
 }

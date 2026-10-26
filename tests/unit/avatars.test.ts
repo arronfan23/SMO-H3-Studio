@@ -1,10 +1,12 @@
 // @vitest-environment node
 
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest';
 import { AvatarService } from '../../src/main/avatars';
+import { FileService, type FileDialog } from '../../src/main/files';
+import { MediaRegistry } from '../../src/main/media';
 import { Store } from '../../src/main/store';
 
 describe('AvatarService', () => {
@@ -12,12 +14,20 @@ describe('AvatarService', () => {
   let avatarsDirectory: string;
   let store: Store;
   let service: AvatarService;
+  let registry: MediaRegistry;
+  let showOpenDialog: Mock<FileDialog['showOpenDialog']>;
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'smo-avatars-'));
     avatarsDirectory = join(directory, 'managed-avatars');
     store = new Store(':memory:');
-    service = new AvatarService({ avatarsDirectory, store });
+    registry = new MediaRegistry({
+      avatarsDirectory,
+      inputDirectory: join(directory, 'input'),
+      outputDirectory: join(directory, 'output'),
+    });
+    showOpenDialog = vi.fn<FileDialog['showOpenDialog']>();
+    service = new AvatarService({ avatarsDirectory, store, mediaRegistry: registry });
   });
 
   afterEach(async () => {
@@ -28,6 +38,10 @@ describe('AvatarService', () => {
   test('copies a photo to a UUID file and returns the avatar saved in Store', async () => {
     const source = join(directory, 'portrait.PNG');
     await writeFile(source, 'portrait-image-data');
+    showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [source] });
+    const files = new FileService(registry, { showOpenDialog });
+
+    await expect(files.selectImage()).resolves.toBe(source);
 
     const avatar = await service.createAvatar({
       name: '  薄荷主播  ',
@@ -41,6 +55,20 @@ describe('AvatarService', () => {
     );
     expect(await readFile(avatar.photoPath, 'utf8')).toBe('portrait-image-data');
     expect(store.listAvatars()).toEqual([avatar]);
+    const mediaUrl = await registry.createMediaUrl(avatar.photoPath);
+    expect(registry.resolveMediaUrl(mediaUrl)).toBe(await realpath(avatar.photoPath));
+  });
+
+  test('rejects an existing image that was not explicitly selected without copying it', async () => {
+    const source = join(directory, 'private.png');
+    await writeFile(source, 'private-image-data');
+
+    await expect(
+      service.createAvatar({ name: 'Presenter', photoPath: source }),
+    ).rejects.toThrow(/selectImage/i);
+
+    expect(store.listAvatars()).toEqual([]);
+    await expect(readdir(avatarsDirectory)).rejects.toThrow();
   });
 
   test.each(['.gif', '.txt', ''])('rejects unsupported image extension %s', async (extension) => {

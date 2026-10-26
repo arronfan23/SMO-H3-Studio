@@ -167,6 +167,7 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     avatars: new AvatarService({
       avatarsDirectory: join(directory, 'avatars'),
       store,
+      mediaRegistry,
     }),
     files: new FileService(mediaRegistry, { showOpenDialog }),
     comfy: {
@@ -563,6 +564,11 @@ describe('main-process IPC handlers', () => {
     const source = join(harness.directory, 'presenter.png');
     await writeFile(source, 'image-data');
 
+    await expect(
+      harness.invoke('avatars:create', { name: 'Presenter', photoPath: source }),
+    ).rejects.toThrow(/selectImage/i);
+    harness.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [source] });
+    await expect(harness.invoke('files:selectImage')).resolves.toBe(source);
     const avatar = (await harness.invoke('avatars:create', {
       name: 'Presenter',
       photoPath: source,

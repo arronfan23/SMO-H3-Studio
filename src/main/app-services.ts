@@ -92,6 +92,7 @@ export async function createAppServices(
   const avatars = new AvatarService({
     avatarsDirectory: join(dataDirectory, 'avatars'),
     store,
+    mediaRegistry,
   });
   const files = new FileService(mediaRegistry, options.fileDialog ?? dialog);
   const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));

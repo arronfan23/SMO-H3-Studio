@@ -4,21 +4,25 @@ import { randomUUID } from 'node:crypto';
 import { extname, isAbsolute, join } from 'node:path';
 import type { Avatar } from '../shared/types';
 import type { Store } from './store';
+import type { MediaRegistry } from './media';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
 export interface AvatarServiceOptions {
   avatarsDirectory: string;
   store: Pick<Store, 'createAvatar'>;
+  mediaRegistry: Pick<MediaRegistry, 'isSelectedImage'>;
 }
 
 export class AvatarService {
   private readonly avatarsDirectory: string;
   private readonly store: Pick<Store, 'createAvatar'>;
+  private readonly mediaRegistry: Pick<MediaRegistry, 'isSelectedImage'>;
 
   constructor(options: AvatarServiceOptions) {
     this.avatarsDirectory = options.avatarsDirectory;
     this.store = options.store;
+    this.mediaRegistry = options.mediaRegistry;
   }
 
   async createAvatar(input: { name: string; photoPath: string }): Promise<Avatar> {
@@ -43,6 +47,9 @@ export class AvatarService {
     }
     if (!sourceStats.isFile()) {
       throw new Error('Avatar image file does not exist or is not a file');
+    }
+    if (!(await this.mediaRegistry.isSelectedImage(input.photoPath))) {
+      throw new Error('Avatar image must be explicitly selected through files.selectImage');
     }
 
     await mkdir(this.avatarsDirectory, { recursive: true });
