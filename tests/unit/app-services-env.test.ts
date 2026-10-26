@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   createAppServices,
+  resolveStringOption,
   DEFAULT_DATA_DIRECTORY,
   DEFAULT_OUTPUT_DIRECTORY,
   DEFAULT_COMFYUI_BASE_URL,
@@ -222,31 +223,19 @@ describe('createAppServices empty value fallback', () => {
   });
 
   test.each([
-    { name: 'empty string', value: '' },
-    { name: 'whitespace', value: '   ' },
-    { name: 'tab', value: '\t' },
-  ])('ignores $name dataDirectory option and falls back to default', async ({ value }) => {
-    const services = await createAppServices({ dataDirectory: value });
-    await services.close();
-
-    expect(existsSync(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'))).toBe(true);
-    await rm(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'), { force: true });
-    await rm(join(DEFAULT_DATA_DIRECTORY, 'workflow-profiles'), { recursive: true, force: true });
-  });
-
-  test.each([
-    { name: 'empty string', value: '' },
-    { name: 'whitespace', value: '   ' },
-  ])('ignores $name SMO_DATA_DIRECTORY env and falls back to default', async ({ value }) => {
-    process.env.SMO_DATA_DIRECTORY = value;
-
-    const services = await createAppServices({});
-    await services.close();
-
-    expect(existsSync(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'))).toBe(true);
-    await rm(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'), { force: true });
-    await rm(join(DEFAULT_DATA_DIRECTORY, 'workflow-profiles'), { recursive: true, force: true });
-  });
+    { name: 'empty string', option: '', env: undefined },
+    { name: 'whitespace', option: '   ', env: undefined },
+    { name: 'tab', option: '\t', env: undefined },
+    { name: 'empty env', option: undefined, env: '' },
+    { name: 'whitespace env', option: undefined, env: '   ' },
+  ])(
+    'ignores $name dataDirectory value and falls back to default',
+    ({ option, env }) => {
+      expect(resolveStringOption(option, env, DEFAULT_DATA_DIRECTORY)).toBe(
+        DEFAULT_DATA_DIRECTORY,
+      );
+    },
+  );
 
   test('ignores empty outputDirectory option and falls back to default', async () => {
     const dataDirectory = await useDataDirectory();

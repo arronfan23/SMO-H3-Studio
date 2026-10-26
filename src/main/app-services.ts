@@ -47,7 +47,7 @@ export interface AppServicesOptions {
   mediaProtocol?: MediaProtocolRegistrar;
 }
 
-function resolveStringOption(
+export function resolveStringOption(
   option: string | undefined,
   env: string | undefined,
   defaultValue: string,
