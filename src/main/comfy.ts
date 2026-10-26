@@ -50,6 +50,11 @@ export interface ComfyProgress {
   max: number;
 }
 
+type HistoryCompletion =
+  | { kind: 'success' }
+  | { kind: 'failure'; error: Error }
+  | null;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -76,6 +81,13 @@ function parseBaseUrl(value: string): URL {
 
   baseUrl.pathname = `${baseUrl.pathname.replace(/\/+$/, '')}/`;
   return baseUrl;
+}
+
+function validateTimeout(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`ComfyUI ${name} must be a finite positive number`);
+  }
+  return value;
 }
 
 function createHttpError(status: number, body: string): Error {
@@ -158,12 +170,85 @@ function createExecutionError(data: Record<string, unknown>): Error {
   );
 }
 
-function collectHistoryFiles(value: unknown, promptId: string): ComfyOutputFile[] {
+function createExecutionInterruptedError(data: Record<string, unknown>): Error {
+  const nodeId =
+    typeof data.node_id === 'string' && data.node_id.length > 0
+      ? ` at node ${data.node_id.slice(0, 100)}`
+      : '';
+  return new Error(`ComfyUI execution interrupted${nodeId}`);
+}
+
+function historyEntry(value: unknown, promptId: string): Record<string, unknown> | null {
   if (!isRecord(value)) {
     throw invalidHistoryResponse();
   }
   const entry = value[promptId];
   if (entry === undefined) {
+    return null;
+  }
+  if (!isRecord(entry)) {
+    throw invalidHistoryResponse();
+  }
+  return entry;
+}
+
+function parseHistoryCompletion(value: unknown, promptId: string): HistoryCompletion {
+  const entry = historyEntry(value, promptId);
+  if (entry === null || entry.status === undefined || entry.status === null) {
+    return null;
+  }
+  if (!isRecord(entry.status)) {
+    throw invalidHistoryResponse();
+  }
+
+  const status = entry.status;
+  if (
+    typeof status.status_str !== 'string' ||
+    typeof status.completed !== 'boolean' ||
+    !Array.isArray(status.messages)
+  ) {
+    throw invalidHistoryResponse();
+  }
+
+  for (const message of status.messages) {
+    if (
+      !Array.isArray(message) ||
+      message.length < 2 ||
+      typeof message[0] !== 'string' ||
+      !isRecord(message[1])
+    ) {
+      throw invalidHistoryResponse();
+    }
+    const [type, data] = message;
+    if (data.prompt_id !== promptId) {
+      continue;
+    }
+    if (type === 'execution_interrupted') {
+      return { kind: 'failure', error: createExecutionInterruptedError(data) };
+    }
+    if (type === 'execution_error') {
+      return { kind: 'failure', error: createExecutionError(data) };
+    }
+    if (type === 'execution_success') {
+      return { kind: 'success' };
+    }
+  }
+
+  if (status.status_str === 'success' && status.completed) {
+    return { kind: 'success' };
+  }
+  if (status.status_str === 'error') {
+    return {
+      kind: 'failure',
+      error: new Error('ComfyUI execution failed without an execution error message'),
+    };
+  }
+  return null;
+}
+
+function collectHistoryFiles(value: unknown, promptId: string): ComfyOutputFile[] {
+  const entry = historyEntry(value, promptId);
+  if (entry === null) {
     return [];
   }
   if (!isRecord(entry) || !isRecord(entry.outputs)) {
@@ -217,10 +302,19 @@ export class ComfyClient {
 
   constructor(baseUrl = DEFAULT_BASE_URL, options: ComfyClientOptions = {}) {
     this.baseUrl = parseBaseUrl(baseUrl);
-    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    this.completionTimeoutMs =
-      options.completionTimeoutMs ?? DEFAULT_COMPLETION_TIMEOUT_MS;
-    this.clientId = options.clientId ?? randomUUID();
+    this.requestTimeoutMs = validateTimeout(
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      'requestTimeoutMs',
+    );
+    this.completionTimeoutMs = validateTimeout(
+      options.completionTimeoutMs ?? DEFAULT_COMPLETION_TIMEOUT_MS,
+      'completionTimeoutMs',
+    );
+    const clientId = options.clientId ?? randomUUID();
+    if (clientId.trim().length === 0) {
+      throw new Error('ComfyUI clientId must be non-empty');
+    }
+    this.clientId = clientId;
   }
 
   async health(): Promise<ComfySystemStats> {
@@ -285,7 +379,7 @@ export class ComfyClient {
     const value = await this.requestJson('prompt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, client_id: this.clientId }),
     });
     if (
       !isRecord(value) ||
@@ -305,7 +399,7 @@ export class ComfyClient {
   }
 
   async history(promptId: string): Promise<ComfyOutputFile[]> {
-    const value = await this.requestJson(`history/${encodeURIComponent(promptId)}`);
+    const value = await this.historyValue(promptId);
     return collectHistoryFiles(value, promptId);
   }
 
@@ -344,8 +438,8 @@ export class ComfyClient {
         }
       };
 
-      socket.on('message', (data) => {
-        if (settled) {
+      socket.on('message', (data, isBinary) => {
+        if (settled || isBinary) {
           return;
         }
         let message: unknown;
@@ -410,6 +504,13 @@ export class ComfyClient {
               finish(createExecutionError(payload));
             }
             return;
+          case 'execution_interrupted':
+            if (!isRecord(payload)) {
+              finish(new Error('ComfyUI WebSocket returned an invalid interruption'));
+            } else if (payload.prompt_id === promptId) {
+              finish(createExecutionInterruptedError(payload));
+            }
+            return;
           default:
             return;
         }
@@ -419,6 +520,27 @@ export class ComfyClient {
       });
       socket.on('close', (code) => {
         finish(new Error(`ComfyUI WebSocket closed before execution completed (${code})`));
+      });
+      socket.on('open', () => {
+        void this.historyValue(promptId)
+          .then((value) => {
+            if (settled) {
+              return;
+            }
+            const completion = parseHistoryCompletion(value, promptId);
+            if (completion?.kind === 'success') {
+              finish();
+            } else if (completion?.kind === 'failure') {
+              finish(completion.error);
+            }
+          })
+          .catch((error: unknown) => {
+            finish(
+              error instanceof Error
+                ? error
+                : new Error('Could not reconcile ComfyUI execution history'),
+            );
+          });
       });
 
       timeout = setTimeout(() => {
@@ -431,6 +553,10 @@ export class ComfyClient {
 
   private endpoint(path: string): URL {
     return new URL(path, this.baseUrl);
+  }
+
+  private async historyValue(promptId: string): Promise<unknown> {
+    return this.requestJson(`history/${encodeURIComponent(promptId)}`);
   }
 
   private async requestJson(path: string, init: RequestInit = {}): Promise<unknown> {

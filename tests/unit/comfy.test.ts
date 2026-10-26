@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { ComfyClient } from '../../src/main/comfy';
+import { JobCoordinator } from '../../src/main/jobs';
 
 interface RecordedRequest {
   method: string | undefined;
@@ -57,7 +58,15 @@ async function startComfy(handler?: RequestHandler): Promise<LocalComfy> {
         body,
       });
 
-      const handle = handler ?? ((_request, res) => json(res, { error: 'not found' }, 404));
+      const handle =
+        handler ??
+        ((req, res) => {
+          if (req.url?.startsWith('/history/')) {
+            json(res, {});
+          } else {
+            json(res, { error: 'not found' }, 404);
+          }
+        });
       Promise.resolve(handle(request, response, body)).catch(() => response.destroy());
     });
   });
@@ -144,6 +153,27 @@ describe('ComfyClient base URL and REST requests', () => {
     expect(() => new ComfyClient(baseUrl)).toThrow(/base URL/i);
   });
 
+  test.each(['', '   ', '\t'])('rejects an empty injected client id: %j', (clientId) => {
+    expect(() => new ComfyClient('http://127.0.0.1:8188', { clientId })).toThrow(
+      /clientId.*non-empty/i,
+    );
+  });
+
+  test.each([
+    { requestTimeoutMs: Number.NaN },
+    { requestTimeoutMs: 0 },
+    { requestTimeoutMs: -1 },
+    { requestTimeoutMs: Number.POSITIVE_INFINITY },
+    { completionTimeoutMs: Number.NaN },
+    { completionTimeoutMs: 0 },
+    { completionTimeoutMs: -1 },
+    { completionTimeoutMs: Number.POSITIVE_INFINITY },
+  ])('rejects a non-finite or non-positive timeout: %j', (options) => {
+    expect(() => new ComfyClient('http://127.0.0.1:8188', options)).toThrow(
+      /must be a finite positive number/i,
+    );
+  });
+
   test('checks health through GET /system_stats and validates the response', async () => {
     const stats = {
       system: { os: 'nt', comfyui_version: 'test' },
@@ -193,7 +223,7 @@ describe('ComfyClient base URL and REST requests', () => {
     );
   });
 
-  test('submits only the prompt envelope and returns validated identifiers', async () => {
+  test('submits the prompt and injected client id and returns validated identifiers', async () => {
     const prompt = {
       '1': { class_type: 'LoadImage', inputs: { image: 'tiny.png' } },
     };
@@ -201,12 +231,17 @@ describe('ComfyClient base URL and REST requests', () => {
       json(response, { prompt_id: 'prompt-1', number: 7, node_errors: {} }),
     );
 
-    const result = await new ComfyClient(upstream.baseUrl).submit(prompt);
+    const result = await new ComfyClient(upstream.baseUrl, { clientId: 'client-1' }).submit(
+      prompt,
+    );
 
     expect(result).toEqual({ prompt_id: 'prompt-1', number: 7, node_errors: {} });
     expect(upstream.requests[0]).toMatchObject({ method: 'POST', url: '/prompt' });
     expect(upstream.requests[0].headers['content-type']).toContain('application/json');
-    expect(JSON.parse(upstream.requests[0].body.toString('utf8'))).toEqual({ prompt });
+    expect(JSON.parse(upstream.requests[0].body.toString('utf8'))).toEqual({
+      prompt,
+      client_id: 'client-1',
+    });
   });
 
   test.each([
@@ -440,6 +475,81 @@ describe('ComfyClient WebSocket completion', () => {
     expect(websocketUrl).toBe('/ws?clientId=client%2Fwith%20space');
   });
 
+  test('resolves from history when execution completed before subscription without replay', async () => {
+    const upstream = await startComfy((_request, response) =>
+      json(response, {
+        'prompt-1': {
+          outputs: {},
+          status: { status_str: 'success', completed: true, messages: [] },
+        },
+      }),
+    );
+
+    await expect(
+      new ComfyClient(upstream.baseUrl, { completionTimeoutMs: 100 }).waitForCompletion(
+        'prompt-1',
+      ),
+    ).resolves.toBeUndefined();
+    expect(upstream.requests.some((request) => request.url === '/history/prompt-1')).toBe(true);
+  });
+
+  test.each([
+    {
+      scenario: 'execution error',
+      event: 'execution_error',
+      data: {
+        prompt_id: 'prompt-1',
+        node_id: 'node-7',
+        exception_message: 'model missing',
+      },
+      pattern: /execution failed.*node-7.*model missing/i,
+    },
+    {
+      scenario: 'interruption',
+      event: 'execution_interrupted',
+      data: { prompt_id: 'prompt-1', node_id: 'node-8' },
+      pattern: /execution interrupted.*node-8/i,
+    },
+  ])('settles a pre-subscription $scenario from history messages', async ({
+    event,
+    data,
+    pattern,
+  }) => {
+    const upstream = await startComfy((_request, response) =>
+      json(response, {
+        'prompt-1': {
+          outputs: {},
+          status: {
+            status_str: 'error',
+            completed: false,
+            messages: [[event, data]],
+          },
+        },
+      }),
+    );
+
+    await expectRejection(
+      new ComfyClient(upstream.baseUrl, { completionTimeoutMs: 100 }).waitForCompletion(
+        'prompt-1',
+      ),
+      pattern,
+    );
+  });
+
+  test('ignores binary preview frames and accepts a later execution success', async () => {
+    const upstream = await startComfy();
+    upstream.webSockets.on('connection', (socket) => {
+      socket.send(Buffer.from([0, 1, 2, 255]), { binary: true });
+      send(socket, 'execution_success', { prompt_id: 'prompt-1' });
+    });
+
+    await expect(
+      new ComfyClient(upstream.baseUrl, { completionTimeoutMs: 100 }).waitForCompletion(
+        'prompt-1',
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   test('rejects execution errors with a bounded message', async () => {
     const upstream = await startComfy();
     upstream.webSockets.on('connection', (socket) => {
@@ -497,4 +607,82 @@ describe('ComfyClient WebSocket completion', () => {
     },
     500,
   );
+});
+
+describe('ComfyClient and JobCoordinator cancellation', () => {
+  test('fails promptly on interruption and starts the next job after the cancellation barrier', async () => {
+    let socket: WebSocket | undefined;
+    let markConnected!: () => void;
+    const connected = new Promise<void>((resolve) => {
+      markConnected = resolve;
+    });
+    const upstream = await startComfy((request, response) => {
+      if (request.url === '/history/prompt-1') {
+        json(response, {});
+      } else if (request.url === '/interrupt') {
+        send(socket!, 'execution_interrupted', {
+          prompt_id: 'prompt-1',
+          node_id: 'node-cancel',
+        });
+        response.end();
+      } else {
+        json(response, { error: 'not found' }, 404);
+      }
+    });
+    upstream.webSockets.on('connection', (connectedSocket) => {
+      socket = connectedSocket;
+      markConnected();
+    });
+
+    const client = new ComfyClient(upstream.baseUrl, {
+      requestTimeoutMs: 100,
+      completionTimeoutMs: 100,
+    });
+    const coordinator = new JobCoordinator();
+    const calls: string[] = [];
+    let releaseCancellation!: () => void;
+    const cancellationBarrier = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+
+    const first = coordinator.enqueue({
+      id: 'first',
+      run: () => client.waitForCompletion('prompt-1'),
+      cancel: async () => {
+        calls.push('cancel started');
+        await client.cancel();
+        await cancellationBarrier;
+        calls.push('cancel finished');
+      },
+    });
+    const second = coordinator.enqueue({
+      id: 'second',
+      run: async () => {
+        calls.push('second started');
+      },
+    });
+
+    await connected;
+    const cancellation = coordinator.cancelActive();
+    let assertionFailure: unknown;
+    try {
+      await expectRejection(first, /execution interrupted.*node-cancel/i);
+      expect(calls).toEqual(['cancel started']);
+      expect(coordinator.activeCount).toBe(1);
+    } catch (error) {
+      assertionFailure = error;
+    } finally {
+      releaseCancellation();
+    }
+
+    await cancellation;
+    await second;
+    if (assertionFailure !== undefined) {
+      throw assertionFailure;
+    }
+
+    expect(calls).toEqual(['cancel started', 'cancel finished', 'second started']);
+    expect(coordinator.completedIds).toEqual(['second']);
+    expect(coordinator.activeCount).toBe(0);
+  });
 });

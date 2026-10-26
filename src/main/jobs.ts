@@ -84,7 +84,7 @@ export class JobCoordinator {
       if (record.status === 'done') {
         this.reservedIds.add(record.id);
         this.completed.push(record.id);
-      } else if (record.status === 'running') {
+      } else if (record.status === 'running' || record.status === 'pending') {
         this.emit({
           id: record.id,
           status: 'failed',
@@ -95,7 +95,11 @@ export class JobCoordinator {
   }
 
   private emit(event: JobEvent): void {
-    this.onEvent?.(event);
+    try {
+      this.onEvent?.(event);
+    } catch {
+      // Listener failures must not interrupt job settlement or queue cleanup.
+    }
   }
 
   private async pump(): Promise<void> {

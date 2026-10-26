@@ -1,5 +1,6 @@
 // @vitest-environment node
 
+import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, test } from 'vitest';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 
@@ -166,10 +167,41 @@ describe('JobCoordinator execution', () => {
     expect(calls).toEqual(['cancel started', 'b started']);
     expect(coordinator.activeCount).toBe(0);
   });
+
+  test('settles jobs and cleans up when the running event listener throws', async () => {
+    const events: string[] = [];
+    const coordinator = new JobCoordinator({
+      onEvent: (event) => {
+        events.push(`${event.id}:${event.status}`);
+        if (event.status === 'running') {
+          throw new Error(`listener failed for ${event.id}`);
+        }
+      },
+    });
+
+    const first = coordinator.enqueue({ id: 'a', run: async () => {} });
+    const second = coordinator.enqueue({ id: 'b', run: async () => {} });
+    const outcome = await Promise.race([
+      Promise.all([first, second]).then(() => 'settled'),
+      delay(50).then(() => 'stalled'),
+    ]);
+
+    expect(outcome).toBe('settled');
+    expect(coordinator.completedIds).toEqual(['a', 'b']);
+    expect(coordinator.activeCount).toBe(0);
+    expect(events).toEqual([
+      'a:pending',
+      'a:running',
+      'b:pending',
+      'a:done',
+      'b:running',
+      'b:done',
+    ]);
+  });
 });
 
 describe('JobCoordinator recovery', () => {
-  test('fails recovered running jobs and reserves completed ids without rerunning either', async () => {
+  test('fails recovered unfinished jobs and reserves completed ids without rerunning them', async () => {
     const events: JobEvent[] = [];
     const coordinator = new JobCoordinator({ onEvent: (event) => events.push(event) });
     let completedJobRan = false;
@@ -185,9 +217,12 @@ describe('JobCoordinator recovery', () => {
     expect(coordinator.completedIds).toEqual(['finished']);
     expect(events.map(({ id, status }) => ({ id, status }))).toEqual([
       { id: 'interrupted', status: 'failed' },
+      { id: 'still-pending', status: 'failed' },
     ]);
-    expect(events[0].error).toBeInstanceOf(Error);
-    expect((events[0].error as Error).message).toMatch(/interrupted.*restart/i);
+    for (const event of events) {
+      expect(event.error).toBeInstanceOf(Error);
+      expect((event.error as Error).message).toMatch(/interrupted.*restart/i);
+    }
 
     await expect(
       coordinator.enqueue({
@@ -198,5 +233,20 @@ describe('JobCoordinator recovery', () => {
       }),
     ).rejects.toThrow(/duplicate job id/i);
     expect(completedJobRan).toBe(false);
+  });
+
+  test('marks recovered pending jobs as interrupted failures', () => {
+    const events: JobEvent[] = [];
+    const coordinator = new JobCoordinator({ onEvent: (event) => events.push(event) });
+
+    coordinator.recover([{ id: 'pending-job', status: 'pending' }]);
+
+    expect(events.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: 'pending-job', status: 'failed' },
+    ]);
+    expect(events[0].error).toBeInstanceOf(Error);
+    expect((events[0].error as Error).message).toMatch(/interrupted.*restart/i);
+    expect(coordinator.activeCount).toBe(0);
+    expect(coordinator.completedIds).toEqual([]);
   });
 });
