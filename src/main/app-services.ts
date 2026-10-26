@@ -6,7 +6,7 @@ import type { GenerationHandler, IpcServices } from './ipc';
 import { ComfyClient } from './comfy';
 import { createGenerationHandler } from './generation';
 import { applyHardwareProfile, detectHardware } from './hardware';
-import { JobCoordinator } from './jobs';
+import { JobCoordinator, type JobEventErrorHandler } from './jobs';
 import { LlmService } from './llm';
 import { FileLlmConfigStore } from './llm-config';
 import { SkillsService } from './skills';
@@ -29,6 +29,7 @@ export interface AppServices extends IpcServices {
 export interface AppServicesOptions {
   dataDirectory?: string;
   generationHandler?: GenerationHandler;
+  errorReporter?: JobEventErrorHandler;
 }
 
 function defaultWorkflowsDirectory(): string {
@@ -51,6 +52,13 @@ function jobErrorMessage(error: unknown): string {
   return error === undefined ? 'Unknown job error' : String(error);
 }
 
+const defaultErrorReporter: JobEventErrorHandler = (error, event) => {
+  console.error(
+    `[SMO.H3 Studio] Work status update failed for job ${event.id} (${event.status})`,
+    error,
+  );
+};
+
 export async function createAppServices(
   options: AppServicesOptions = {},
 ): Promise<AppServices> {
@@ -70,6 +78,7 @@ export async function createAppServices(
           : {}),
       });
     },
+    onEventError: options.errorReporter ?? defaultErrorReporter,
   });
   const startGeneration =
     options.generationHandler ??

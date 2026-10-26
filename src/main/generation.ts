@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ComfyClient, ComfyOutputFile } from './comfy';
 import type { GenerationHandler } from './ipc';
 import type { JobCoordinator } from './jobs';
@@ -48,6 +48,18 @@ function sanitizeRequest(request: GenerationRequest): GenerationRequest {
 }
 
 function validateRequest(request: GenerationRequest): void {
+  if (
+    typeof request.avatarId !== 'string' ||
+    request.avatarId.trim().length === 0
+  ) {
+    throw new Error('avatarId must not be empty');
+  }
+  if (typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
+    throw new Error('Generation prompt must not be empty');
+  }
+  if (!Number.isInteger(request.seed) || request.seed < 0) {
+    throw new Error('Generation seed must be a non-negative integer');
+  }
   if (request.mode === 'text') {
     if (!Number.isFinite(request.duration) || request.duration < 4 || request.duration > 15) {
       throw new Error('Text duration must be between 4 and 15 seconds');
@@ -71,18 +83,21 @@ function validateRequest(request: GenerationRequest): void {
   }
 }
 
-function isMp4(file: ComfyOutputFile): boolean {
-  return extname(file.filename).toLowerCase() === '.mp4';
-}
-
-function selectVideoOutput(files: ComfyOutputFile[]): ComfyOutputFile {
-  const videoFiles = files.filter((file) => file.kind === 'video' || file.kind === 'gifs');
-  const output =
-    videoFiles.find(isMp4) ??
-    files.find(isMp4) ??
-    videoFiles[0];
+function selectVideoOutput(
+  files: ComfyOutputFile[],
+  mode: GenerationRequest['mode'],
+): ComfyOutputFile {
+  const outputNodeId = mode === 'text' ? '180' : '65';
+  const output = files.find(
+    (file) =>
+      file.type === 'output' &&
+      file.nodeId === outputNodeId &&
+      file.filename.toLowerCase().endsWith('.mp4'),
+  );
   if (!output) {
-    throw new Error('ComfyUI history did not contain a video output');
+    throw new Error(
+      'ComfyUI history did not contain a video output in MP4 format for the current mode',
+    );
   }
   return output;
 }
@@ -129,11 +144,13 @@ export function createGenerationHandler(
   const { store, comfy, jobCoordinator, workflowsDirectory, outputDirectory } = options;
 
   return async (input) => {
-    const avatar = store.listAvatars().find((candidate) => candidate.id === input.avatarId);
+    validateRequest(input);
+    const avatar = store
+      .listAvatars()
+      .find((candidate) => candidate.id === input.avatarId);
     if (!avatar) {
       throw new Error(`Avatar not found: ${input.avatarId}`);
     }
-    validateRequest(input);
     const request = sanitizeRequest(input);
     const workId = randomUUID();
     const workflowFilename = WORKFLOW_FILENAMES[request.mode];
@@ -148,12 +165,48 @@ export function createGenerationHandler(
       error: null,
     });
 
+    const execution = {
+      cancelRequested: false,
+      promptSubmitted: false,
+      cancelSent: false,
+    };
+    const throwIfCancelled = (): void => {
+      if (execution.cancelRequested) {
+        throw new Error('Generation cancelled');
+      }
+    };
+    const interruptIfRequested = async (): Promise<void> => {
+      if (
+        !execution.cancelRequested ||
+        !execution.promptSubmitted ||
+        execution.cancelSent
+      ) {
+        return;
+      }
+      execution.cancelSent = true;
+      await comfy.cancel();
+    };
+
     const run = async (): Promise<void> => {
       try {
+        throwIfCancelled();
         const image = await comfy.uploadFile({
           filePath: avatar.photoPath,
           kind: 'image',
         });
+        throwIfCancelled();
+        const audio =
+          request.mode === 'audio'
+            ? await comfy.uploadFile({
+                filePath: request.audioPath!,
+                kind: 'audio',
+              })
+            : undefined;
+        throwIfCancelled();
+        const frozen = JSON.parse(
+          await readFile(join(workflowsDirectory, workflowFilename), 'utf8'),
+        ) as WorkflowGraph;
+        throwIfCancelled();
         const changes: Record<string, unknown> =
           request.mode === 'text'
             ? {
@@ -165,40 +218,57 @@ export function createGenerationHandler(
               }
             : {
                 '36.inputs.image': image,
-                '34.inputs.audio': await comfy.uploadFile({
-                  filePath: request.audioPath!,
-                  kind: 'audio',
-                }),
+                '34.inputs.audio': audio,
                 '42.inputs.prompt': request.prompt,
                 '85.inputs.start_index': request.trimStart ?? 0,
                 '85.inputs.duration': request.duration,
                 '86.inputs.seed': request.seed,
                 '65.inputs.filename_prefix': `SMO-H3/${workId}`,
               };
-        const frozen = JSON.parse(
-          await readFile(join(workflowsDirectory, workflowFilename), 'utf8'),
-        ) as WorkflowGraph;
-        const submitted = await comfy.submit(patchWorkflow(frozen, changes));
+        const workflow = patchWorkflow(frozen, changes);
+        throwIfCancelled();
+        const submitted = await comfy.submit(workflow);
+        execution.promptSubmitted = true;
         store.updateWork(workId, { promptId: submitted.prompt_id });
+        await interruptIfRequested();
+        throwIfCancelled();
         await comfy.waitForCompletion(submitted.prompt_id);
-        const output = selectVideoOutput(await comfy.history(submitted.prompt_id));
+        throwIfCancelled();
+        const files = await comfy.history(submitted.prompt_id);
+        throwIfCancelled();
+        const output = selectVideoOutput(files, request.mode);
+        const outputPath = resolveOutputPath(outputDirectory, output);
+        throwIfCancelled();
         store.updateWork(workId, {
           status: 'done',
-          outputPath: resolveOutputPath(outputDirectory, output),
+          outputPath,
           error: null,
         });
       } catch (error) {
+        let failure = error;
+        try {
+          await interruptIfRequested();
+        } catch (cancellationError) {
+          failure = cancellationError;
+        }
         store.updateWork(workId, {
           status: 'failed',
-          error: errorMessage(error),
+          error: errorMessage(failure),
         });
-        throw error;
+        throw failure;
       }
     };
 
     // Failures settle in Store and coordinator events; callers receive the queued id immediately.
     void jobCoordinator
-      .enqueue({ id: workId, run, cancel: () => comfy.cancel() })
+      .enqueue({
+        id: workId,
+        run,
+        cancel: async () => {
+          execution.cancelRequested = true;
+          await interruptIfRequested();
+        },
+      })
       .catch(() => undefined);
     return { id: workId };
   };

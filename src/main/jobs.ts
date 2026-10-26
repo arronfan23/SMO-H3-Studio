@@ -12,8 +12,11 @@ export interface JobEvent {
   error?: unknown;
 }
 
+export type JobEventErrorHandler = (error: unknown, event: JobEvent) => void;
+
 export interface JobCoordinatorOptions {
   onEvent?: (event: JobEvent) => void;
+  onEventError?: JobEventErrorHandler;
 }
 
 export interface JobRecoveryRecord {
@@ -33,10 +36,12 @@ export class JobCoordinator {
   private readonly reservedIds = new Set<string>();
   private readonly completed: string[] = [];
   private readonly onEvent?: (event: JobEvent) => void;
+  private readonly onEventError?: JobEventErrorHandler;
   private active: QueueItem | null = null;
 
   constructor(options: JobCoordinatorOptions = {}) {
     this.onEvent = options.onEvent;
+    this.onEventError = options.onEventError;
   }
 
   get activeCount(): number {
@@ -97,8 +102,12 @@ export class JobCoordinator {
   private emit(event: JobEvent): void {
     try {
       this.onEvent?.(event);
-    } catch {
-      // Listener failures must not interrupt job settlement or queue cleanup.
+    } catch (error) {
+      try {
+        this.onEventError?.(error, event);
+      } catch {
+        // Neither listener nor reporter failures may interrupt queue cleanup.
+      }
     }
   }
 

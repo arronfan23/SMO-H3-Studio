@@ -58,6 +58,8 @@ class FakeComfyClient {
   completionError?: Error;
   historyError?: Error;
   completionGate?: Deferred<void>;
+  uploadGate?: Deferred<void>;
+  submitGate?: Deferred<ComfySubmitResult>;
   cancellations = 0;
   outputs: ComfyOutputFile[] = [
     outputFile({ nodeId: 'preview', kind: 'images', filename: 'cover.png' }),
@@ -71,6 +73,9 @@ class FakeComfyClient {
     if (error) {
       throw error;
     }
+    if (this.uploadGate) {
+      await this.uploadGate.promise;
+    }
     return input.kind === 'image' ? 'uploaded/avatar.png' : 'uploaded/voice.mp3';
   }
 
@@ -78,6 +83,9 @@ class FakeComfyClient {
     this.submissions.push(structuredClone(prompt));
     if (this.submitError) {
       throw this.submitError;
+    }
+    if (this.submitGate) {
+      return this.submitGate.promise;
     }
     return { prompt_id: this.promptId, number: 1, node_errors: {} };
   }
@@ -261,6 +269,9 @@ describe('GenerationHandler workflows', () => {
       const workflowPath = join(workflowsDirectory, 'audio-digital-human.json');
       const frozenSource = await readFile(workflowPath, 'utf8');
       const request = { ...harness.audioRequest, trimStart };
+      harness.comfy.outputs = [
+        outputFile({ nodeId: '65', filename: 'audio-result.mp4' }),
+      ];
 
       const result = await harness.startGeneration(request);
       const work = await waitForWork(harness.store, result.id, 'done');
@@ -283,7 +294,7 @@ describe('GenerationHandler workflows', () => {
       expect(harness.comfy.submissions).toEqual([expected]);
       expect(work.status).toBe('done');
       expect(work.outputPath).toBe(
-        join(harness.outputDirectory, 'SMO-H3', 'result.mp4'),
+        join(harness.outputDirectory, 'SMO-H3', 'audio-result.mp4'),
       );
       expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
     },
@@ -339,6 +350,39 @@ describe('GenerationHandler workflows', () => {
 });
 
 describe('GenerationHandler validation', () => {
+  test.each(['', '   '])('rejects an empty avatarId %j before creating a work', async (avatarId) => {
+    const harness = await createHarness();
+
+    await expect(
+      harness.startGeneration({ ...harness.textRequest, avatarId }),
+    ).rejects.toThrow(/avatarId.*empty/i);
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+  });
+
+  test.each(['', '   '])('rejects an empty prompt %j before creating a work', async (prompt) => {
+    const harness = await createHarness();
+
+    await expect(
+      harness.startGeneration({ ...harness.textRequest, prompt }),
+    ).rejects.toThrow(/prompt.*empty/i);
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+  });
+
+  test.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'rejects invalid seed %s before creating a work',
+    async (seed) => {
+      const harness = await createHarness();
+
+      await expect(
+        harness.startGeneration({ ...harness.textRequest, seed }),
+      ).rejects.toThrow(/seed.*non-negative integer/i);
+      expect(harness.store.listWorks()).toEqual([]);
+      expect(harness.comfy.uploads).toEqual([]);
+    },
+  );
+
   test('rejects a missing avatar before creating a work or uploading', async () => {
     const harness = await createHarness();
 
@@ -383,6 +427,65 @@ describe('GenerationHandler validation', () => {
     );
     expect(harness.store.listWorks()).toEqual([]);
     expect(harness.comfy.uploads).toEqual([]);
+  });
+});
+
+describe('GenerationHandler output selection', () => {
+  test('selects the final output MP4 when a temp MP4 appears first', async () => {
+    const harness = await createHarness();
+    harness.comfy.outputs = [
+      outputFile({ type: 'temp', filename: 'preview.mp4' }),
+      outputFile({ type: 'output', filename: 'final.mp4' }),
+    ];
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(work.outputPath).toBe(
+      join(harness.outputDirectory, 'SMO-H3', 'final.mp4'),
+    );
+  });
+
+  test('fails when history contains only a temp MP4', async () => {
+    const harness = await createHarness();
+    harness.comfy.outputs = [outputFile({ type: 'temp', filename: 'preview.mp4' })];
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toMatch(/MP4/i);
+    expect(work.outputPath).toBeNull();
+  });
+
+  test('fails when history contains only a final WebM', async () => {
+    const harness = await createHarness();
+    harness.comfy.outputs = [outputFile({ type: 'output', filename: 'result.webm' })];
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toMatch(/MP4/i);
+    expect(work.outputPath).toBeNull();
+  });
+
+  test.each([
+    { mode: 'text', wrongNodeId: '65' },
+    { mode: 'audio', wrongNodeId: '180' },
+  ] as const)('rejects an MP4 from the wrong node for $mode mode', async ({
+    mode,
+    wrongNodeId,
+  }) => {
+    const harness = await createHarness();
+    harness.comfy.outputs = [
+      outputFile({ nodeId: wrongNodeId, type: 'output', filename: 'wrong-node.mp4' }),
+    ];
+    const request = mode === 'text' ? harness.textRequest : harness.audioRequest;
+
+    const result = await harness.startGeneration(request);
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toMatch(/MP4/i);
+    expect(work.outputPath).toBeNull();
   });
 });
 
@@ -447,6 +550,66 @@ describe('GenerationHandler failures and cancellation', () => {
 
     expect(work.error).toMatch(/video output/i);
     expect(work.outputPath).toBeNull();
+  });
+
+  test('cancels during upload without interrupting ComfyUI or submitting', async () => {
+    const harness = await createHarness();
+    const uploadGate = deferred();
+    harness.comfy.uploadGate = uploadGate;
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await vi.waitFor(() => expect(harness.comfy.uploads).toHaveLength(1));
+    await harness.jobCoordinator.cancelActive();
+    const cancellationsBeforeUploadFinished = harness.comfy.cancellations;
+    uploadGate.resolve();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(cancellationsBeforeUploadFinished).toBe(0);
+    expect(harness.comfy.cancellations).toBe(0);
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(work.error).toMatch(/cancel/i);
+    expect(work.outputPath).toBeNull();
+  });
+
+  test('cancels before submit without reading a prompt id or interrupting ComfyUI', async () => {
+    const harness = await createHarness();
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await harness.jobCoordinator.cancelActive();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(harness.comfy.cancellations).toBe(0);
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(work).toMatchObject({
+      status: 'failed',
+      promptId: null,
+      outputPath: null,
+    });
+    expect(work.error).toMatch(/cancel/i);
+  });
+
+  test('interrupts immediately after a submit that finishes while cancellation is requested', async () => {
+    const harness = await createHarness();
+    const submitGate = deferred<ComfySubmitResult>();
+    harness.comfy.submitGate = submitGate;
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await vi.waitFor(() => expect(harness.comfy.submissions).toHaveLength(1));
+    await harness.jobCoordinator.cancelActive();
+    const cancellationsBeforeSubmitFinished = harness.comfy.cancellations;
+    submitGate.resolve({ prompt_id: 'cancelled-prompt', number: 1, node_errors: {} });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(cancellationsBeforeSubmitFinished).toBe(0);
+    expect(harness.comfy.cancellations).toBe(1);
+    expect(harness.comfy.waits).toEqual([]);
+    expect(harness.comfy.histories).toEqual([]);
+    expect(work).toMatchObject({
+      status: 'failed',
+      promptId: 'cancelled-prompt',
+      outputPath: null,
+    });
+    expect(work.error).toMatch(/cancel/i);
   });
 
   test('cancels the active ComfyUI execution and records the interruption', async () => {

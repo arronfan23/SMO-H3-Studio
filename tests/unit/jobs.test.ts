@@ -198,6 +198,30 @@ describe('JobCoordinator execution', () => {
       'b:done',
     ]);
   });
+
+  test('reports event listener failures with context and still settles the queue', async () => {
+    const writeFailure = new Error('SQLite work update failed');
+    const reports: Array<{ error: unknown; event: JobEvent }> = [];
+    const coordinator = new JobCoordinator({
+      onEvent: (event) => {
+        if (event.status === 'running') {
+          throw writeFailure;
+        }
+      },
+      onEventError: (error, event) => reports.push({ error, event }),
+    });
+
+    const first = coordinator.enqueue({ id: 'first', run: async () => {} });
+    const second = coordinator.enqueue({ id: 'second', run: async () => {} });
+    await Promise.all([first, second]);
+
+    expect(reports).toEqual([
+      { error: writeFailure, event: { id: 'first', status: 'running' } },
+      { error: writeFailure, event: { id: 'second', status: 'running' } },
+    ]);
+    expect(coordinator.completedIds).toEqual(['first', 'second']);
+    expect(coordinator.activeCount).toBe(0);
+  });
 });
 
 describe('JobCoordinator recovery', () => {

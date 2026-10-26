@@ -13,7 +13,7 @@ import { bootstrapApplication } from '../../src/main/bootstrap';
 import { ComfyClient } from '../../src/main/comfy';
 import { applyHardwareProfile, detectHardware } from '../../src/main/hardware';
 import type { GenerationHandler } from '../../src/main/ipc';
-import { JobCoordinator } from '../../src/main/jobs';
+import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 import { LlmService } from '../../src/main/llm';
 import { FileLlmConfigStore } from '../../src/main/llm-config';
 import { SkillsService } from '../../src/main/skills';
@@ -154,6 +154,48 @@ describe('production application services', () => {
       error: failure.message,
       outputPath: null,
     });
+  });
+
+  test('reports Store event write failures while allowing the job to settle', async () => {
+    const dataDirectory = await useDataDirectory();
+    const reports: Array<{ error: unknown; event: JobEvent }> = [];
+    const services = await createAppServices({
+      dataDirectory,
+      generationHandler: async () => ({ id: 'unused' }),
+      errorReporter: (error, event) => reports.push({ error, event }),
+    });
+    cleanups.push(() => services.close());
+    const avatar = services.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    const work = services.store.addWork({
+      id: 'work-with-write-failures',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'pending',
+    });
+    const writeFailure = new Error('SQLite is read-only');
+    const updateWork = vi
+      .spyOn(services.store, 'updateWork')
+      .mockImplementation(() => {
+        throw writeFailure;
+      });
+
+    await services.jobCoordinator.enqueue({
+      id: work.id,
+      run: async () => undefined,
+    });
+    updateWork.mockRestore();
+
+    expect(reports).toEqual([
+      { error: writeFailure, event: { id: work.id, status: 'pending' } },
+      { error: writeFailure, event: { id: work.id, status: 'running' } },
+      { error: writeFailure, event: { id: work.id, status: 'done' } },
+    ]);
+    expect(services.jobCoordinator.completedIds).toEqual([work.id]);
+    expect(services.jobCoordinator.activeCount).toBe(0);
   });
 
   test('registers every channel before creating the first window', async () => {
