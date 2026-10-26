@@ -13,6 +13,7 @@ import {
 } from '../shared/ipc';
 import type {
   GenerationRequest,
+  GenerationStartResult,
   HardwareInfo,
   HardwareProfile,
 } from '../shared/types';
@@ -25,7 +26,7 @@ export interface IpcHandlerRegistry {
 
 export type GenerationHandler = (
   request: GenerationRequest,
-) => unknown | Promise<unknown>;
+) => GenerationStartResult | Promise<GenerationStartResult>;
 
 export interface IpcServices {
   startGeneration: GenerationHandler;

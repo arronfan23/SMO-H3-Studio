@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import { H3_MODES, type H3Mode } from './prompt-contract';
+import { SKILL_NAMES, type SkillName } from './skills';
 import type {
   Avatar,
   GenerationRequest,
+  GenerationStartResult,
   HardwareInfo,
   HardwareProfile,
   LlmCredentials,
@@ -10,17 +12,7 @@ import type {
   Work,
 } from './types';
 
-const SKILL_NAMES = [
-  '3d-animation-short-generator',
-  'brand-promo-video-generator',
-  'co-op-game-intro-generator',
-  'h3-prompt-writing',
-  'handdrawn-live-video-generator',
-  'minimalist-product-ad-generator',
-  'music-video-subtitle-generator',
-  'paper-collage-explainer-generator',
-  'papercraft-stop-motion-explainer',
-] as const;
+export { SKILL_NAMES } from './skills';
 
 export const IPC_CHANNELS = [
   'jobs:start',
@@ -131,7 +123,7 @@ const comfyNodeSchema = z
   })
   .strict();
 
-export type IpcSkillName = (typeof SKILL_NAMES)[number];
+export type IpcSkillName = SkillName;
 export type ComfyGraph = Record<string, z.infer<typeof comfyNodeSchema>>;
 type PolishSchemaOutput = z.infer<typeof polishRequestSchema>;
 export type LlmPolishInput = Omit<PolishSchemaOutput, 'referenceLabels'> & {
@@ -214,7 +206,7 @@ export interface SmoApi {
     create(input: IpcPayload<'avatars:create'>): Promise<Avatar>;
   };
   readonly jobs: {
-    start(request: GenerationRequest): Promise<unknown>;
+    start(request: GenerationRequest): Promise<GenerationStartResult>;
     cancel(): Promise<void>;
   };
   readonly llm: {

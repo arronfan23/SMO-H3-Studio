@@ -7,22 +7,11 @@ import {
   validatePrompt,
   type H3Mode,
 } from '../shared/prompt-contract';
+import { SKILL_NAMES, type SkillName } from '../shared/skills';
 import type { LlmCredentials } from '../shared/types';
 import { LlmService, type LlmChatMessage } from './llm';
 
-export const SKILL_NAMES = [
-  '3d-animation-short-generator',
-  'brand-promo-video-generator',
-  'co-op-game-intro-generator',
-  'h3-prompt-writing',
-  'handdrawn-live-video-generator',
-  'minimalist-product-ad-generator',
-  'music-video-subtitle-generator',
-  'paper-collage-explainer-generator',
-  'papercraft-stop-motion-explainer',
-] as const;
-
-export type SkillName = (typeof SKILL_NAMES)[number];
+export { SKILL_NAMES, type SkillName };
 
 const SKILL_DESCRIPTIONS: Record<SkillName, string> = {
   '3d-animation-short-generator':

@@ -60,3 +60,23 @@ test('rejects process and Buffer in the renderer type environment', () => {
   expect(output).toContain("Cannot find name 'process'");
   expect(output).toContain("Cannot find name 'Buffer'");
 });
+
+test('shares the generation start result across main and renderer IPC types', () => {
+  const fixtureConfig = join(
+    projectRoot,
+    'tests/fixtures/tsconfig.ipc-generation-result.json',
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(projectRoot, 'node_modules/typescript/bin/tsc'),
+      '--noEmit',
+      '--project',
+      fixtureConfig,
+    ],
+    { cwd: projectRoot, encoding: 'utf8' },
+  );
+  const output = `${result.stdout}${result.stderr}`;
+
+  expect(result.status, output).toBe(0);
+});

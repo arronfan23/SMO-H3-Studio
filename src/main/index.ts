@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog } from 'electron';
+import { bootstrapApplication } from './bootstrap';
 import {
   createRendererLoadFailureMessage,
   loadRenderer,
@@ -33,14 +34,15 @@ async function createMainWindow(): Promise<void> {
 
 void app
   .whenReady()
-  .then(() => {
+  .then(async () => {
+    const services = await bootstrapApplication({ createMainWindow });
+    app.on('before-quit', services.close);
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         void createMainWindow().catch(reportRendererLoadFailure);
       }
     });
-
-    return createMainWindow();
   })
   .catch(reportRendererLoadFailure);
 

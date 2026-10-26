@@ -10,6 +10,11 @@ export interface GenerationRequest {
   trimStart?: number;
 }
 
+export interface GenerationStartResult {
+  /** Identifies a queued job; generation may still be running. */
+  id: string;
+}
+
 export interface Avatar {
   id: string;
   name: string;

@@ -149,6 +149,14 @@ describe('official H3 skill snapshot', () => {
     ]);
   });
 
+  test('shares one Skill catalog with IPC and preserves compatible exports', async () => {
+    const { SKILL_NAMES: sharedNames } = await import('../../src/shared/skills');
+    const { SKILL_NAMES: ipcNames } = await import('../../src/shared/ipc');
+
+    expect(SKILL_NAMES).toBe(sharedNames);
+    expect(ipcNames).toBe(sharedNames);
+  });
+
   test.each(SKILL_NAMES)('loads %s and its real reference files', (skill) => {
     const mode = skill === 'h3-prompt-writing' ? 'ref2va' : 't2va';
     const instructions = skillInstructions(skill, mode);
