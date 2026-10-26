@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
@@ -29,12 +29,13 @@ function createWork(overrides: Partial<Work>): Work {
 
 function createSmoMock() {
   return {
-    avatars: { list: vi.fn(), create: vi.fn() },
-    jobs: { start: vi.fn(), cancel: vi.fn() },
+    avatars: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
+    jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn() },
     files: {
       selectImage: vi.fn(),
       selectAudio: vi.fn(),
       mediaUrl: vi.fn(),
+      openFolder: vi.fn(),
     },
     llm: {
       saveProfile: vi.fn(),
@@ -43,7 +44,7 @@ function createSmoMock() {
       testModel: vi.fn(),
       polish: vi.fn(),
     },
-    comfy: { health: vi.fn() },
+    comfy: { health: vi.fn(), open: vi.fn() },
     hardware: { detect: vi.fn(), apply: vi.fn() },
     works: { list: vi.fn() },
   };
@@ -61,6 +62,8 @@ beforeEach(() => {
   window.smo = smo as unknown as SmoApi;
   smo.avatars.list.mockResolvedValue([avatar]);
   smo.avatars.create.mockRejectedValue(new Error('Unexpected avatar creation'));
+  smo.avatars.update.mockRejectedValue(new Error('Unexpected avatar rename'));
+  smo.avatars.delete.mockRejectedValue(new Error('Unexpected avatar deletion'));
   smo.files.selectImage.mockResolvedValue(null);
   smo.files.selectAudio.mockResolvedValue(null);
   smo.files.mediaUrl.mockImplementation(async (path: string) =>
@@ -68,8 +71,10 @@ beforeEach(() => {
   );
   smo.works.list.mockResolvedValue([]);
   smo.jobs.start.mockResolvedValue({ id: 'job-1' });
+  smo.jobs.retry.mockRejectedValue(new Error('Unexpected retry'));
   smo.jobs.cancel.mockResolvedValue(undefined);
   smo.llm.getProfile.mockResolvedValue(null);
+  smo.llm.saveProfile.mockResolvedValue(undefined);
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
 });
@@ -134,6 +139,61 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(smo.avatars.list).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: '制作台' }));
     expect(await screen.findByRole('heading', { name: '新模特' })).toBeInTheDocument();
+  });
+
+  test('rejects an empty avatar rename before calling IPC', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('button', { name: '数字模特' }));
+    fireEvent.click(screen.getByRole('button', { name: '重命名 薄荷主播' }));
+
+    fireEvent.change(screen.getByLabelText('模特新名称'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存名称' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('模特名称不能为空');
+    expect(smo.avatars.update).not.toHaveBeenCalled();
+  });
+
+  test('renames an avatar and refreshes the shared list', async () => {
+    const renamed = { ...avatar, name: '新名称' };
+    smo.avatars.update.mockResolvedValue(renamed);
+    smo.avatars.list.mockResolvedValueOnce([avatar]).mockResolvedValueOnce([renamed]);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('button', { name: '数字模特' }));
+    fireEvent.click(screen.getByRole('button', { name: '重命名 薄荷主播' }));
+
+    fireEvent.change(screen.getByLabelText('模特新名称'), { target: { value: '  新名称  ' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存名称' }));
+
+    expect(smo.avatars.update).toHaveBeenCalledWith({ id: avatar.id, name: '新名称' });
+    expect(await screen.findByRole('heading', { name: '新名称' })).toBeInTheDocument();
+    expect(smo.avatars.list).toHaveBeenCalledTimes(2);
+  });
+
+  test('deletes an avatar only after confirmation and refreshes the list', async () => {
+    smo.avatars.delete.mockResolvedValue(undefined);
+    smo.avatars.list.mockResolvedValueOnce([avatar]).mockResolvedValueOnce([]);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('button', { name: '数字模特' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除 薄荷主播' }));
+
+    expect(screen.getByRole('dialog', { name: '删除模特' })).toBeInTheDocument();
+    expect(smo.avatars.delete).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    expect(smo.avatars.delete).toHaveBeenCalledWith(avatar.id);
+    expect(await screen.findByText('保存后，数字模特会显示在这里。')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  test('shows the real deletion error and keeps the confirmation dialog open', async () => {
+    smo.avatars.delete.mockRejectedValue(new Error('该模特已有作品，无法删除'));
+    await renderStudio();
+    fireEvent.click(screen.getByRole('button', { name: '数字模特' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除 薄荷主播' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('该模特已有作品，无法删除');
+    expect(screen.getByRole('dialog', { name: '删除模特' })).toBeInTheDocument();
   });
 });
 
@@ -326,19 +386,162 @@ describe('works and settings', () => {
     expect(screen.getByText('Windows 11')).toBeInTheDocument();
     expect(screen.getByText('已配置 LLM')).toBeInTheDocument();
     expect(
-      screen.getByText('local/h3-prompt-model-with-a-long-name'),
+      screen.getByDisplayValue('local/h3-prompt-model-with-a-long-name'),
     ).toBeInTheDocument();
-    expect(screen.getByText('http://127.0.0.1:11434/v1')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('http://127.0.0.1:11434/v1')).toBeInTheDocument();
   });
 
   test('shows understandable health errors and an unconfigured LLM state', async () => {
     smo.comfy.health.mockRejectedValue(new Error('连接被拒绝'));
     smo.llm.getProfile.mockResolvedValue(null);
+  smo.llm.saveProfile.mockResolvedValue(undefined);
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '设置' }));
 
     expect(await screen.findByText('ComfyUI 不可用')).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('连接被拒绝');
     expect(screen.getByText('未配置 LLM')).toBeInTheDocument();
+  });
+});
+
+
+describe('settings page LLM configuration', () => {
+  test('saves the LLM profile and refreshes displayed values', async () => {
+    smo.llm.getProfile.mockResolvedValue(null);
+    smo.llm.saveProfile.mockResolvedValue(undefined);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByText('未配置 LLM');
+
+    fireEvent.change(screen.getByLabelText('服务地址'), {
+      target: { value: 'https://api.example.com/v1' },
+    });
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'gpt-4o' } });
+    fireEvent.change(screen.getByLabelText('API 密钥'), { target: { value: 'sk-new' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+
+    await waitFor(() =>
+      expect(smo.llm.saveProfile).toHaveBeenCalledWith({
+        baseUrl: 'https://api.example.com/v1',
+        model: 'gpt-4o',
+        apiKey: 'sk-new',
+      }),
+    );
+  });
+
+  test('fetches and selects a model from the service', async () => {
+    smo.llm.getProfile.mockResolvedValue({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-4o',
+    });
+    smo.llm.listModels.mockResolvedValue(['gpt-4o', 'gpt-4o-mini']);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByDisplayValue('gpt-4o');
+
+    fireEvent.click(screen.getByRole('button', { name: '获取模型' }));
+    expect(await screen.findByRole('listbox')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'gpt-4o-mini' }));
+
+    expect(screen.getByDisplayValue('gpt-4o-mini')).toBeInTheDocument();
+    expect(smo.llm.listModels).toHaveBeenCalledWith({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-4o',
+      apiKey: '',
+    });
+  });
+
+  test('tests the model and shows latency plus summary', async () => {
+    smo.llm.getProfile.mockResolvedValue({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-4o',
+    });
+    smo.llm.testModel.mockResolvedValue({ ok: true, latencyMs: 120, summary: 'OK' });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByDisplayValue('gpt-4o');
+
+    fireEvent.click(screen.getByRole('button', { name: '测试模型' }));
+
+    expect(await screen.findByText(/测试通过/)).toHaveTextContent('120');
+    expect(smo.llm.testModel).toHaveBeenCalledWith({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-4o',
+      apiKey: '',
+    });
+  });
+
+  test('shows an LLM save error without exposing the key', async () => {
+    smo.llm.getProfile.mockResolvedValue(null);
+    smo.llm.saveProfile.mockRejectedValue(new Error('首次配置必须提供 API key'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByText('未配置 LLM');
+
+    fireEvent.change(screen.getByLabelText('服务地址'), {
+      target: { value: 'https://api.example.com/v1' },
+    });
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'gpt-4o' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('首次配置必须提供 API key');
+  });
+});
+
+describe('works page actions', () => {
+  test('filters works by mode and status', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'text-done', mode: 'text', status: 'done' }),
+      createWork({ id: 'audio-failed', mode: 'audio', status: 'failed' }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByText('已完成（done）');
+
+    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+    expect(screen.getByText('失败（failed）')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '文字生视频' }));
+    expect(screen.queryByText('失败（failed）')).not.toBeInTheDocument();
+    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '失败' }));
+    expect(screen.queryByText('已完成（done）')).not.toBeInTheDocument();
+    expect(screen.getByText('失败（failed）')).toBeInTheDocument();
+  });
+
+  test('retries a failed work and refreshes the list', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'failed-work', status: 'failed', error: 'ComfyUI 执行失败' }),
+    ]);
+    smo.jobs.retry.mockResolvedValue({ id: 'retry-work' });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByText('失败（failed）');
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+
+    await waitFor(() => expect(smo.jobs.retry).toHaveBeenCalledWith('failed-work'));
+  });
+
+  test('opens the output directory for a completed work', async () => {
+    const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
+    smo.works.list.mockResolvedValue([createWork({ id: 'done-work', status: 'done', outputPath })]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByText('已完成（done）');
+    fireEvent.click(screen.getByRole('button', { name: '打开目录' }));
+
+    await waitFor(() => expect(smo.files.openFolder).toHaveBeenCalledWith(outputPath));
+  });
+
+  test('opens ComfyUI from the works page', async () => {
+    const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
+    smo.works.list.mockResolvedValue([createWork({ id: 'done-work', status: 'done', outputPath })]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByText('已完成（done）');
+    fireEvent.click(screen.getByRole('button', { name: '打开 ComfyUI' }));
+
+    expect(smo.comfy.open).toHaveBeenCalled();
   });
 });

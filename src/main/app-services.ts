@@ -2,12 +2,12 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dialog, protocol } from 'electron';
+import { dialog, protocol, shell } from 'electron';
 import type { GenerationHandler, IpcServices } from './ipc';
 import { AvatarService } from './avatars';
 import { ComfyClient } from './comfy';
 import { FileService, type FileDialog } from './files';
-import { createGenerationHandler } from './generation';
+import { createGenerationHandler, createRetryHandler } from './generation';
 import { applyHardwareProfile, detectHardware } from './hardware';
 import { JobCoordinator, type JobEventErrorHandler } from './jobs';
 import { LlmService } from './llm';
@@ -89,7 +89,12 @@ export async function createAppServices(
     store,
     mediaRegistry,
   });
-  const files = new FileService(mediaRegistry, options.fileDialog ?? dialog);
+  const files = new FileService({
+    mediaRegistry,
+    dialog: options.fileDialog ?? dialog,
+    outputDirectory,
+    dataDirectory,
+  });
   const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
   const llm = new LlmService();
   const comfy = new ComfyClient();
@@ -116,8 +121,18 @@ export async function createAppServices(
       uploadsDirectory: join(dataDirectory, 'uploads'),
     });
 
+  const retryWork = createRetryHandler({
+    store,
+    mediaRegistry,
+    startGeneration,
+  });
+  const openComfy = async (): Promise<void> => {
+    await shell.openExternal('http://127.0.0.1:8188');
+  };
+
   return {
     startGeneration,
+    retryWork,
     jobCoordinator,
     llm,
     skills: new SkillsService(llm),
@@ -126,6 +141,7 @@ export async function createAppServices(
     files,
     store,
     comfy,
+    openComfy,
     hardware: {
       detect: detectHardware,
       apply: applyHardwareProfile,

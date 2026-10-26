@@ -70,7 +70,7 @@ describe('controlled media access', () => {
     const filePath = join(inputDirectory, filename);
     await writeFile(filePath, kind);
     const showOpenDialog = vi.fn().mockResolvedValue({ canceled: false, filePaths: [filePath] });
-    const service = new FileService(registry, { showOpenDialog });
+    const service = new FileService({ mediaRegistry: registry, dialog: { showOpenDialog }, outputDirectory, dataDirectory: directory });
 
     await expect(registry.createMediaUrl(filePath)).rejects.toThrow(/not allowed/i);
 
@@ -164,7 +164,7 @@ describe('FileService', () => {
       .mockResolvedValueOnce({ canceled: true, filePaths: [] })
       .mockResolvedValueOnce({ canceled: false, filePaths: [imagePath] })
       .mockResolvedValueOnce({ canceled: false, filePaths: [audioPath] });
-    const service = new FileService(registry, { showOpenDialog });
+    const service = new FileService({ mediaRegistry: registry, dialog: { showOpenDialog }, outputDirectory, dataDirectory: directory });
 
     try {
       await expect(service.selectImage()).resolves.toBeNull();
@@ -186,6 +186,91 @@ describe('FileService', () => {
         'ogg',
         'm4a',
       ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe('FileService.openFolder', () => {
+  test('opens a folder inside the output directory', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));
+    const outputDirectory = join(directory, 'output');
+    const dataDirectory = join(directory, 'data');
+    const target = join(outputDirectory, 'nested');
+    await mkdir(target, { recursive: true });
+    const opened: string[] = [];
+    const service = new FileService({
+      mediaRegistry: new MediaRegistry({ avatarsDirectory: join(directory, 'avatars'), outputDirectory }),
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory,
+      dataDirectory,
+      opener: { openPath: async (path) => { opened.push(path); return ''; } },
+    });
+
+    try {
+      await service.openFolder(target);
+      expect(opened).toEqual([target]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('opens the data directory itself', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));
+    const outputDirectory = join(directory, 'output');
+    const dataDirectory = join(directory, 'data');
+    await mkdir(dataDirectory, { recursive: true });
+    const opened: string[] = [];
+    const service = new FileService({
+      mediaRegistry: new MediaRegistry({ avatarsDirectory: join(directory, 'avatars'), outputDirectory }),
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory,
+      dataDirectory,
+      opener: { openPath: async (path) => { opened.push(path); return ''; } },
+    });
+
+    try {
+      await service.openFolder(dataDirectory);
+      expect(opened).toEqual([dataDirectory]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects an arbitrary outside folder', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));
+    const outside = await mkdtemp(join(tmpdir(), 'smo-open-folder-outside-'));
+    const service = new FileService({
+      mediaRegistry: new MediaRegistry({ avatarsDirectory: join(directory, 'avatars'), outputDirectory: join(directory, 'output') }),
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory: join(directory, 'output'),
+      dataDirectory: join(directory, 'data'),
+      opener: { openPath: async () => '' },
+    });
+
+    try {
+      await expect(service.openFolder(outside)).rejects.toThrow(/not allowed/i);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects a non-existent folder', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));
+    const outputDirectory = join(directory, 'output');
+    const service = new FileService({
+      mediaRegistry: new MediaRegistry({ avatarsDirectory: join(directory, 'avatars'), outputDirectory }),
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory,
+      dataDirectory: join(directory, 'data'),
+      opener: { openPath: async () => '' },
+    });
+
+    try {
+      await expect(service.openFolder(join(outputDirectory, 'missing'))).rejects.toThrow(/does not exist/i);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

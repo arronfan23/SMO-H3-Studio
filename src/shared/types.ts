@@ -8,6 +8,7 @@ export interface GenerationRequest {
   seed: number;
   audioPath?: string;
   trimStart?: number;
+  retryOf?: string;
 }
 
 export interface GenerationStartResult {

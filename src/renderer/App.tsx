@@ -109,6 +109,7 @@ export function App() {
             error={avatarsError}
             onSelect={setSelectedAvatarId}
             onCreated={avatarCreated}
+            onChanged={refreshAvatars}
           />
         )}
         {page === 'works' && <WorksPage avatars={avatars} />}

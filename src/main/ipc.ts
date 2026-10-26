@@ -13,6 +13,7 @@ import {
   type ComfyGraph,
   type IpcRequest,
 } from '../shared/ipc';
+import type { GenerationHandler } from './generation';
 import type {
   GenerationRequest,
   GenerationStartResult,
@@ -26,20 +27,20 @@ export interface IpcHandlerRegistry {
   handle(channel: string, handler: IpcHandler): void;
 }
 
-export type GenerationHandler = (
-  request: GenerationRequest,
-) => GenerationStartResult | Promise<GenerationStartResult>;
+export type { GenerationHandler };
 
 export interface IpcServices {
   startGeneration: GenerationHandler;
+  retryWork: (id: string) => Promise<GenerationStartResult>;
   jobCoordinator: Pick<JobCoordinator, 'cancel' | 'cancelActive'>;
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
   store: Pick<Store, 'listAvatars' | 'listWorks'>;
-  avatars: Pick<AvatarService, 'createAvatar'>;
-  files: Pick<FileService, 'selectImage' | 'selectAudio' | 'mediaUrl'>;
+  avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
+  files: Pick<FileService, 'selectImage' | 'selectAudio' | 'mediaUrl' | 'openFolder'>;
   comfy: Pick<ComfyClient, 'health'>;
+  openComfy: () => Promise<void>;
   hardware: {
     detect: () => Promise<HardwareInfo>;
     apply: (
@@ -57,14 +58,6 @@ const electronIpcRegistry: IpcHandlerRegistry = {
   },
 };
 
-async function requireLlmCredentials(store: LlmConfigStore) {
-  const credentials = await store.getCredentials();
-  if (credentials === null) {
-    throw new Error('LLM profile is not configured');
-  }
-  return credentials;
-}
-
 async function dispatch(
   request: IpcRequest,
   services: IpcServices,
@@ -72,6 +65,8 @@ async function dispatch(
   switch (request.channel) {
     case 'jobs:start':
       return services.startGeneration(request.payload);
+    case 'jobs:retry':
+      return services.retryWork(request.payload.id);
     case 'jobs:cancel':
       if (request.payload.id === undefined) {
         await services.jobCoordinator.cancelActive();
@@ -85,8 +80,11 @@ async function dispatch(
       return services.files.selectAudio();
     case 'files:mediaUrl':
       return services.files.mediaUrl(request.payload.path);
+    case 'files:openFolder':
+      await services.files.openFolder(request.payload.path);
+      return undefined;
     case 'llm:saveProfile':
-      await services.llmConfig.save(request.payload);
+      await services.llmConfig.saveProfile(request.payload);
       return undefined;
     case 'llm:getProfile': {
       const profile = await services.llmConfig.getProfile();
@@ -96,25 +94,37 @@ async function dispatch(
     }
     case 'llm:listModels':
       return services.llm.listModels(
-        await requireLlmCredentials(services.llmConfig),
+        await services.llmConfig.saveProfile(request.payload),
       );
     case 'llm:testModel':
       return services.llm.testModel(
-        await requireLlmCredentials(services.llmConfig),
+        await services.llmConfig.saveProfile(request.payload),
       );
-    case 'llm:polish':
-      return services.skills.polish(
-        await requireLlmCredentials(services.llmConfig),
-        request.payload,
-      );
+    case 'llm:polish': {
+      const credentials = await services.llmConfig.getCredentials();
+      if (credentials === null) {
+        throw new Error('LLM profile is not configured');
+      }
+      return services.skills.polish(credentials, request.payload);
+    }
     case 'avatars:list':
       return services.store.listAvatars();
     case 'avatars:create':
       return services.avatars.createAvatar(request.payload);
+    case 'avatars:update':
+      return services.avatars.updateAvatar(request.payload.id, {
+        name: request.payload.name,
+      });
+    case 'avatars:delete':
+      await services.avatars.deleteAvatar(request.payload.id);
+      return undefined;
     case 'works:list':
       return services.store.listWorks();
     case 'comfy:health':
       return services.comfy.health();
+    case 'comfy:open':
+      await services.openComfy();
+      return undefined;
     case 'hardware:detect':
       return services.hardware.detect();
     case 'hardware:apply':

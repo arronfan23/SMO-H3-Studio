@@ -16,10 +16,12 @@ export { SKILL_NAMES } from './skills';
 
 export const IPC_CHANNELS = [
   'jobs:start',
+  'jobs:retry',
   'jobs:cancel',
   'files:selectImage',
   'files:selectAudio',
   'files:mediaUrl',
+  'files:openFolder',
   'llm:saveProfile',
   'llm:getProfile',
   'llm:listModels',
@@ -27,8 +29,11 @@ export const IPC_CHANNELS = [
   'llm:polish',
   'avatars:list',
   'avatars:create',
+  'avatars:update',
+  'avatars:delete',
   'works:list',
   'comfy:health',
+  'comfy:open',
   'hardware:detect',
   'hardware:apply',
 ] as const;
@@ -73,6 +78,7 @@ const generationRequestSchema = z
     seed: z.number().int().nonnegative(),
     audioPath: nonEmptyString.optional(),
     trimStart: nonNegativeFiniteNumber.optional(),
+    retryOf: z.string().optional(),
   })
   .strict()
   .superRefine((request, context) => {
@@ -92,6 +98,14 @@ const llmCredentialsSchema = z
     apiKey: nonEmptyString,
   })
   .strict() satisfies z.ZodType<LlmCredentials>;
+
+const llmProfileInputSchema = z
+  .object({
+    baseUrl: httpUrlSchema,
+    model: nonEmptyString,
+    apiKey: z.string().optional(),
+  })
+  .strict();
 
 const polishRequestSchema = z
   .object({
@@ -160,6 +174,10 @@ export function createIpcSchema() {
   return z.discriminatedUnion('channel', [
     requestSchema('jobs:start', generationRequestSchema),
     requestSchema(
+      'jobs:retry',
+      z.object({ id: nonEmptyString }).strict(),
+    ),
+    requestSchema(
       'jobs:cancel',
       z.object({ id: nonEmptyString.optional() }).strict(),
     ),
@@ -169,18 +187,31 @@ export function createIpcSchema() {
       'files:mediaUrl',
       z.object({ path: nonEmptyString }).strict(),
     ),
-    requestSchema('llm:saveProfile', llmCredentialsSchema),
+    requestSchema(
+      'files:openFolder',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
+    requestSchema('llm:saveProfile', llmProfileInputSchema),
     requestSchema('llm:getProfile', emptyPayload),
-    requestSchema('llm:listModels', emptyPayload),
-    requestSchema('llm:testModel', emptyPayload),
+    requestSchema('llm:listModels', llmProfileInputSchema),
+    requestSchema('llm:testModel', llmProfileInputSchema),
     requestSchema('llm:polish', polishRequestSchema),
     requestSchema('avatars:list', emptyPayload),
     requestSchema(
       'avatars:create',
       z.object({ name: nonEmptyString, photoPath: nonEmptyString }).strict(),
     ),
+    requestSchema(
+      'avatars:update',
+      z.object({ id: nonEmptyString, name: nonEmptyString }).strict(),
+    ),
+    requestSchema(
+      'avatars:delete',
+      z.object({ id: nonEmptyString }).strict(),
+    ),
     requestSchema('works:list', emptyPayload),
     requestSchema('comfy:health', emptyPayload),
+    requestSchema('comfy:open', emptyPayload),
     requestSchema('hardware:detect', emptyPayload),
     requestSchema('hardware:apply', hardwareApplySchema),
   ]);
@@ -216,25 +247,31 @@ export interface SmoApi {
   readonly avatars: {
     list(): Promise<Avatar[]>;
     create(input: IpcPayload<'avatars:create'>): Promise<Avatar>;
+    update(input: IpcPayload<'avatars:update'>): Promise<Avatar>;
+    delete(id: string): Promise<void>;
   };
   readonly jobs: {
     start(request: GenerationRequest): Promise<GenerationStartResult>;
+    retry(id: string): Promise<GenerationStartResult>;
     cancel(id?: string): Promise<void>;
   };
+
   readonly files: {
     selectImage(): Promise<string | null>;
     selectAudio(): Promise<string | null>;
     mediaUrl(path: string): Promise<string>;
+    openFolder(path: string): Promise<void>;
   };
   readonly llm: {
-    saveProfile(credentials: LlmCredentials): Promise<void>;
+    saveProfile(input: LlmProfile & { apiKey?: string }): Promise<void>;
     getProfile(): Promise<LlmProfile | null>;
-    listModels(): Promise<string[]>;
-    testModel(): Promise<LlmTestResult>;
+    listModels(input: LlmProfile & { apiKey?: string }): Promise<string[]>;
+    testModel(input: LlmProfile & { apiKey?: string }): Promise<LlmTestResult>;
     polish(request: LlmPolishInput): Promise<PolishResult>;
   };
   readonly comfy: {
     health(): Promise<ComfyHealth>;
+    open(): Promise<void>;
   };
   readonly hardware: {
     detect(): Promise<HardwareInfo>;

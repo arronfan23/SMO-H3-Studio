@@ -1,9 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
-import type { Avatar, Work } from '../shared/types';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw } from 'lucide-react';
+import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage } from './ui';
+
+const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
+  { id: 'all', label: '全部' },
+  { id: 'text', label: '文字生视频' },
+  { id: 'audio', label: '音频数字人' },
+  { id: 'pending', label: '等待中' },
+  { id: 'running', label: '运行中' },
+  { id: 'done', label: '已完成' },
+  { id: 'failed', label: '失败' },
+];
 
 function WorkVideo({ work }: { work: Work }) {
   const { url, error } = useMediaUrl(work.outputPath);
@@ -20,6 +30,9 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeFilter, setActiveFilter] = useState<'all' | VideoMode | WorkStatus>('all');
+  const [retrying, setRetrying] = useState<Set<string>>(new Set());
+  const [retryError, setRetryError] = useState<Record<string, string>>({});
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -51,8 +64,46 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     return () => clearTimeout(timer);
   }, [refresh, works]);
 
+  const filteredWorks = useMemo(() => {
+    if (activeFilter === 'all') {
+      return works;
+    }
+    if (activeFilter === 'text' || activeFilter === 'audio') {
+      return works.filter((work) => work.mode === activeFilter);
+    }
+    return works.filter((work) => work.status === activeFilter);
+  }, [works, activeFilter]);
+
   const avatarName = (id: string): string =>
     avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
+
+  const retry = async (work: Work): Promise<void> => {
+    setRetrying((current) => new Set(current).add(work.id));
+    setRetryError((current) => ({ ...current, [work.id]: '' }));
+    try {
+      await window.smo.jobs.retry(work.id);
+      await refresh();
+    } catch (retryError) {
+      setRetryError((current) => ({ ...current, [work.id]: errorMessage(retryError) }));
+    } finally {
+      setRetrying((current) => {
+        const next = new Set(current);
+        next.delete(work.id);
+        return next;
+      });
+    }
+  };
+
+  const openOutputFolder = async (work: Work): Promise<void> => {
+    if (work.outputPath === null) {
+      return;
+    }
+    try {
+      await window.smo.files.openFolder(work.outputPath);
+    } catch (openError) {
+      setRetryError((current) => ({ ...current, [work.id]: errorMessage(openError) }));
+    }
+  };
 
   return (
     <div className="standard-page">
@@ -67,13 +118,25 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
         </button>
       </header>
       {error && <p className="form-error" role="alert">作品列表更新失败：{error}</p>}
+      <div className="works-filters" role="group" aria-label="作品筛选">
+        {FILTERS.map((filter) => (
+          <button
+            key={filter.id}
+            type="button"
+            className={activeFilter === filter.id ? 'button button-primary' : 'button button-secondary'}
+            onClick={() => setActiveFilter(filter.id)}
+          >
+            {filter.label}
+          </button>
+        ))}
+      </div>
       {loading ? (
         <div className="page-state">正在读取作品…</div>
-      ) : works.length === 0 ? (
+      ) : filteredWorks.length === 0 ? (
         <div className="empty-state"><h3>还没有作品</h3><p>提交生成任务后，可在这里查看真实进度和输出。</p></div>
       ) : (
         <div className="works-list">
-          {works.map((work) => (
+          {filteredWorks.map((work) => (
             <article className="work-item" key={work.id}>
               <header className="work-header">
                 <div>
@@ -86,7 +149,41 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
               {work.status === 'failed' && work.error && (
                 <p className="form-error" role="alert">{work.error}</p>
               )}
+              {retryError[work.id] && <p className="form-error" role="alert">{retryError[work.id]}</p>}
               {work.status === 'done' && work.outputPath && <WorkVideo work={work} />}
+              <div className="work-actions">
+                {work.status === 'failed' && (
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    disabled={retrying.has(work.id)}
+                    onClick={() => void retry(work)}
+                  >
+                    <RotateCcw size={16} aria-hidden="true" />
+                    {retrying.has(work.id) ? '正在重试…' : '重试'}
+                  </button>
+                )}
+                {work.status === 'done' && work.outputPath && (
+                  <>
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      onClick={() => void openOutputFolder(work)}
+                    >
+                      <FolderOpen size={16} aria-hidden="true" />
+                      打开目录
+                    </button>
+                    <button
+                      className="button button-icon"
+                      type="button"
+                      onClick={() => void window.smo.comfy.open()}
+                      aria-label="打开 ComfyUI"
+                    >
+                      <ExternalLink size={16} aria-hidden="true" />
+                    </button>
+                  </>
+                )}
+              </div>
             </article>
           ))}
         </div>

@@ -1,19 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ComfyClient, ComfyOutputFile } from './comfy';
 import {
   createFfprobeDurationReader,
   type AudioDurationReader,
 } from './audio-duration';
-import type { GenerationHandler } from './ipc';
+export type GenerationHandler = (
+  request: GenerationRequest,
+) => GenerationStartResult | Promise<GenerationStartResult>;
 import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
 import type { Store } from './store';
 import { patchWorkflow } from '../shared/workflow';
 import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
-import type { GenerationRequest } from '../shared/types';
+import type { GenerationRequest, GenerationStartResult } from '../shared/types';
 
 const WORKFLOW_FILENAMES = {
   text: 'text-ref2va.json',
@@ -255,6 +257,7 @@ export function createGenerationHandler(
       throw new Error(`Avatar not found: ${input.avatarId}`);
     }
     const request = sanitizeRequest(input);
+    const originalRetryOf = input.retryOf;
     const workId = randomUUID();
     const workflowFilename = WORKFLOW_FILENAMES[request.mode];
     let stagedAudioPath: string | undefined;
@@ -278,7 +281,11 @@ export function createGenerationHandler(
       outputPath: null,
       status: 'pending',
       promptId: null,
-      metadata: { request, workflowVersion: workflowFilename },
+      metadata: {
+        request,
+        workflowVersion: workflowFilename,
+        ...(originalRetryOf ? { retryOf: originalRetryOf } : {}),
+      },
       error: null,
     });
 
@@ -392,5 +399,82 @@ export function createGenerationHandler(
       })
       .catch(() => undefined);
     return { id: workId };
+  };
+}
+
+export interface RetryHandlerOptions {
+  store: Pick<Store, 'getWork' | 'listAvatars'>;
+  mediaRegistry: Pick<MediaRegistry, 'authorizeSelectedFile'>;
+  startGeneration: GenerationHandler;
+}
+
+function isRetryableMetadata(value: unknown): value is {
+  request: GenerationRequest;
+  workflowVersion: string;
+} {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.workflowVersion === 'string' &&
+    record.workflowVersion.length > 0 &&
+    typeof record.request === 'object' &&
+    record.request !== null
+  );
+}
+
+export function createRetryHandler(
+  options: RetryHandlerOptions,
+): (id: string) => Promise<GenerationStartResult> {
+  const { store, mediaRegistry, startGeneration } = options;
+
+  return async (id) => {
+    const work = store.getWork(id);
+    if (work === null) {
+      throw new Error(`Work not found: ${id}`);
+    }
+    if (!isRetryableMetadata(work.metadata)) {
+      throw new Error('Work metadata is missing request or workflowVersion');
+    }
+
+    const { request } = work.metadata;
+    const avatar = store.listAvatars().find((candidate) => candidate.id === request.avatarId);
+    if (avatar === undefined) {
+      throw new Error(`Avatar not found: ${request.avatarId}`);
+    }
+
+    try {
+      const photoStats = await stat(avatar.photoPath);
+      if (!photoStats.isFile()) {
+        throw new Error('Avatar photo is not a file');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error('Original avatar photo is missing');
+      }
+      throw error;
+    }
+
+    if (request.mode === 'audio') {
+      const audioPath = request.audioPath;
+      if (typeof audioPath !== 'string' || audioPath.trim().length === 0) {
+        throw new Error('audioPath is required for audio generation');
+      }
+      try {
+        const audioStats = await stat(audioPath);
+        if (!audioStats.isFile()) {
+          throw new Error('Original audio is not a file');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error('Original audio is missing');
+        }
+        throw error;
+      }
+      await mediaRegistry.authorizeSelectedFile(audioPath);
+    }
+
+    return startGeneration({ ...request, retryOf: id });
   };
 }

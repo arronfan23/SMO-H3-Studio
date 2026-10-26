@@ -109,9 +109,75 @@ describe('avatar library', () => {
       expect(store.listAvatars()).toEqual([]);
     });
   });
+
+  test('renames an avatar without changing its identity or photo', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({
+        name: 'Before',
+        photoPath: 'avatars/presenter.png',
+      });
+
+      const updated = store.updateAvatar(avatar.id, { name: '  After  ' });
+
+      expect(updated).toEqual({ ...avatar, name: 'After' });
+      expect(store.listAvatars()).toEqual([updated]);
+    }, makeTemporaryDatabasePath());
+  });
+
+  test.each(['', '   '])('rejects an empty avatar rename %j', (name) => {
+    withStore((store) => {
+      const avatar = store.createAvatar({
+        name: 'Before',
+        photoPath: 'avatars/presenter.png',
+      });
+
+      expect(() => store.updateAvatar(avatar.id, { name })).toThrow(
+        /avatar name must not be empty/i,
+      );
+      expect(store.listAvatars()).toEqual([avatar]);
+    });
+  });
+
+  test('deletes an avatar without works', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({
+        name: 'Disposable',
+        photoPath: 'avatars/disposable.png',
+      });
+
+      expect(store.deleteAvatar(avatar.id)).toEqual(avatar);
+      expect(store.listAvatars()).toEqual([]);
+    }, makeTemporaryDatabasePath());
+  });
+
+  test('keeps an avatar and its work when deletion violates the foreign key', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({
+        name: 'Referenced',
+        photoPath: 'avatars/referenced.png',
+      });
+      const work = store.addWork(makeWork(avatar.id));
+
+      expect(() => store.deleteAvatar(avatar.id)).toThrow(
+        /cannot be deleted while works exist/i,
+      );
+      expect(store.listAvatars()).toEqual([avatar]);
+      expect(store.listWorks()).toEqual([work]);
+    }, makeTemporaryDatabasePath());
+  });
 });
 
 describe('work library', () => {
+  test('gets one work by id and returns null for an unknown id', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork(makeWork(avatar.id));
+
+      expect(store.getWork(work.id)).toEqual(work);
+      expect(store.getWork('missing')).toBeNull();
+    });
+  });
+
   test.each(['text', 'audio'] as const)('adds and lists a %s work', (mode) => {
     withStore((store) => {
       const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });

@@ -124,6 +124,39 @@ export class Store {
       }));
   }
 
+  updateAvatar(id: string, input: { name: string }): Avatar {
+    const name = input.name.trim();
+    if (name.length === 0) {
+      throw new Error('Avatar name must not be empty');
+    }
+    const avatar = this.findAvatar(id);
+    if (avatar === null) {
+      throw new Error(`Avatar not found: ${id}`);
+    }
+
+    this.db.prepare('UPDATE avatars SET name = ? WHERE id = ?').run(name, id);
+    return { ...avatar, name };
+  }
+
+  deleteAvatar(id: string): Avatar {
+    const avatar = this.findAvatar(id);
+    if (avatar === null) {
+      throw new Error(`Avatar not found: ${id}`);
+    }
+
+    const result = this.db
+      .prepare(
+        `DELETE FROM avatars
+         WHERE id = ?
+           AND NOT EXISTS (SELECT 1 FROM works WHERE avatarId = ?)`,
+      )
+      .run(id, id);
+    if (result.changes !== 1) {
+      throw new Error('Avatar cannot be deleted while works exist');
+    }
+    return avatar;
+  }
+
   addWork(input: NewWork): Work {
     if (input.id.trim().length === 0) {
       throw new Error('Work id must not be empty');
@@ -170,6 +203,13 @@ export class Store {
       .map((row) => toWork(row));
   }
 
+  getWork(id: string): Work | null {
+    const row = this.db
+      .prepare(`SELECT ${WORK_COLUMNS} FROM works WHERE id = ?`)
+      .get(id);
+    return row === undefined ? null : toWork(row);
+  }
+
   updateWork(id: string, update: WorkUpdate): Work {
     const entries = Object.entries(update);
     for (const [field, value] of entries) {
@@ -181,7 +221,7 @@ export class Store {
       }
     }
 
-    const work = this.findWork(id);
+    const work = this.getWork(id);
     if (work === null) {
       throw new Error(`Work not found: ${id}`);
     }
@@ -200,17 +240,24 @@ export class Store {
       )
       .run(...values, id);
 
-    return this.findWork(id)!;
+    return this.getWork(id)!;
   }
 
   close(): void {
     this.db.close();
   }
 
-  private findWork(id: string): Work | null {
+  private findAvatar(id: string): Avatar | null {
     const row = this.db
-      .prepare(`SELECT ${WORK_COLUMNS} FROM works WHERE id = ?`)
+      .prepare('SELECT id, name, photoPath, createdAt FROM avatars WHERE id = ?')
       .get(id);
-    return row === undefined ? null : toWork(row);
+    return row === undefined
+      ? null
+      : {
+          id: row.id as string,
+          name: row.name as string,
+          photoPath: row.photoPath as string,
+          createdAt: row.createdAt as string,
+        };
   }
 }

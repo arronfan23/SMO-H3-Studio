@@ -12,7 +12,7 @@ import type {
   ComfySubmitResult,
 } from '../../src/main/comfy';
 import { FileService } from '../../src/main/files';
-import { createGenerationHandler } from '../../src/main/generation';
+import { createGenerationHandler, createRetryHandler } from '../../src/main/generation';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 import { MediaRegistry } from '../../src/main/media';
 import { Store } from '../../src/main/store';
@@ -153,8 +153,13 @@ async function createHarness(
     avatarsDirectory: join(directory, 'avatars'),
     outputDirectory,
   });
-  const files = new FileService(mediaRegistry, {
-    showOpenDialog: async () => ({ canceled: false, filePaths: [audioPath] }),
+  const files = new FileService({
+    mediaRegistry,
+    dialog: {
+      showOpenDialog: async () => ({ canceled: false, filePaths: [audioPath] }),
+    },
+    outputDirectory,
+    dataDirectory: directory,
   });
   await files.selectAudio();
   const comfy = new FakeComfyClient();
@@ -209,6 +214,12 @@ async function createHarness(
     await rm(directory, { recursive: true, force: true });
   });
 
+  const retryWork = createRetryHandler({
+    store,
+    mediaRegistry,
+    startGeneration,
+  });
+
   return {
     audioRequest,
     avatar,
@@ -219,6 +230,7 @@ async function createHarness(
     outputDirectory,
     uploadsDirectory,
     mediaRegistry,
+    retryWork,
     startGeneration,
     store,
     textRequest,
@@ -949,5 +961,82 @@ describe('GenerationHandler failures and cancellation', () => {
 
     expect(work.error).toMatch(/output path|output directory|traversal/i);
     expect(work.outputPath).toBeNull();
+  });
+});
+
+
+describe('GenerationHandler retry', () => {
+  test('creates a new work with retryOf and leaves the original unchanged', async () => {
+    const harness = await createHarness();
+    const original = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, original.id, 'done');
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(retry.id).not.toBe(original.id);
+    expect(retryWork.metadata).toEqual({
+      request: harness.textRequest,
+      workflowVersion: 'text-ref2va.json',
+      retryOf: original.id,
+    });
+    const originalAfterRetry = harness.store.listWorks().find((work) => work.id === original.id);
+    expect(originalAfterRetry?.status).toBe('done');
+    expect(originalAfterRetry?.metadata).toEqual({
+      request: harness.textRequest,
+      workflowVersion: 'text-ref2va.json',
+    });
+  });
+
+  test('re-authorizes original audio and retries an audio work', async () => {
+    const harness = await createHarness();
+    harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'audio-result.mp4' })];
+
+    const original = await harness.startGeneration(harness.audioRequest);
+    await waitForWork(harness.store, original.id, 'done');
+    harness.mediaRegistry = new MediaRegistry({
+      avatarsDirectory: join(harness.directory, 'avatars'),
+      outputDirectory: harness.outputDirectory,
+    });
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(retryWork.mode).toBe('audio');
+    expect(retryWork.metadata).toMatchObject({ retryOf: original.id });
+    expect(harness.comfy.uploadedAudioContents.slice(-1)).toEqual(['audio-test-bytes']);
+  });
+
+  test('fails when the original work is missing metadata', async () => {
+    const harness = await createHarness();
+    const work = harness.store.addWork({
+      id: 'work-no-metadata',
+      avatarId: harness.avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+    });
+
+    await expect(harness.retryWork(work.id)).rejects.toThrow(/metadata/i);
+    expect(harness.store.listWorks()).toHaveLength(1);
+  });
+
+  test('fails when the original avatar photo is missing', async () => {
+    const harness = await createHarness();
+    const original = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, original.id, 'done');
+    await rm(harness.avatar.photoPath);
+
+    await expect(harness.retryWork(original.id)).rejects.toThrow(/photo|missing/i);
+  });
+
+  test('fails when the original audio is missing for an audio work', async () => {
+    const harness = await createHarness();
+    harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'audio-result.mp4' })];
+    const original = await harness.startGeneration(harness.audioRequest);
+    await waitForWork(harness.store, original.id, 'done');
+    await rm(harness.audioRequest.audioPath!);
+
+    await expect(harness.retryWork(original.id)).rejects.toThrow(/audio|missing/i);
   });
 });

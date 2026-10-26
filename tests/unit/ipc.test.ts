@@ -147,6 +147,7 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
   });
   const services: IpcServices = {
     startGeneration: async () => ({ id: 'injected-job' }),
+    retryWork: async () => ({ id: 'injected-retry' }),
     jobCoordinator,
     llm: {
       listModels: async () => {
@@ -168,10 +169,11 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
       store,
       mediaRegistry,
     }),
-    files: new FileService(mediaRegistry, { showOpenDialog }),
+    files: new FileService({ mediaRegistry, dialog: { showOpenDialog }, outputDirectory: join(directory, 'output'), dataDirectory: directory }),
     comfy: {
       health: async () => ({ system: {}, devices: [] }),
     },
+    openComfy: async () => undefined,
     hardware: {
       detect: async () => hardwareInfo,
       apply: applyHardwareProfile,
@@ -280,8 +282,6 @@ describe('IPC input schema', () => {
   test.each([
     'jobs:cancel',
     'llm:getProfile',
-    'llm:listModels',
-    'llm:testModel',
     'avatars:list',
     'works:list',
     'comfy:health',
@@ -322,6 +322,18 @@ describe('IPC input schema', () => {
         payload: { name: 'Presenter', photoPath: 'G:\\avatars\\presenter.png' },
       }).channel,
     ).toBe('avatars:create');
+    expect(
+      schema.parse({
+        channel: 'avatars:update',
+        payload: { id: 'avatar-1', name: 'Renamed' },
+      }),
+    ).toEqual({
+      channel: 'avatars:update',
+      payload: { id: 'avatar-1', name: 'Renamed' },
+    });
+    expect(
+      schema.parse({ channel: 'avatars:delete', payload: { id: 'avatar-1' } }),
+    ).toEqual({ channel: 'avatars:delete', payload: { id: 'avatar-1' } });
 
     const hardware = schema.parse({
       channel: 'hardware:apply',
@@ -335,6 +347,20 @@ describe('IPC input schema', () => {
     expect(hardware).toMatchObject({
       payload: { graph: { '1': { _meta: { title: 'Load model' } } } },
     });
+  });
+
+  test.each([
+    { channel: 'jobs:retry', payload: { id: '' } },
+    { channel: 'files:openFolder', payload: { path: '' } },
+    { channel: 'files:openFolder', payload: { path: 'G:\\output', extra: true } },
+    { channel: 'comfy:open', payload: { url: 'http://example.com' } },
+    { channel: 'avatars:update', payload: { id: '', name: 'Renamed' } },
+    { channel: 'avatars:update', payload: { id: 'avatar-1', name: ' ' } },
+    { channel: 'avatars:update', payload: { id: 'avatar-1', name: 'Renamed', photoPath: 'x' } },
+    { channel: 'avatars:delete', payload: { id: '' } },
+    { channel: 'avatars:delete', payload: { id: 'avatar-1', force: true } },
+  ])('rejects invalid avatar mutation input: %j', (request) => {
+    expect(() => createIpcSchema().parse(request)).toThrow();
   });
 
   test.each([
@@ -428,20 +454,30 @@ describe('IPC input schema', () => {
     ).toThrow();
   });
 
-  test.each([{ model: ' ' }, { apiKey: '' }, { apiKey: '   ' }])(
-    'rejects incomplete LLM credentials: %j',
+  test.each([{ model: ' ' }])(
+    'rejects incomplete LLM profile input: %j',
     (override) => {
       expect(() =>
         createIpcSchema().parse({
           channel: 'llm:saveProfile',
           payload: {
             baseUrl: 'https://example.com/v1',
-            model: 'model-a',
             apiKey: 'secret',
             ...override,
           },
         }),
       ).toThrow();
+    },
+  );
+
+  test.each([
+    { channel: 'llm:saveProfile', payload: { baseUrl: 'https://example.com/v1', model: 'model-a' } },
+    { channel: 'llm:listModels', payload: { baseUrl: 'https://example.com/v1', model: 'model-a' } },
+    { channel: 'llm:testModel', payload: { baseUrl: 'https://example.com/v1', model: 'model-a' } },
+  ])(
+    'accepts an optional empty API key in $channel so the saved key can be preserved',
+    ({ channel, payload }) => {
+      expect(createIpcSchema().parse({ channel, payload }).channel).toBe(channel);
     },
   );
 
@@ -603,6 +639,77 @@ describe('main-process IPC handlers', () => {
     await expect(harness.invoke('files:selectImage')).resolves.toBeNull();
   });
 
+  test('retries a work through the real retry handler', async () => {
+    const harness = await createHarness({
+      retryWork: async () => ({ id: 'retried-job' }),
+    });
+
+    await expect(harness.invoke('jobs:retry', { id: 'work-1' })).resolves.toEqual({
+      id: 'retried-job',
+    });
+  });
+
+  test('opens an allowed folder through the real file service', async () => {
+    const harness = await createHarness();
+    const outputDirectory = join(harness.directory, 'output');
+    const target = join(outputDirectory, 'nested');
+    await mkdir(target, { recursive: true });
+    let opened: string | null = null;
+    harness.services.files = new FileService({
+      mediaRegistry: new MediaRegistry({
+        avatarsDirectory: join(harness.directory, 'avatars'),
+        outputDirectory,
+      }),
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory,
+      dataDirectory: harness.directory,
+      opener: { openPath: async (path) => { opened = path; return ''; } },
+    });
+
+    await expect(harness.invoke('files:openFolder', { path: target })).resolves.toBeUndefined();
+    expect(opened).toBe(target);
+  });
+
+  test('rejects opening a folder outside allowed roots', async () => {
+    const harness = await createHarness();
+    const outside = await mkdtemp(join(tmpdir(), 'smo-open-outside-'));
+
+    try {
+      await expect(harness.invoke('files:openFolder', { path: outside })).rejects.toThrow();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('opens ComfyUI through the real opener', async () => {
+    const harness = await createHarness();
+    let opened = false;
+    harness.services.openComfy = async () => { opened = true; };
+
+    await expect(harness.invoke('comfy:open')).resolves.toBeUndefined();
+    expect(opened).toBe(true);
+  });
+
+  test('renames and deletes avatars through the real service', async () => {
+    const harness = await createHarness();
+    const source = join(harness.directory, 'presenter.png');
+    await writeFile(source, 'image-data');
+    harness.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [source] });
+    await harness.invoke('files:selectImage');
+    const avatar = (await harness.invoke('avatars:create', {
+      name: 'Before',
+      photoPath: source,
+    })) as Avatar;
+
+    await expect(
+      harness.invoke('avatars:update', { id: avatar.id, name: 'After' }),
+    ).resolves.toEqual({ ...avatar, name: 'After' });
+    await expect(harness.invoke('avatars:delete', { id: avatar.id })).resolves.toBeUndefined();
+
+    await expect(harness.invoke('avatars:list')).resolves.toEqual([]);
+    await expect(readFile(avatar.photoPath)).rejects.toThrow();
+  });
+
   test('uses saved main-process credentials for all LLM services', async () => {
     const apiKey = 'sk-main-process-only';
     const upstream = await useUpstream((request, response, body) => {
@@ -637,8 +744,14 @@ describe('main-process IPC handlers', () => {
     await expect(harness.invoke('llm:saveProfile', credentials)).resolves.toBeUndefined();
     await expect(harness.llmConfig.getCredentials()).resolves.toEqual(credentials);
     const profile = await harness.invoke('llm:getProfile');
-    const models = await harness.invoke('llm:listModels');
-    const tested = await harness.invoke('llm:testModel');
+    const models = await harness.invoke('llm:listModels', {
+      baseUrl: credentials.baseUrl,
+      model: credentials.model,
+    });
+    const tested = await harness.invoke('llm:testModel', {
+      baseUrl: credentials.baseUrl,
+      model: credentials.model,
+    });
     const polished = await harness.invoke('llm:polish', polishRequest);
 
     expect(profile).toEqual({ baseUrl: credentials.baseUrl, model: 'model-a' });
@@ -664,12 +777,37 @@ describe('main-process IPC handlers', () => {
     ).toEqual(['model-a', 'model-a']);
   });
 
-  test('rejects LLM service calls when no profile is configured', async () => {
+  test('preserves the existing API key when saving with an empty key', async () => {
+    const harness = await createHarness();
+    const apiKey = 'sk-existing-secret';
+
+    await harness.invoke('llm:saveProfile', {
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      model: 'local-model',
+      apiKey,
+    });
+    await harness.invoke('llm:saveProfile', {
+      baseUrl: 'https://example.com/v1',
+      model: 'new-model',
+    });
+
+    const credentials = await harness.llmConfig.getCredentials();
+    expect(credentials).toEqual({
+      baseUrl: 'https://example.com/v1',
+      model: 'new-model',
+      apiKey,
+    });
+  });
+
+  test('rejects LLM list/test calls without an API key when no profile is configured', async () => {
     const harness = await createHarness();
 
-    await expect(harness.invoke('llm:listModels')).rejects.toThrow(
-      /profile is not configured/i,
-    );
+    await expect(
+      harness.invoke('llm:listModels', { baseUrl: 'https://example.com/v1', model: 'model-a' }),
+    ).rejects.toThrow(/api key is required/i);
+    await expect(
+      harness.invoke('llm:testModel', { baseUrl: 'https://example.com/v1', model: 'model-a' }),
+    ).rejects.toThrow(/api key is required/i);
   });
 
   test('checks health through the real ComfyClient against a local service', async () => {
@@ -812,8 +950,8 @@ describe('preload API', () => {
       'llm',
       'works',
     ]);
-    expect(Object.keys(api.avatars).sort()).toEqual(['create', 'list']);
-    expect(Object.keys(api.jobs).sort()).toEqual(['cancel', 'start']);
+    expect(Object.keys(api.avatars).sort()).toEqual(['create', 'delete', 'list', 'update']);
+    expect(Object.keys(api.jobs).sort()).toEqual(['cancel', 'retry', 'start']);
     expect(Object.keys(api.llm).sort()).toEqual([
       'getProfile',
       'listModels',
@@ -821,11 +959,12 @@ describe('preload API', () => {
       'saveProfile',
       'testModel',
     ]);
-    expect(Object.keys(api.comfy)).toEqual(['health']);
+    expect(Object.keys(api.comfy)).toEqual(['health', 'open']);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect']);
     expect(Object.keys(api.works)).toEqual(['list']);
     expect(Object.keys(api.files).sort()).toEqual([
       'mediaUrl',
+      'openFolder',
       'selectAudio',
       'selectImage',
     ]);
@@ -847,6 +986,16 @@ describe('preload API', () => {
       payload: { name: 'Presenter', photoPath: 'G:\\avatar.png' },
       call: (smo: SmoApi) =>
         smo.avatars.create({ name: 'Presenter', photoPath: 'G:\\avatar.png' }),
+    },
+    {
+      channel: 'avatars:update',
+      payload: { id: 'avatar-1', name: 'Renamed' },
+      call: (smo: SmoApi) => smo.avatars.update({ id: 'avatar-1', name: 'Renamed' }),
+    },
+    {
+      channel: 'avatars:delete',
+      payload: { id: 'avatar-1' },
+      call: (smo: SmoApi) => smo.avatars.delete('avatar-1'),
     },
     {
       channel: 'jobs:start',
@@ -895,13 +1044,23 @@ describe('preload API', () => {
     },
     {
       channel: 'llm:listModels',
-      payload: {},
-      call: (smo: SmoApi) => smo.llm.listModels(),
+      payload: { baseUrl: 'https://example.com/v1', model: 'model-a', apiKey: 'secret' },
+      call: (smo: SmoApi) =>
+        smo.llm.listModels({
+          baseUrl: 'https://example.com/v1',
+          model: 'model-a',
+          apiKey: 'secret',
+        }),
     },
     {
       channel: 'llm:testModel',
-      payload: {},
-      call: (smo: SmoApi) => smo.llm.testModel(),
+      payload: { baseUrl: 'https://example.com/v1', model: 'model-a', apiKey: 'secret' },
+      call: (smo: SmoApi) =>
+        smo.llm.testModel({
+          baseUrl: 'https://example.com/v1',
+          model: 'model-a',
+          apiKey: 'secret',
+        }),
     },
     {
       channel: 'llm:polish',
@@ -933,6 +1092,21 @@ describe('preload API', () => {
           confirmed: true,
           modelDirectory: 'G:\\models',
         }),
+    },
+    {
+      channel: 'jobs:retry',
+      payload: { id: 'work-1' },
+      call: (smo: SmoApi) => smo.jobs.retry('work-1'),
+    },
+    {
+      channel: 'files:openFolder',
+      payload: { path: 'G:\\output' },
+      call: (smo: SmoApi) => smo.files.openFolder('G:\\output'),
+    },
+    {
+      channel: 'comfy:open',
+      payload: {},
+      call: (smo: SmoApi) => smo.comfy.open(),
     },
     {
       channel: 'works:list',

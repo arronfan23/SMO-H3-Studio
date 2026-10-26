@@ -1,6 +1,14 @@
 // @vitest-environment node
 
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest';
@@ -38,7 +46,7 @@ describe('AvatarService', () => {
     const source = join(directory, 'portrait.PNG');
     await writeFile(source, 'portrait-image-data');
     showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [source] });
-    const files = new FileService(registry, { showOpenDialog });
+    const files = new FileService({ mediaRegistry: registry, dialog: { showOpenDialog }, outputDirectory: join(directory, 'output'), dataDirectory: directory });
 
     await expect(files.selectImage()).resolves.toBe(source);
 
@@ -101,5 +109,70 @@ describe('AvatarService', () => {
       service.createAvatar({ name: 'Presenter', photoPath }),
     ).rejects.toThrow(/image (?:path|file)/i);
     expect(store.listAvatars()).toEqual([]);
+  });
+
+  test('renames an avatar through the real service and Store', async () => {
+    const source = join(directory, 'portrait.png');
+    await writeFile(source, 'portrait');
+    await registry.authorizeSelectedImage(source);
+    const avatar = await service.createAvatar({ name: 'Before', photoPath: source });
+
+    const updated = await service.updateAvatar(avatar.id, { name: '  After  ' });
+
+    expect(updated).toEqual({ ...avatar, name: 'After' });
+    expect(store.listAvatars()).toEqual([updated]);
+  });
+
+  test('deletes only the managed photo and preserves its directory and sibling files', async () => {
+    const source = join(directory, 'portrait.png');
+    await writeFile(source, 'portrait');
+    await registry.authorizeSelectedImage(source);
+    const avatar = await service.createAvatar({ name: 'Disposable', photoPath: source });
+    const sibling = join(avatarsDirectory, 'unrelated.png');
+    await writeFile(sibling, 'keep-me');
+
+    await service.deleteAvatar(avatar.id);
+
+    expect(store.listAvatars()).toEqual([]);
+    await expect(readFile(avatar.photoPath, 'utf8')).rejects.toThrow();
+    expect(await readFile(sibling, 'utf8')).toBe('keep-me');
+    expect(await readdir(avatarsDirectory)).toEqual(['unrelated.png']);
+  });
+
+  test('refuses deletion when works reference the avatar and keeps the photo', async () => {
+    const source = join(directory, 'portrait.png');
+    await writeFile(source, 'portrait');
+    await registry.authorizeSelectedImage(source);
+    const avatar = await service.createAvatar({ name: 'Referenced', photoPath: source });
+    const work = store.addWork({
+      id: 'work-1',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+    });
+
+    await expect(service.deleteAvatar(avatar.id)).rejects.toThrow(
+      /cannot be deleted while works exist/i,
+    );
+
+    expect(store.listAvatars()).toEqual([avatar]);
+    expect(store.getWork(work.id)).toEqual(work);
+    expect(await readFile(avatar.photoPath, 'utf8')).toBe('portrait');
+  });
+
+  test('never removes a directory even if a stored photo path points to one', async () => {
+    await mkdir(avatarsDirectory, { recursive: true });
+    const avatar = store.createAvatar({
+      name: 'Invalid path',
+      photoPath: avatarsDirectory,
+    });
+
+    await expect(service.deleteAvatar(avatar.id)).rejects.toThrow(
+      /photo is not a file/i,
+    );
+
+    expect(store.listAvatars()).toEqual([avatar]);
+    expect(await readdir(avatarsDirectory)).toEqual([]);
   });
 });
