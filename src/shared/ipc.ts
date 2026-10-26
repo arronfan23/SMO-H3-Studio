@@ -1,0 +1,236 @@
+import { z } from 'zod';
+import { H3_MODES, type H3Mode } from './prompt-contract';
+import type {
+  Avatar,
+  GenerationRequest,
+  HardwareInfo,
+  HardwareProfile,
+  LlmCredentials,
+  LlmProfile,
+  Work,
+} from './types';
+
+const SKILL_NAMES = [
+  '3d-animation-short-generator',
+  'brand-promo-video-generator',
+  'co-op-game-intro-generator',
+  'h3-prompt-writing',
+  'handdrawn-live-video-generator',
+  'minimalist-product-ad-generator',
+  'music-video-subtitle-generator',
+  'paper-collage-explainer-generator',
+  'papercraft-stop-motion-explainer',
+] as const;
+
+export const IPC_CHANNELS = [
+  'jobs:start',
+  'jobs:cancel',
+  'llm:saveProfile',
+  'llm:getProfile',
+  'llm:listModels',
+  'llm:testModel',
+  'llm:polish',
+  'avatars:list',
+  'avatars:create',
+  'works:list',
+  'comfy:health',
+  'hardware:detect',
+  'hardware:apply',
+] as const;
+
+const nonEmptyString = z
+  .string()
+  .refine((value) => value.trim().length > 0, 'Value must not be empty');
+const positiveFiniteNumber = z.number().finite().positive();
+const nonNegativeFiniteNumber = z.number().finite().nonnegative();
+const emptyPayload = z.object({}).strict();
+
+const httpUrlSchema = z.string().superRefine((value, context) => {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    context.addIssue({ code: 'custom', message: 'Invalid LLM base URL' });
+    return;
+  }
+
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message:
+        'LLM base URL must use HTTP or HTTPS without credentials, query, or fragment',
+    });
+  }
+});
+
+const generationRequestSchema = z
+  .object({
+    mode: z.enum(['text', 'audio']),
+    avatarId: nonEmptyString,
+    prompt: nonEmptyString,
+    duration: positiveFiniteNumber,
+    seed: z.number().int().nonnegative(),
+    audioPath: nonEmptyString.optional(),
+    trimStart: nonNegativeFiniteNumber.optional(),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (request.mode === 'audio' && request.audioPath === undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['audioPath'],
+        message: 'audioPath is required for audio generation',
+      });
+    }
+  }) satisfies z.ZodType<GenerationRequest>;
+
+const llmCredentialsSchema = z
+  .object({
+    baseUrl: httpUrlSchema,
+    model: nonEmptyString,
+    apiKey: nonEmptyString,
+  })
+  .strict() satisfies z.ZodType<LlmCredentials>;
+
+const polishRequestSchema = z
+  .object({
+    text: nonEmptyString,
+    duration: positiveFiniteNumber,
+    imageCount: z.number().int().min(0).max(9).optional(),
+    videoCount: z.number().int().min(0).max(3).optional(),
+    referenceLabels: z
+      .array(z.string().regex(/^<(?:Picture|Video|Audio|Subject) [1-9]\d*>$/))
+      .optional(),
+    skill: z.enum([...SKILL_NAMES, 'auto']).optional(),
+    mode: z.enum([...H3_MODES, 'auto']).optional(),
+  })
+  .strict();
+
+const hardwareProfileSchema = z
+  .object({
+    preset: z.enum(['conservative', 'balanced-16gb', 'high-memory-candidate']),
+    modelPolicy: z.enum(['int8', 'bf16-if-present']),
+    megapixels: positiveFiniteNumber,
+    lowvram: z.boolean(),
+    tiling: z.union([z.literal('auto'), z.number().int().positive()]),
+    requiresConfirmation: z.boolean(),
+  })
+  .strict() satisfies z.ZodType<HardwareProfile>;
+
+const comfyNodeSchema = z
+  .object({
+    class_type: nonEmptyString,
+    inputs: z.record(z.string(), z.unknown()),
+  })
+  .passthrough();
+
+export type IpcSkillName = (typeof SKILL_NAMES)[number];
+export type ComfyGraph = Record<string, z.infer<typeof comfyNodeSchema>>;
+type PolishSchemaOutput = z.infer<typeof polishRequestSchema>;
+export type LlmPolishInput = Omit<PolishSchemaOutput, 'referenceLabels'> & {
+  referenceLabels?: readonly string[];
+};
+
+export interface HardwareApplyRequest {
+  graph: ComfyGraph;
+  profile: HardwareProfile;
+  confirmed: boolean;
+  modelDirectory: string;
+}
+
+const hardwareApplySchema = z
+  .object({
+    graph: z.record(z.string(), comfyNodeSchema),
+    profile: hardwareProfileSchema,
+    confirmed: z.boolean(),
+    modelDirectory: nonEmptyString,
+  })
+  .strict() satisfies z.ZodType<HardwareApplyRequest>;
+
+function requestSchema<T extends (typeof IPC_CHANNELS)[number], P extends z.ZodType>(
+  channel: T,
+  payload: P,
+) {
+  return z.object({ channel: z.literal(channel), payload }).strict();
+}
+
+export function createIpcSchema() {
+  return z.discriminatedUnion('channel', [
+    requestSchema('jobs:start', generationRequestSchema),
+    requestSchema('jobs:cancel', emptyPayload),
+    requestSchema('llm:saveProfile', llmCredentialsSchema),
+    requestSchema('llm:getProfile', emptyPayload),
+    requestSchema('llm:listModels', emptyPayload),
+    requestSchema('llm:testModel', emptyPayload),
+    requestSchema('llm:polish', polishRequestSchema),
+    requestSchema('avatars:list', emptyPayload),
+    requestSchema(
+      'avatars:create',
+      z.object({ name: nonEmptyString, photoPath: nonEmptyString }).strict(),
+    ),
+    requestSchema('works:list', emptyPayload),
+    requestSchema('comfy:health', emptyPayload),
+    requestSchema('hardware:detect', emptyPayload),
+    requestSchema('hardware:apply', hardwareApplySchema),
+  ]);
+}
+
+export type IpcRequest = z.infer<ReturnType<typeof createIpcSchema>>;
+export type IpcChannel = IpcRequest['channel'];
+export type IpcPayload<C extends IpcChannel> = Extract<
+  IpcRequest,
+  { channel: C }
+>['payload'];
+
+export interface LlmTestResult {
+  ok: true;
+  latencyMs: number;
+  summary: string;
+}
+
+export interface PolishResult {
+  text: string;
+  skill: IpcSkillName;
+  mode: H3Mode;
+  attempts: number;
+}
+
+export interface ComfyHealth {
+  system: Record<string, unknown>;
+  devices: Record<string, unknown>[];
+  [key: string]: unknown;
+}
+
+export interface SmoApi {
+  readonly avatars: {
+    list(): Promise<Avatar[]>;
+    create(input: IpcPayload<'avatars:create'>): Promise<Avatar>;
+  };
+  readonly jobs: {
+    start(request: GenerationRequest): Promise<unknown>;
+    cancel(): Promise<void>;
+  };
+  readonly llm: {
+    saveProfile(credentials: LlmCredentials): Promise<void>;
+    getProfile(): Promise<LlmProfile | null>;
+    listModels(): Promise<string[]>;
+    testModel(): Promise<LlmTestResult>;
+    polish(request: LlmPolishInput): Promise<PolishResult>;
+  };
+  readonly comfy: {
+    health(): Promise<ComfyHealth>;
+  };
+  readonly hardware: {
+    detect(): Promise<HardwareInfo>;
+    apply(request: HardwareApplyRequest): Promise<ComfyGraph>;
+  };
+  readonly works: {
+    list(): Promise<Work[]>;
+  };
+}
