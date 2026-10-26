@@ -25,6 +25,7 @@ import {
 export const DEFAULT_DATA_DIRECTORY = 'G:\\SMO-H3-Data';
 export const DEFAULT_OUTPUT_DIRECTORY =
   'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\output';
+export const DEFAULT_COMFYUI_BASE_URL = 'http://127.0.0.1:8188';
 
 export interface AppServices extends IpcServices {
   store: Store;
@@ -38,9 +39,10 @@ export interface AppServices extends IpcServices {
 
 export interface AppServicesOptions {
   dataDirectory?: string;
+  outputDirectory?: string;
+  comfyBaseUrl?: string;
   generationHandler?: GenerationHandler;
   errorReporter?: JobEventErrorHandler;
-  outputDirectory?: string;
   fileDialog?: FileDialog;
   mediaProtocol?: MediaProtocolRegistrar;
 }
@@ -63,8 +65,13 @@ const defaultErrorReporter: JobEventErrorHandler = (error, event) => {
 export async function createAppServices(
   options: AppServicesOptions = {},
 ): Promise<AppServices> {
-  const dataDirectory = options.dataDirectory ?? DEFAULT_DATA_DIRECTORY;
-  const outputDirectory = options.outputDirectory ?? DEFAULT_OUTPUT_DIRECTORY;
+  const dataDirectory =
+    options.dataDirectory ?? process.env.SMO_DATA_DIRECTORY ?? DEFAULT_DATA_DIRECTORY;
+  const outputDirectory =
+    options.outputDirectory ?? process.env.SMO_OUTPUT_DIRECTORY ?? DEFAULT_OUTPUT_DIRECTORY;
+  const comfyBaseUrl =
+    options.comfyBaseUrl ?? process.env.SMO_COMFYUI_BASE_URL ?? DEFAULT_COMFYUI_BASE_URL;
+
   await mkdir(dataDirectory, { recursive: true });
   const profilesDirectory = join(dataDirectory, "workflow-profiles");
   const hardwareWorkflows = new HardwareWorkflowStore({ profilesDirectory });
@@ -90,7 +97,7 @@ export async function createAppServices(
   });
   const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
   const llm = new LlmService();
-  const comfy = new ComfyClient();
+  const comfy = new ComfyClient(comfyBaseUrl);
   const jobCoordinator = new JobCoordinator({
     onEvent: (event) => {
       store.updateWork(event.id, {
@@ -121,7 +128,7 @@ export async function createAppServices(
     startGeneration,
   });
   const openComfy = async (): Promise<void> => {
-    await shell.openExternal('http://127.0.0.1:8188');
+    await shell.openExternal(comfyBaseUrl);
   };
 
   return {
