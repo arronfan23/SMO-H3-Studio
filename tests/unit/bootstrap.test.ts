@@ -88,6 +88,74 @@ describe('production application services', () => {
     expect(services.startGeneration).toBe(generationHandler);
   });
 
+  test('writes queued, running, completed, and failed job states to the Store', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({
+      dataDirectory,
+      generationHandler: async () => ({ id: 'unused' }),
+    });
+    cleanups.push(() => services.close());
+    const avatar = services.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    const addWork = (id: string) =>
+      services.store.addWork({
+        id,
+        avatarId: avatar.id,
+        mode: 'text',
+        outputPath: null,
+        status: 'pending',
+      });
+    const firstWork = addWork('first');
+    const secondWork = addWork('second');
+    let finishFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+
+    const first = services.jobCoordinator.enqueue({
+      id: firstWork.id,
+      run: () => firstGate,
+    });
+    const second = services.jobCoordinator.enqueue({
+      id: secondWork.id,
+      run: async () => undefined,
+    });
+
+    expect(services.store.listWorks().find((work) => work.id === firstWork.id)?.status).toBe(
+      'running',
+    );
+    expect(services.store.listWorks().find((work) => work.id === secondWork.id)?.status).toBe(
+      'pending',
+    );
+
+    finishFirst();
+    await Promise.all([first, second]);
+    expect(services.store.listWorks().find((work) => work.id === firstWork.id)?.status).toBe(
+      'done',
+    );
+    expect(services.store.listWorks().find((work) => work.id === secondWork.id)?.status).toBe(
+      'done',
+    );
+
+    const failedWork = addWork('failed');
+    const failure = new Error('Generation failed in ComfyUI');
+    await expect(
+      services.jobCoordinator.enqueue({
+        id: failedWork.id,
+        run: async () => {
+          throw failure;
+        },
+      }),
+    ).rejects.toBe(failure);
+    expect(services.store.listWorks().find((work) => work.id === failedWork.id)).toMatchObject({
+      status: 'failed',
+      error: failure.message,
+      outputPath: null,
+    });
+  });
+
   test('registers every channel before creating the first window', async () => {
     const dataDirectory = await useDataDirectory();
     const events: string[] = [];
@@ -117,7 +185,7 @@ describe('production application services', () => {
       ([channel]) => channel === 'jobs:start',
     )?.[1] as (event: unknown, payload: unknown) => Promise<unknown>;
     await expect(startHandler({}, generationRequest)).rejects.toThrow(
-      /generation handler is not configured/i,
+      /avatar not found/i,
     );
   });
 });

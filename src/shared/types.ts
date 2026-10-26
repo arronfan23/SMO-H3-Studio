@@ -24,6 +24,8 @@ export interface Avatar {
 
 export type WorkStatus = 'pending' | 'running' | 'done' | 'failed';
 
+export type WorkMetadata = Record<string, unknown>;
+
 export interface Work {
   id: string;
   avatarId: string;
@@ -31,9 +33,17 @@ export interface Work {
   outputPath: string | null;
   status: WorkStatus;
   createdAt: string;
+  promptId: string | null;
+  metadata: WorkMetadata | null;
+  error: string | null;
 }
 
-export type NewWork = Omit<Work, 'createdAt'>;
+export type NewWork = Omit<Work, 'createdAt' | 'promptId' | 'metadata' | 'error'> &
+  Partial<Pick<Work, 'promptId' | 'metadata' | 'error'>>;
+
+export type WorkUpdate = Partial<
+  Pick<Work, 'status' | 'outputPath' | 'promptId' | 'error' | 'metadata'>
+>;
 
 export interface LlmProfile {
   baseUrl: string;

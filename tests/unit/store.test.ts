@@ -207,7 +207,169 @@ describe('work library', () => {
   });
 });
 
+describe('work updates', () => {
+  test('updates and returns every whitelisted work field', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork({
+        ...makeWork(avatar.id),
+        outputPath: null,
+        status: 'pending',
+      });
+      const metadata = {
+        request: {
+          mode: 'text',
+          avatarId: avatar.id,
+          prompt: 'A quiet studio shot.',
+          duration: 8,
+          seed: 42,
+        },
+        workflowVersion: 'text-ref2va.json',
+      };
+
+      const updated = store.updateWork(work.id, {
+        status: 'running',
+        outputPath: 'works/preview.mp4',
+        promptId: 'prompt-1',
+        error: 'Temporary diagnostic',
+        metadata,
+      });
+
+      expect(updated).toMatchObject({
+        id: work.id,
+        status: 'running',
+        outputPath: 'works/preview.mp4',
+        promptId: 'prompt-1',
+        error: 'Temporary diagnostic',
+        metadata,
+      });
+      expect(store.listWorks()).toEqual([updated]);
+    });
+  });
+
+  test('clears nullable work fields without changing immutable fields', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork({
+        ...makeWork(avatar.id),
+        promptId: 'prompt-1',
+        error: 'Previous error',
+        metadata: { workflowVersion: 'text-ref2va.json' },
+      });
+
+      const updated = store.updateWork(work.id, {
+        outputPath: null,
+        promptId: null,
+        error: null,
+        metadata: null,
+      });
+
+      expect(updated).toEqual({
+        ...work,
+        outputPath: null,
+        promptId: null,
+        error: null,
+        metadata: null,
+      });
+    });
+  });
+
+  test.each([
+    { id: 'replacement' },
+    { avatarId: 'replacement' },
+    { mode: 'audio' },
+    { createdAt: '2026-10-26T00:00:00.000Z' },
+    { unexpected: true },
+  ])('rejects a non-whitelisted work update: %j', (update) => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork(makeWork(avatar.id));
+
+      expect(() => store.updateWork(work.id, update as never)).toThrow(
+        /unknown work update field/i,
+      );
+      expect(store.listWorks()).toEqual([work]);
+    });
+  });
+
+  test('rejects an update for a work that does not exist', () => {
+    withStore((store) => {
+      expect(() => store.updateWork('missing', { status: 'failed' })).toThrow(
+        /work not found/i,
+      );
+    });
+  });
+});
+
 describe('schema initialization', () => {
+  test('migrates the original works table without losing existing rows', () => {
+    const databasePath = makeTemporaryDatabasePath();
+    const database = new DatabaseSync(databasePath);
+    const createdAt = '2026-10-25T08:00:00.000Z';
+
+    try {
+      database.exec(`
+        CREATE TABLE avatars (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          photoPath TEXT NOT NULL,
+          createdAt TEXT NOT NULL
+        );
+        CREATE TABLE works (
+          id TEXT PRIMARY KEY NOT NULL,
+          avatarId TEXT NOT NULL,
+          mode TEXT NOT NULL CHECK (mode IN ('text', 'audio')),
+          outputPath TEXT,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
+          createdAt TEXT NOT NULL,
+          FOREIGN KEY (avatarId) REFERENCES avatars(id) ON DELETE RESTRICT
+        );
+      `);
+      database
+        .prepare('INSERT INTO avatars (id, name, photoPath, createdAt) VALUES (?, ?, ?, ?)')
+        .run('avatar-old', 'Old avatar', 'avatars/old.jpg', createdAt);
+      database
+        .prepare(
+          `INSERT INTO works (id, avatarId, mode, outputPath, status, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run('work-old', 'avatar-old', 'audio', 'works/old.mp4', 'done', createdAt);
+    } finally {
+      database.close();
+    }
+
+    withStore((store) => {
+      expect(store.listWorks()).toEqual([
+        {
+          id: 'work-old',
+          avatarId: 'avatar-old',
+          mode: 'audio',
+          outputPath: 'works/old.mp4',
+          status: 'done',
+          createdAt,
+          promptId: null,
+          metadata: null,
+          error: null,
+        },
+      ]);
+
+      store.updateWork('work-old', {
+        promptId: 'prompt-old',
+        metadata: { workflowVersion: 'audio-digital-human.json' },
+      });
+    }, databasePath);
+
+    const migrated = new DatabaseSync(databasePath);
+    try {
+      expect(migrated.prepare('SELECT COUNT(*) AS count FROM works').get()?.count).toBe(1);
+      expect(migrated.prepare('SELECT promptId FROM works WHERE id = ?').get('work-old')).toEqual({
+        promptId: 'prompt-old',
+      });
+    } finally {
+      migrated.close();
+    }
+  });
+
   test('closes the database after a failure so the file can be recreated', () => {
     const databasePath = makeTemporaryDatabasePath();
     const database = new DatabaseSync(databasePath);

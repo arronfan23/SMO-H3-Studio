@@ -1,7 +1,10 @@
+import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { GenerationHandler, IpcServices } from './ipc';
 import { ComfyClient } from './comfy';
+import { createGenerationHandler } from './generation';
 import { applyHardwareProfile, detectHardware } from './hardware';
 import { JobCoordinator } from './jobs';
 import { LlmService } from './llm';
@@ -10,6 +13,8 @@ import { SkillsService } from './skills';
 import { Store } from './store';
 
 export const DEFAULT_DATA_DIRECTORY = 'G:\\SMO-H3-Data';
+export const DEFAULT_OUTPUT_DIRECTORY =
+  'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\output';
 
 export interface AppServices extends IpcServices {
   store: Store;
@@ -26,8 +31,24 @@ export interface AppServicesOptions {
   generationHandler?: GenerationHandler;
 }
 
-async function unconfiguredGenerationHandler(): Promise<never> {
-  throw new Error('Generation handler is not configured');
+function defaultWorkflowsDirectory(): string {
+  const resourcesPath = (
+    process as NodeJS.Process & { resourcesPath?: string }
+  ).resourcesPath;
+  if (resourcesPath) {
+    const packagedRoot = join(resourcesPath, 'resources/workflows');
+    if (existsSync(packagedRoot)) {
+      return packagedRoot;
+    }
+  }
+  return fileURLToPath(new URL('../../resources/workflows/', import.meta.url));
+}
+
+function jobErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return error === undefined ? 'Unknown job error' : String(error);
 }
 
 export async function createAppServices(
@@ -39,15 +60,35 @@ export async function createAppServices(
   const store = new Store(join(dataDirectory, 'studio.sqlite'));
   const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
   const llm = new LlmService();
+  const comfy = new ComfyClient();
+  const jobCoordinator = new JobCoordinator({
+    onEvent: (event) => {
+      store.updateWork(event.id, {
+        status: event.status,
+        ...(event.status === 'failed'
+          ? { error: jobErrorMessage(event.error) }
+          : {}),
+      });
+    },
+  });
+  const startGeneration =
+    options.generationHandler ??
+    createGenerationHandler({
+      store,
+      comfy,
+      jobCoordinator,
+      workflowsDirectory: defaultWorkflowsDirectory(),
+      outputDirectory: DEFAULT_OUTPUT_DIRECTORY,
+    });
 
   return {
-    startGeneration: options.generationHandler ?? unconfiguredGenerationHandler,
-    jobCoordinator: new JobCoordinator(),
+    startGeneration,
+    jobCoordinator,
     llm,
     skills: new SkillsService(llm),
     llmConfig,
     store,
-    comfy: new ComfyClient(),
+    comfy,
     hardware: {
       detect: detectHardware,
       apply: applyHardwareProfile,
