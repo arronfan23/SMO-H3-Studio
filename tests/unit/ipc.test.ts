@@ -8,7 +8,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vi
 import { ComfyClient } from '../../src/main/comfy';
 import { AvatarService } from '../../src/main/avatars';
 import { FileService } from '../../src/main/files';
-import { applyHardwareWorkflow } from '../../src/main/hardware-workflows';
+import { recommendHardware } from "../../src/main/hardware";
+import { applyHardwareWorkflow, resetHardwareWorkflowWithPersistence } from '../../src/main/hardware-workflows';
 import {
   registerIpc,
   type IpcHandler,
@@ -175,8 +176,13 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     openComfy: async () => undefined,
     hardware: {
       detect: async () => hardwareInfo,
+      recommend: recommendHardware,
       apply: (request) =>
         applyHardwareWorkflow(request, {
+          profilesDirectory: join(directory, 'workflow-profiles'),
+        }),
+      reset: (mode) =>
+        resetHardwareWorkflowWithPersistence(mode, {
           profilesDirectory: join(directory, 'workflow-profiles'),
         }),
     },
@@ -344,6 +350,32 @@ describe('IPC input schema', () => {
     expect(hardware).toMatchObject({
       payload: { mode: 'text', profile: hardwareProfile },
     });
+  });
+
+  test("accepts hardware recommendation and reset requests", () => {
+    const recommendation = {
+      channel: "hardware:recommend",
+      payload: { gpu: "RTX 5080", vramGiB: 16, ramGiB: 64 },
+    };
+    const reset = { channel: "hardware:reset", payload: { mode: "audio" } };
+
+    expect(createIpcSchema().parse(recommendation)).toEqual(recommendation);
+    expect(createIpcSchema().parse(reset)).toEqual(reset);
+  });
+
+  test("hardware apply rejects a renderer-supplied graph", () => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: "hardware:apply",
+        payload: {
+          mode: "text",
+          profile: hardwareProfile,
+          confirmed: true,
+          modelDirectory: "G:\\models",
+          graph: { injected: { class_type: "Anything", inputs: {} } },
+        },
+      }),
+    ).toThrow();
   });
 
   test.each([
@@ -902,6 +934,23 @@ describe('main-process IPC handlers', () => {
   });
 
 
+  test("recommends a hardware profile through the real recommender", async () => {
+    const harness = await createHarness();
+    const input = { gpu: "RTX 5080", vramGiB: 16, ramGiB: 64 };
+
+    await expect(harness.invoke("hardware:recommend", input)).resolves.toEqual(
+      recommendHardware(input),
+    );
+  });
+
+  test("resets only the requested hardware mode", async () => {
+    const harness = await createHarness();
+
+    await expect(harness.invoke("hardware:reset", { mode: "audio" })).resolves.toMatch(
+      /audio-digital-human\.json$/,
+    );
+  });
+
   test('rejects hardware apply without confirmation', async () => {
     const harness = await createHarness();
 
@@ -979,7 +1028,7 @@ describe('preload API', () => {
       'testModel',
     ]);
     expect(Object.keys(api.comfy)).toEqual(['health', 'open']);
-    expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect']);
+    expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
     expect(Object.keys(api.works)).toEqual(['list']);
     expect(Object.keys(api.files).sort()).toEqual([
       'mediaUrl',
@@ -1111,6 +1160,17 @@ describe('preload API', () => {
           confirmed: true,
           modelDirectory: 'G:\\models',
         }),
+    },
+    {
+      channel: "hardware:recommend",
+      payload: { gpu: "RTX 5080", vramGiB: 16, ramGiB: 64 },
+      call: (smo: SmoApi) =>
+        smo.hardware.recommend({ gpu: "RTX 5080", vramGiB: 16, ramGiB: 64 }),
+    },
+    {
+      channel: "hardware:reset",
+      payload: { mode: "audio" },
+      call: (smo: SmoApi) => smo.hardware.reset("audio"),
     },
     {
       channel: 'jobs:retry',

@@ -8,8 +8,13 @@ import { AvatarService } from './avatars';
 import { ComfyClient } from './comfy';
 import { FileService, type FileDialog } from './files';
 import { createGenerationHandler, createRetryHandler } from './generation';
-import { detectHardware } from './hardware';
-import { applyHardwareWorkflow } from './hardware-workflows';
+import { detectHardware, recommendHardware } from './hardware';
+import {
+  applyHardwareWorkflow,
+  getActiveWorkflow,
+  loadActiveWorkflows,
+  resetHardwareWorkflowWithPersistence,
+} from "./hardware-workflows";
 import { defaultWorkflowsDirectory } from './paths';
 import { JobCoordinator, type JobEventErrorHandler } from './jobs';
 import { LlmService } from './llm';
@@ -66,6 +71,8 @@ export async function createAppServices(
   const dataDirectory = options.dataDirectory ?? DEFAULT_DATA_DIRECTORY;
   const outputDirectory = options.outputDirectory ?? DEFAULT_OUTPUT_DIRECTORY;
   await mkdir(dataDirectory, { recursive: true });
+  const profilesDirectory = join(dataDirectory, "workflow-profiles");
+  await loadActiveWorkflows({ profilesDirectory });
 
   const mediaRegistry = new MediaRegistry({
     avatarsDirectory: join(dataDirectory, 'avatars'),
@@ -106,6 +113,7 @@ export async function createAppServices(
       comfy,
       jobCoordinator,
       workflowsDirectory: defaultWorkflowsDirectory(),
+      workflowResolver: getActiveWorkflow,
       outputDirectory,
       mediaRegistry,
       uploadsDirectory: join(dataDirectory, 'uploads'),
@@ -134,10 +142,11 @@ export async function createAppServices(
     openComfy,
     hardware: {
       detect: detectHardware,
+      recommend: recommendHardware,
       apply: (request) =>
-        applyHardwareWorkflow(request, {
-          profilesDirectory: join(dataDirectory, 'workflow-profiles'),
-        }),
+        applyHardwareWorkflow(request, { profilesDirectory }),
+      reset: (mode) =>
+        resetHardwareWorkflowWithPersistence(mode, { profilesDirectory }),
     },
     close: () => store.close(),
   };

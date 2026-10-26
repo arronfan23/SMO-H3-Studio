@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, ExternalLink, RefreshCw, Save, Search, TestTube } from 'lucide-react';
+import { Check, Cpu, ExternalLink, RefreshCw, RotateCcw, Save, Search, TestTube } from 'lucide-react';
 import type { ComfyHealth } from '../shared/ipc';
-import type { LlmProfile } from '../shared/types';
+import type { HardwareInfo, HardwareProfile, LlmProfile, VideoMode } from '../shared/types';
 import { errorMessage } from './ui';
 
 type LlmStatus =
@@ -10,6 +10,12 @@ type LlmStatus =
   | { kind: 'models'; models: string[] }
   | { kind: 'test'; latencyMs: number; summary: string }
   | { kind: 'error'; message: string };
+
+const DEFAULT_MODEL_DIRECTORY = "G:\\H3Selflift整合包\\模型部分\\diffusion_models";
+
+function formatGiB(value: number): string {
+  return value.toFixed(1) + " GiB";
+}
 
 export function SettingsPage() {
   const [loading, setLoading] = useState(true);
@@ -23,6 +29,18 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [llmStatus, setLlmStatus] = useState<LlmStatus>({ kind: 'idle' });
   const [modelSearch, setModelSearch] = useState('');
+  const [hardwareInfo, setHardwareInfo] = useState<HardwareInfo | null>(null);
+  const [recommendation, setRecommendation] = useState<HardwareProfile | null>(null);
+  const [hardwareMode, setHardwareMode] = useState<VideoMode>("text");
+  const [modelDirectory, setModelDirectory] = useState(DEFAULT_MODEL_DIRECTORY);
+  const [hardwareAction, setHardwareAction] = useState<
+    "detect" | "recommend" | "apply" | "reset" | null
+  >(null);
+  const [hardwareError, setHardwareError] = useState<string | null>(null);
+  const [hardwareResult, setHardwareResult] = useState<{
+    kind: "applied" | "reset";
+    path: string;
+  } | null>(null);
   const mountedRef = useRef(true);
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -131,6 +149,100 @@ export function SettingsPage() {
     }
   };
 
+  const detectHardware = async (): Promise<void> => {
+    if (!mountedRef.current || hardwareAction !== null) return;
+    setHardwareAction("detect");
+    setHardwareError(null);
+    setHardwareResult(null);
+    try {
+      const info = await window.smo.hardware.detect();
+      if (!mountedRef.current) return;
+      setHardwareInfo(info);
+      setRecommendation(null);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setHardwareInfo(null);
+      setRecommendation(null);
+      setHardwareError(errorMessage(error));
+    } finally {
+      if (mountedRef.current) setHardwareAction(null);
+    }
+  };
+
+  const recommendHardware = async (): Promise<void> => {
+    const info = hardwareInfo;
+    if (!mountedRef.current || info === null || hardwareAction !== null) return;
+    setHardwareAction("recommend");
+    setHardwareError(null);
+    setHardwareResult(null);
+    try {
+      const profile = await window.smo.hardware.recommend({
+        gpu: info.gpu,
+        vramGiB: info.vramGiB,
+        ramGiB: info.ramGiB,
+      });
+      if (mountedRef.current) setRecommendation(profile);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setRecommendation(null);
+      setHardwareError(errorMessage(error));
+    } finally {
+      if (mountedRef.current) setHardwareAction(null);
+    }
+  };
+
+  const applyHardwareRecommendation = async (): Promise<void> => {
+    const profile = recommendation;
+    const directory = modelDirectory.trim();
+    if (
+      !mountedRef.current ||
+      profile === null ||
+      hardwareAction !== null ||
+      directory.length === 0
+    ) {
+      return;
+    }
+    const mode = hardwareMode;
+    const confirmed = window.confirm(
+      "确认将 " + profile.preset + " 应用到 " + mode + " 工作流？原工作流不会被修改。",
+    );
+    if (!confirmed || !mountedRef.current) return;
+    setHardwareAction("apply");
+    setHardwareError(null);
+    setHardwareResult(null);
+    try {
+      const result = await window.smo.hardware.apply({
+        mode,
+        profile,
+        confirmed: true,
+        modelDirectory: directory,
+      });
+      if (mountedRef.current) {
+        setHardwareResult({ kind: "applied", path: result.path });
+      }
+    } catch (error) {
+      if (mountedRef.current) setHardwareError(errorMessage(error));
+    } finally {
+      if (mountedRef.current) setHardwareAction(null);
+    }
+  };
+
+  const resetHardware = async (): Promise<void> => {
+    if (!mountedRef.current || hardwareAction !== null) return;
+    const mode = hardwareMode;
+    setHardwareAction("reset");
+    setHardwareError(null);
+    setHardwareResult(null);
+    try {
+      const path = await window.smo.hardware.reset(mode);
+      if (mountedRef.current) setHardwareResult({ kind: "reset", path });
+    } catch (error) {
+      if (mountedRef.current) setHardwareError(errorMessage(error));
+    } finally {
+      if (mountedRef.current) setHardwareAction(null);
+    }
+  };
+
   const selectModel = (value: string): void => {
     setModel(value);
     setLlmStatus({ kind: 'idle' });
@@ -159,6 +271,108 @@ export function SettingsPage() {
         <div className="page-state">正在检测服务与配置…</div>
       ) : (
         <div className="settings-grid">
+          <section className="settings-section">
+            <span className="page-kicker">硬件与工作流</span>
+            <h3>硬件配置</h3>
+            <div className="settings-actions">
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={hardwareAction !== null}
+                onClick={() => void detectHardware()}
+              >
+                <Cpu size={16} aria-hidden="true" />
+                {hardwareAction === "detect" ? "正在检测…" : "检测硬件"}
+              </button>
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={hardwareInfo === null || hardwareAction !== null}
+                onClick={() => void recommendHardware()}
+              >
+                <Search size={16} aria-hidden="true" />
+                {hardwareAction === "recommend" ? "正在推荐…" : "获取推荐"}
+              </button>
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={hardwareAction !== null}
+                onClick={() => void resetHardware()}
+              >
+                <RotateCcw size={16} aria-hidden="true" />
+                {hardwareAction === "reset" ? "正在恢复…" : "恢复默认"}
+              </button>
+            </div>
+            {hardwareError && <p className="form-error" role="alert">{hardwareError}</p>}
+            {hardwareInfo && (
+              <dl className="status-details">
+                <dt>GPU</dt><dd>{hardwareInfo.gpu}</dd>
+                <dt>显存</dt><dd>{formatGiB(hardwareInfo.vramGiB)}</dd>
+                <dt>内存</dt><dd>{formatGiB(hardwareInfo.ramGiB)}</dd>
+                <dt>驱动</dt><dd>{hardwareInfo.driverVersion}</dd>
+                <dt>CUDA</dt><dd>{hardwareInfo.cudaComputeCapability}</dd>
+                <dt>Windows</dt><dd>{hardwareInfo.windowsVersion}</dd>
+                <dt>空闲磁盘</dt><dd>{formatGiB(hardwareInfo.freeDiskGiB)}</dd>
+              </dl>
+            )}
+            {recommendation && (
+              <div>
+                <dl className="status-details">
+                  <dt>preset</dt><dd>{recommendation.preset}</dd>
+                  <dt>modelPolicy</dt><dd>{recommendation.modelPolicy}</dd>
+                  <dt>megapixels</dt><dd>{recommendation.megapixels}</dd>
+                  <dt>lowvram</dt><dd>{recommendation.lowvram ? "开启" : "关闭"}</dd>
+                  <dt>tiling</dt><dd>{recommendation.tiling}</dd>
+                  <dt>确认</dt><dd>{recommendation.requiresConfirmation ? "需要确认" : "无需确认"}</dd>
+                </dl>
+                {recommendation.preset === "high-memory-candidate" && (
+                  <p className="form-notice">高显存候选配置，尚未实测。</p>
+                )}
+                <div className="field">
+                  <label htmlFor="hardware-mode">应用模式</label>
+                  <select
+                    id="hardware-mode"
+                    value={hardwareMode}
+                    disabled={hardwareAction !== null}
+                    onChange={(event) => {
+                      setHardwareMode(event.target.value as VideoMode);
+                      setHardwareResult(null);
+                      setHardwareError(null);
+                    }}
+                  >
+                    <option value="text">文本生视频</option>
+                    <option value="audio">音频数字人</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="hardware-model-directory">模型目录</label>
+                  <input
+                    id="hardware-model-directory"
+                    value={modelDirectory}
+                    disabled={hardwareAction !== null}
+                    onChange={(event) => setModelDirectory(event.target.value)}
+                  />
+                </div>
+                <div className="settings-actions">
+                  <button
+                    className="button button-primary"
+                    type="button"
+                    disabled={hardwareAction !== null || modelDirectory.trim().length === 0}
+                    onClick={() => void applyHardwareRecommendation()}
+                  >
+                    <Check size={16} aria-hidden="true" />
+                    {hardwareAction === "apply" ? "正在应用…" : "应用推荐"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {hardwareResult && (
+              <p className="form-notice" role="status">
+                {hardwareResult.kind === "applied" ? "已应用工作流副本：" : "已恢复默认工作流："}
+                {hardwareResult.path}
+              </p>
+            )}
+          </section>
           <section className="settings-section">
             <span className="page-kicker">生成服务</span>
             <h3>{health ? 'ComfyUI 连接正常' : 'ComfyUI 不可用'}</h3>

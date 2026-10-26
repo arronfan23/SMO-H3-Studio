@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -13,6 +13,7 @@ import { AvatarService } from '../../src/main/avatars';
 import { bootstrapApplication } from '../../src/main/bootstrap';
 import { ComfyClient } from '../../src/main/comfy';
 import { FileService } from '../../src/main/files';
+import { getActiveWorkflow, resetHardwareWorkflow } from "../../src/main/hardware-workflows";
 import { detectHardware } from '../../src/main/hardware';
 import type { GenerationHandler } from '../../src/main/ipc';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
@@ -208,6 +209,169 @@ describe('production application services', () => {
     ]);
     expect(services.jobCoordinator.completedIds).toEqual([work.id]);
     expect(services.jobCoordinator.activeCount).toBe(0);
+  });
+
+  test("restores a persisted active workflow and clears it through reset", async () => {
+    const dataDirectory = await useDataDirectory();
+    resetHardwareWorkflow("text");
+    const frozenPath = getActiveWorkflow("text");
+    const modelDirectory = join(dataDirectory, "models");
+    await mkdir(modelDirectory, { recursive: true });
+    await writeFile(
+      join(modelDirectory, "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors"),
+      "int8",
+    );
+    const profile = {
+      preset: "conservative",
+      modelPolicy: "int8",
+      megapixels: 0.4,
+      lowvram: true,
+      tiling: 4,
+      requiresConfirmation: true,
+    } as const;
+    let appliedPath = "";
+    const first = await createAppServices({ dataDirectory });
+    try {
+      const applied = await first.hardware.apply({
+        mode: "text",
+        profile,
+        confirmed: true,
+        modelDirectory,
+      });
+      appliedPath = applied.path;
+      expect(
+        JSON.parse(
+          await readFile(join(dataDirectory, "workflow-profiles", "active-workflows.json"), "utf8"),
+        ),
+      ).toEqual({ text: appliedPath });
+    } finally {
+      first.close();
+    }
+
+    resetHardwareWorkflow("text");
+    const second = await createAppServices({ dataDirectory });
+    try {
+      expect(getActiveWorkflow("text")).toBe(appliedPath);
+      await expect(second.hardware.reset("text")).resolves.toBe(frozenPath);
+      expect(getActiveWorkflow("text")).toBe(frozenPath);
+      expect(
+        JSON.parse(
+          await readFile(join(dataDirectory, "workflow-profiles", "active-workflows.json"), "utf8"),
+        ),
+      ).toEqual({});
+    } finally {
+      second.close();
+    }
+
+    const reopened = await createAppServices({ dataDirectory });
+    cleanups.push(() => reopened.close());
+    expect(getActiveWorkflow("text")).toBe(frozenPath);
+  });
+
+  test.each([
+    { scenario: "invalid JSON", contents: "{not-json" },
+    {
+      scenario: "an escaping path",
+      contents: JSON.stringify({ text: join(tmpdir(), "outside.json") }),
+    },
+    {
+      scenario: "unsupported fields",
+      contents: JSON.stringify({ text: { path: "balanced-16gb-text.json" }, video: "x" }),
+    },
+  ])("ignores $scenario in active-workflows.json", async ({ contents }) => {
+    const dataDirectory = await useDataDirectory();
+    const profilesDirectory = join(dataDirectory, "workflow-profiles");
+    await mkdir(profilesDirectory, { recursive: true });
+    await writeFile(join(profilesDirectory, "active-workflows.json"), contents);
+    resetHardwareWorkflow("text");
+    const frozenPath = getActiveWorkflow("text");
+
+    const services = await createAppServices({ dataDirectory });
+    try {
+      expect(getActiveWorkflow("text")).toBe(frozenPath);
+    } finally {
+      services.close();
+    }
+  });
+
+  test("rejects the whole persisted mapping when any entry is invalid", async () => {
+    const dataDirectory = await useDataDirectory();
+    const profilesDirectory = join(dataDirectory, "workflow-profiles");
+    await mkdir(profilesDirectory, { recursive: true });
+    const validTextPath = join(profilesDirectory, "balanced-16gb-text.json");
+    await writeFile(validTextPath, "{}");
+    await writeFile(
+      join(profilesDirectory, "active-workflows.json"),
+      JSON.stringify({ text: validTextPath, audio: join(tmpdir(), "outside.json") }),
+    );
+    resetHardwareWorkflow("text");
+    resetHardwareWorkflow("audio");
+    const frozenText = getActiveWorkflow("text");
+    const frozenAudio = getActiveWorkflow("audio");
+
+    const services = await createAppServices({ dataDirectory });
+    try {
+      expect(getActiveWorkflow("text")).toBe(frozenText);
+      expect(getActiveWorkflow("audio")).toBe(frozenAudio);
+    } finally {
+      services.close();
+    }
+  });
+
+  test("new generation uses the confirmed active copy without contacting ComfyUI", async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, "models");
+    await mkdir(modelDirectory, { recursive: true });
+    await writeFile(
+      join(modelDirectory, "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors"),
+      "int8",
+    );
+    const photoPath = join(dataDirectory, "avatar.png");
+    await writeFile(photoPath, "avatar");
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+    const applied = await services.hardware.apply({
+      mode: "text",
+      profile: {
+        preset: "conservative",
+        modelPolicy: "int8",
+        megapixels: 0.4,
+        lowvram: true,
+        tiling: 4,
+        requiresConfirmation: true,
+      },
+      confirmed: true,
+      modelDirectory,
+    });
+    const avatar = services.store.createAvatar({ name: "Presenter", photoPath });
+    vi.spyOn(services.comfy, "uploadFile").mockResolvedValue("uploaded/avatar.png");
+    const submit = vi.spyOn(services.comfy, "submit").mockResolvedValue({
+      prompt_id: "prompt-active",
+      number: 1,
+      node_errors: {},
+    });
+    vi.spyOn(services.comfy, "waitForCompletion").mockResolvedValue(undefined);
+    vi.spyOn(services.comfy, "history").mockResolvedValue([
+      {
+        nodeId: "180",
+        kind: "gifs",
+        filename: "result.mp4",
+        subfolder: "SMO-H3",
+        type: "output",
+      },
+    ]);
+
+    const queued = await services.startGeneration({ ...generationRequest, avatarId: avatar.id });
+    await vi.waitFor(() => {
+      expect(services.store.getWork(queued.id)?.status).toBe("done");
+    });
+
+    expect(services.store.getWork(queued.id)?.metadata).toMatchObject({
+      workflowVersion: applied.path,
+    });
+    expect(submit.mock.calls[0][0]).toMatchObject({
+      "115": { inputs: { megapixels: 0.4 } },
+    });
   });
 
   test('registers every channel before creating the first window', async () => {

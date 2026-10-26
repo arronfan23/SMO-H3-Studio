@@ -1,14 +1,15 @@
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
 import { SettingsPage } from '../../src/renderer/SettingsPage';
 import type { SmoApi } from '../../src/shared/ipc';
-import type { Avatar } from '../../src/shared/types';
+import type { Avatar, HardwareInfo } from '../../src/shared/types';
 
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react')>();
   return { ...actual, useState: vi.fn() };
+
 });
 
 const actualReact = await vi.importActual<typeof import('react')>('react');
@@ -90,6 +91,31 @@ describe('async effects on unmounted components', () => {
     const updateCount = stateUpdates.mock.calls.length;
     health.resolve({ system: {}, devices: [] });
     profile.resolve(null);
+    await flushPromises();
+
+    expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
+  });
+  test("SettingsPage does not update state when hardware detection settles after unmount", async () => {
+    const detection = deferred<HardwareInfo>();
+    window.smo = {
+      comfy: { health: async () => ({ system: {}, devices: [] }) },
+      llm: { getProfile: async () => null },
+      hardware: { detect: () => detection.promise },
+    } as unknown as SmoApi;
+    const view = render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "检测硬件" }));
+
+    view.unmount();
+    const updateCount = stateUpdates.mock.calls.length;
+    detection.resolve({
+      gpu: "Late GPU",
+      vramGiB: 16,
+      ramGiB: 64,
+      driverVersion: "late-driver",
+      cudaComputeCapability: "12.0",
+      windowsVersion: "Windows 11",
+      freeDiskGiB: 512,
+    });
     await flushPromises();
 
     expect(stateUpdates).toHaveBeenCalledTimes(updateCount);

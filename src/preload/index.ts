@@ -32,6 +32,8 @@ const api: SmoApi = {
   },
   hardware: {
     detect: () => ipcRenderer.invoke('hardware:detect', {}),
+    recommend: (input) => ipcRenderer.invoke('hardware:recommend', input),
+    reset: (mode) => ipcRenderer.invoke('hardware:reset', { mode }),
     apply: (request) => ipcRenderer.invoke('hardware:apply', request),
   },
   works: {

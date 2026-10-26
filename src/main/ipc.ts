@@ -20,6 +20,8 @@ import type {
   GenerationStartResult,
   HardwareInfo,
   HardwareProfile,
+  HardwareRecommendationInput,
+  VideoMode,
 } from '../shared/types';
 
 export type IpcHandler = (payload: unknown) => Promise<unknown>;
@@ -44,6 +46,8 @@ export interface IpcServices {
   openComfy: () => Promise<void>;
   hardware: {
     detect: () => Promise<HardwareInfo>;
+    recommend: (input: HardwareRecommendationInput) => HardwareProfile;
+    reset: (mode: VideoMode) => Promise<string>;
     apply: (request: HardwareApplyRequest) => Promise<HardwareWorkflowResult>;
   };
 }
@@ -123,6 +127,10 @@ async function dispatch(
       return undefined;
     case 'hardware:detect':
       return services.hardware.detect();
+    case 'hardware:recommend':
+      return services.hardware.recommend(request.payload);
+    case 'hardware:reset':
+      return services.hardware.reset(request.payload.mode);
     case 'hardware:apply':
       return services.hardware.apply(request.payload);
   }

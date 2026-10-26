@@ -177,6 +177,11 @@ describe('hardware workflow copies', () => {
       expect(result).toEqual({ path: expectedPath, profile });
       expect(result.path).not.toBe(sourcePath);
       expect(getActiveWorkflow(mode)).toBe(expectedPath);
+      expect(
+        JSON.parse(
+          await readFile(join(harness.profilesDirectory, "active-workflows.json"), "utf8"),
+        ),
+      ).toEqual({ [mode]: expectedPath });
       const expectedCopy = applyHardwareProfile(
         JSON.parse(frozenSource),
         profile,
@@ -278,6 +283,7 @@ describe('hardware workflow copies', () => {
     expect(second.path).toBe(first.path);
     expect(getActiveWorkflow('text')).toBe(second.path);
     expect(await readdir(harness.profilesDirectory)).toEqual([
+      'active-workflows.json',
       'conservative-text.json',
     ]);
     const copy = JSON.parse(await readFile(second.path, 'utf8'));
@@ -291,6 +297,41 @@ describe('hardware workflow copies', () => {
         harness.modelDirectory,
       ),
     );
+  });
+
+  test("serializes same-mode applies so active state and persistence match the last call", async () => {
+    const harness = await makeHarness();
+    const firstProfile = makeProfile({ preset: "conservative", megapixels: 0.4 });
+    const secondProfile = makeProfile({ preset: "balanced-16gb", megapixels: 0.7 });
+
+    const [, second] = await Promise.all([
+      applyHardwareWorkflow(
+        {
+          mode: "text",
+          profile: firstProfile,
+          confirmed: true,
+          modelDirectory: harness.modelDirectory,
+        },
+        harness.options,
+      ),
+      applyHardwareWorkflow(
+        {
+          mode: "text",
+          profile: secondProfile,
+          confirmed: true,
+          modelDirectory: harness.modelDirectory,
+        },
+        harness.options,
+      ),
+    ]);
+
+    expect(getActiveWorkflow("text")).toBe(second.path);
+    expect(
+      JSON.parse(
+        await readFile(join(harness.profilesDirectory, "active-workflows.json"), "utf8"),
+      ),
+    ).toEqual({ text: second.path });
+    expect(JSON.parse(await readFile(second.path, "utf8"))["115"].inputs.megapixels).toBe(0.7);
   });
 
   test('uses a custom profilesDirectory when provided', async () => {
@@ -318,6 +359,7 @@ describe('hardware workflow copies', () => {
     );
     expect(getActiveWorkflow('text')).toBe(result.path);
     expect(await readdir(customProfilesDirectory)).toEqual([
+      'active-workflows.json',
       'high-memory-candidate-text.json',
     ]);
   });

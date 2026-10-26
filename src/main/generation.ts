@@ -7,8 +7,13 @@ import {
   createFfprobeDurationReader,
   type AudioDurationReader,
 } from './audio-duration';
+export interface GenerationExecutionOptions {
+  workflowPath?: string;
+}
+
 export type GenerationHandler = (
   request: GenerationRequest,
+  options?: GenerationExecutionOptions,
 ) => GenerationStartResult | Promise<GenerationStartResult>;
 import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
@@ -35,6 +40,7 @@ export interface GenerationHandlerOptions {
   outputDirectory: string;
   mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
   uploadsDirectory: string;
+  workflowResolver?: (mode: GenerationRequest["mode"]) => string;
   copyFile?: typeof copyFile;
   durationReader?: AudioDurationReader;
   removeFile?: typeof rm;
@@ -248,7 +254,7 @@ export function createGenerationHandler(
   const remove = options.removeFile ?? rm;
   const cleanupErrorReporter = options.cleanupErrorReporter ?? reportCleanupError;
 
-  return async (input) => {
+  return async (input, executionOptions = {}) => {
     validateRequest(input);
     const avatar = store
       .listAvatars()
@@ -260,6 +266,20 @@ export function createGenerationHandler(
     const originalRetryOf = input.retryOf;
     const workId = randomUUID();
     const workflowFilename = WORKFLOW_FILENAMES[request.mode];
+    const defaultWorkflowPath = join(workflowsDirectory, workflowFilename);
+    const requestedWorkflowPath =
+      executionOptions.workflowPath ??
+      options.workflowResolver?.(request.mode) ??
+      defaultWorkflowPath;
+    const workflowPath = isAbsolute(requestedWorkflowPath)
+      ? requestedWorkflowPath
+      : join(workflowsDirectory, requestedWorkflowPath);
+    const workflowVersion =
+      executionOptions.workflowPath !== undefined
+        ? executionOptions.workflowPath
+        : resolve(workflowPath) === resolve(defaultWorkflowPath)
+          ? workflowFilename
+          : requestedWorkflowPath;
     let stagedAudioPath: string | undefined;
     if (request.mode === 'audio') {
       const sourcePath = request.audioPath!;
@@ -283,7 +303,7 @@ export function createGenerationHandler(
       promptId: null,
       metadata: {
         request,
-        workflowVersion: workflowFilename,
+        workflowVersion,
         ...(originalRetryOf ? { retryOf: originalRetryOf } : {}),
       },
       error: null,
@@ -325,7 +345,7 @@ export function createGenerationHandler(
             : undefined;
         throwIfCancelled();
         const frozen = JSON.parse(
-          await readFile(join(workflowsDirectory, workflowFilename), 'utf8'),
+          await readFile(workflowPath, 'utf8'),
         ) as WorkflowGraph;
         throwIfCancelled();
         const changes: Record<string, unknown> =
@@ -525,6 +545,9 @@ export function createRetryHandler(
       await mediaRegistry.authorizeSelectedFile(audioPath);
     }
 
-    return startGeneration({ ...request, retryOf: id });
+    return startGeneration(
+      { ...request, retryOf: id },
+      { workflowPath: work.metadata.workflowVersion },
+    );
   };
 }

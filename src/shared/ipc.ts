@@ -7,6 +7,8 @@ import type {
   GenerationStartResult,
   HardwareInfo,
   HardwareProfile,
+  HardwareRecommendationInput,
+  VideoMode,
   LlmProfile,
   Work,
 } from './types';
@@ -34,6 +36,8 @@ export const IPC_CHANNELS = [
   'comfy:health',
   'comfy:open',
   'hardware:detect',
+  'hardware:recommend',
+  'hardware:reset',
   'hardware:apply',
 ] as const;
 
@@ -150,6 +154,18 @@ export interface HardwareWorkflowResult {
   profile: HardwareProfile;
 }
 
+const hardwareRecommendationSchema = z
+  .object({
+    gpu: nonEmptyString,
+    vramGiB: positiveFiniteNumber,
+    ramGiB: positiveFiniteNumber,
+  })
+  .strict() satisfies z.ZodType<HardwareRecommendationInput>;
+
+const hardwareResetSchema = z
+  .object({ mode: z.enum(["text", "audio"]) })
+  .strict();
+
 const hardwareApplySchema = z
   .object({
     mode: z.enum(['text', 'audio']),
@@ -209,6 +225,8 @@ export function createIpcSchema() {
     requestSchema('comfy:health', emptyPayload),
     requestSchema('comfy:open', emptyPayload),
     requestSchema('hardware:detect', emptyPayload),
+    requestSchema('hardware:recommend', hardwareRecommendationSchema),
+    requestSchema('hardware:reset', hardwareResetSchema),
     requestSchema('hardware:apply', hardwareApplySchema),
   ]);
 }
@@ -271,6 +289,8 @@ export interface SmoApi {
   };
   readonly hardware: {
     detect(): Promise<HardwareInfo>;
+    recommend(input: HardwareRecommendationInput): Promise<HardwareProfile>;
+    reset(mode: VideoMode): Promise<string>;
     apply(request: HardwareApplyRequest): Promise<HardwareWorkflowResult>;
   };
   readonly works: {

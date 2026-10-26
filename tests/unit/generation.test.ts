@@ -136,6 +136,7 @@ async function createHarness(
     workflowsDirectory?: string;
     removeFile?: typeof rm;
     cleanupErrorReporter?: (error: unknown) => void;
+    workflowResolver?: (mode: GenerationRequest["mode"]) => string;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'smo-h3-generation-'));
@@ -185,6 +186,7 @@ async function createHarness(
     comfy,
     jobCoordinator,
     workflowsDirectory: options.workflowsDirectory ?? workflowsDirectory,
+    workflowResolver: options.workflowResolver,
     outputDirectory,
     mediaRegistry,
     uploadsDirectory,
@@ -540,6 +542,81 @@ describe('GenerationHandler workflows', () => {
       workflowVersion: 'text-ref2va.json',
     });
     expect(JSON.stringify(work.metadata)).not.toContain(apiKey);
+  });
+});
+
+
+describe("GenerationHandler workflow selection", () => {
+  async function writeVariant(path: string, megapixels: number): Promise<void> {
+    const graph = JSON.parse(
+      await readFile(join(workflowsDirectory, "text-ref2va.json"), "utf8"),
+    ) as Record<string, { inputs: Record<string, unknown> }>;
+    graph["115"].inputs.megapixels = megapixels;
+    await writeFile(path, JSON.stringify(graph));
+  }
+
+  test("uses the resolver active copy and records its actual path", async () => {
+    let activePath = "";
+    const harness = await createHarness({ workflowResolver: () => activePath });
+    activePath = join(harness.directory, "active-text.json");
+    await writeVariant(activePath, 0.4);
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, "done");
+
+    expect(work.metadata).toEqual({
+      request: harness.textRequest,
+      workflowVersion: activePath,
+    });
+    expect(harness.comfy.submissions[0]).toMatchObject({
+      "115": { inputs: { megapixels: 0.4 } },
+    });
+  });
+
+  test("retry keeps the original workflowVersion after the active copy changes", async () => {
+    let activePath = "";
+    const harness = await createHarness({ workflowResolver: () => activePath });
+    const originalCopy = join(harness.directory, "original-active.json");
+    const replacementCopy = join(harness.directory, "replacement-active.json");
+    activePath = originalCopy;
+    await writeVariant(originalCopy, 0.4);
+    await writeVariant(replacementCopy, 1);
+    const original = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, original.id, "done");
+    harness.store.updateWork(original.id, { status: "failed", error: "retry" });
+
+    activePath = replacementCopy;
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, "done");
+
+    expect(retryWork.metadata).toEqual({
+      request: harness.textRequest,
+      workflowVersion: originalCopy,
+      retryOf: original.id,
+    });
+    expect(harness.comfy.submissions).toHaveLength(2);
+    for (const submission of harness.comfy.submissions) {
+      expect(submission).toMatchObject({ "115": { inputs: { megapixels: 0.4 } } });
+    }
+  });
+
+  test("resolves a relative internal workflowVersion against workflowsDirectory", async () => {
+    const customDirectory = await mkdtemp(join(tmpdir(), "smo-h3-workflow-retry-"));
+    cleanups.push(() => rm(customDirectory, { recursive: true, force: true }));
+    const frozen = await readFile(join(workflowsDirectory, "text-ref2va.json"), "utf8");
+    await writeFile(join(customDirectory, "text-ref2va.json"), frozen);
+    await writeVariant(join(customDirectory, "custom-text.json"), 0.4);
+    const harness = await createHarness({ workflowsDirectory: customDirectory });
+
+    const result = await harness.startGeneration(harness.textRequest, {
+      workflowPath: "custom-text.json",
+    });
+    const work = await waitForWork(harness.store, result.id, "done");
+
+    expect(work.metadata).toMatchObject({ workflowVersion: "custom-text.json" });
+    expect(harness.comfy.submissions[0]).toMatchObject({
+      "115": { inputs: { megapixels: 0.4 } },
+    });
   });
 });
 
