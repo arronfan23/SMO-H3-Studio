@@ -3,6 +3,10 @@ import { constants } from 'node:fs';
 import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ComfyClient, ComfyOutputFile } from './comfy';
+import {
+  createFfprobeDurationReader,
+  type AudioDurationReader,
+} from './audio-duration';
 import type { GenerationHandler } from './ipc';
 import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
@@ -30,6 +34,7 @@ export interface GenerationHandlerOptions {
   mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
   uploadsDirectory: string;
   copyFile?: typeof copyFile;
+  durationReader?: AudioDurationReader;
 }
 
 function errorMessage(error: unknown): string {
@@ -163,6 +168,41 @@ async function stageAudioFile(
   return destination;
 }
 
+async function uploadStagedAudio(
+  comfy: Pick<ComfyClient, 'uploadFile'>,
+  stagedPath: string,
+): Promise<string> {
+  try {
+    return await comfy.uploadFile({ filePath: stagedPath, kind: 'audio' });
+  } finally {
+    await rm(stagedPath, { force: true });
+  }
+}
+
+async function validateStagedAudioDuration(
+  request: GenerationRequest,
+  stagedPath: string,
+  readDuration: AudioDurationReader,
+): Promise<void> {
+  try {
+    const actualDuration = await readDuration(stagedPath);
+    if (!Number.isFinite(actualDuration) || actualDuration <= 0) {
+      throw new Error('Actual audio duration must be a finite positive number');
+    }
+    const trimStart = request.trimStart ?? 0;
+    const epsilonSeconds = 0.001;
+    if (trimStart > actualDuration + epsilonSeconds) {
+      throw new Error('trimStart exceeds the actual audio duration');
+    }
+    if (trimStart + request.duration > actualDuration + epsilonSeconds) {
+      throw new Error('Audio trim range exceeds the actual duration');
+    }
+  } catch (error) {
+    await rm(stagedPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 export function createGenerationHandler(
   options: GenerationHandlerOptions,
 ): GenerationHandler {
@@ -176,6 +216,7 @@ export function createGenerationHandler(
     uploadsDirectory,
   } = options;
   const copy = options.copyFile ?? copyFile;
+  const readDuration = options.durationReader ?? createFfprobeDurationReader();
 
   return async (input) => {
     validateRequest(input);
@@ -200,6 +241,7 @@ export function createGenerationHandler(
         uploadsDirectory,
         copy,
       );
+      await validateStagedAudioDuration(request, stagedAudioPath, readDuration);
     }
     store.addWork({
       id: workId,
@@ -244,10 +286,7 @@ export function createGenerationHandler(
         throwIfCancelled();
         const audio =
           request.mode === 'audio'
-            ? await comfy.uploadFile({
-                filePath: stagedAudioPath!,
-                kind: 'audio',
-              })
+            ? await uploadStagedAudio(comfy, stagedAudioPath!)
             : undefined;
         throwIfCancelled();
         const frozen = JSON.parse(

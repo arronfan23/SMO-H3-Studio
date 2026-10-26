@@ -32,7 +32,6 @@ describe('controlled media access', () => {
     );
     registry = new MediaRegistry({
       avatarsDirectory,
-      inputDirectory,
       outputDirectory,
     });
   });
@@ -158,7 +157,6 @@ describe('FileService', () => {
     await Promise.all([writeFile(imagePath, 'image'), writeFile(audioPath, 'audio')]);
     const registry = new MediaRegistry({
       avatarsDirectory,
-      inputDirectory,
       outputDirectory,
     });
     const showOpenDialog = vi

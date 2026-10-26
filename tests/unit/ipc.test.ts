@@ -143,7 +143,6 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
   const showOpenDialog = vi.fn();
   const mediaRegistry = new MediaRegistry({
     avatarsDirectory: join(directory, 'avatars'),
-    inputDirectory: join(directory, 'input'),
     outputDirectory: join(directory, 'output'),
   });
   const services: IpcServices = {

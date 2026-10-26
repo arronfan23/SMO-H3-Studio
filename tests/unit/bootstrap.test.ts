@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   createAppServices,
   DEFAULT_DATA_DIRECTORY,
-  DEFAULT_INPUT_DIRECTORY,
 } from '../../src/main/app-services';
 import { AvatarService } from '../../src/main/avatars';
 import { bootstrapApplication } from '../../src/main/bootstrap';
@@ -74,9 +73,6 @@ describe('production application services', () => {
     cleanups.push(() => services.close());
 
     expect(DEFAULT_DATA_DIRECTORY).toBe('G:\\SMO-H3-Data');
-    expect(DEFAULT_INPUT_DIRECTORY).toBe(
-      'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\input',
-    );
     expect(existsSync(join(dataDirectory, 'studio.sqlite'))).toBe(true);
     expect(services.store).toBeInstanceOf(Store);
     expect(services.llmConfig).toBeInstanceOf(FileLlmConfigStore);

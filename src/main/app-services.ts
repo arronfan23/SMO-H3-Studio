@@ -21,8 +21,6 @@ import {
 } from './media';
 
 export const DEFAULT_DATA_DIRECTORY = 'G:\\SMO-H3-Data';
-export const DEFAULT_INPUT_DIRECTORY =
-  'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\input';
 export const DEFAULT_OUTPUT_DIRECTORY =
   'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\output';
 
@@ -40,7 +38,6 @@ export interface AppServicesOptions {
   dataDirectory?: string;
   generationHandler?: GenerationHandler;
   errorReporter?: JobEventErrorHandler;
-  inputDirectory?: string;
   outputDirectory?: string;
   fileDialog?: FileDialog;
   mediaProtocol?: MediaProtocolRegistrar;
@@ -77,13 +74,11 @@ export async function createAppServices(
   options: AppServicesOptions = {},
 ): Promise<AppServices> {
   const dataDirectory = options.dataDirectory ?? DEFAULT_DATA_DIRECTORY;
-  const inputDirectory = options.inputDirectory ?? DEFAULT_INPUT_DIRECTORY;
   const outputDirectory = options.outputDirectory ?? DEFAULT_OUTPUT_DIRECTORY;
   await mkdir(dataDirectory, { recursive: true });
 
   const mediaRegistry = new MediaRegistry({
     avatarsDirectory: join(dataDirectory, 'avatars'),
-    inputDirectory,
     outputDirectory,
   });
   registerMediaProtocol(mediaRegistry, options.mediaProtocol ?? protocol);

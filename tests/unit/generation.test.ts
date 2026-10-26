@@ -51,6 +51,7 @@ function outputFile(overrides: Partial<ComfyOutputFile> = {}): ComfyOutputFile {
 
 class FakeComfyClient {
   readonly uploads: Parameters<ComfyClient['uploadFile']>[0][] = [];
+  readonly uploadedAudioContents: string[] = [];
   readonly submissions: unknown[] = [];
   readonly waits: string[] = [];
   readonly histories: string[] = [];
@@ -78,6 +79,9 @@ class FakeComfyClient {
     }
     if (this.uploadGate) {
       await this.uploadGate.promise;
+    }
+    if (input.kind === 'audio') {
+      this.uploadedAudioContents.push(await readFile(input.filePath, 'utf8'));
     }
     return input.kind === 'image' ? 'uploaded/avatar.png' : 'uploaded/voice.mp3';
   }
@@ -125,7 +129,12 @@ const workflowsDirectory = fileURLToPath(
   new URL('../../resources/workflows/', import.meta.url),
 );
 
-async function createHarness(options: { copyFile?: typeof copyFile } = {}) {
+async function createHarness(
+  options: {
+    copyFile?: typeof copyFile;
+    durationReader?: (filePath: string) => Promise<number>;
+  } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), 'smo-h3-generation-'));
   const store = new Store(join(directory, 'studio.sqlite'));
   const photoPath = join(directory, 'avatar.png');
@@ -139,7 +148,6 @@ async function createHarness(options: { copyFile?: typeof copyFile } = {}) {
   const uploadsDirectory = join(directory, 'uploads');
   const mediaRegistry = new MediaRegistry({
     avatarsDirectory: join(directory, 'avatars'),
-    inputDirectory: join(directory, 'input'),
     outputDirectory,
   });
   const files = new FileService(mediaRegistry, {
@@ -172,7 +180,8 @@ async function createHarness(options: { copyFile?: typeof copyFile } = {}) {
     outputDirectory,
     mediaRegistry,
     uploadsDirectory,
-    ...options,
+    copyFile: options.copyFile,
+    durationReader: options.durationReader ?? (async () => 60),
   });
   const textRequest: GenerationRequest = {
     mode: 'text',
@@ -306,9 +315,10 @@ describe('GenerationHandler workflows', () => {
         },
       ]);
       expect(harness.comfy.uploads[1].filePath).not.toBe(request.audioPath);
-      expect(
-        await readFile(join(harness.uploadsDirectory, `${result.id}.mp3`), 'utf8'),
-      ).toBe('audio-test-bytes');
+      expect(harness.comfy.uploadedAudioContents).toEqual(['audio-test-bytes']);
+      await expect(
+        readFile(join(harness.uploadsDirectory, `${result.id}.mp3`), 'utf8'),
+      ).rejects.toThrow();
       const expected = JSON.parse(frozenSource) as Record<
         string,
         { inputs: Record<string, unknown> }
@@ -345,7 +355,68 @@ describe('GenerationHandler workflows', () => {
 
     expect(work.status).toBe('done');
     expect(harness.comfy.uploads[1]).toEqual({ filePath: stagedPath, kind: 'audio' });
-    expect(await readFile(stagedPath, 'utf8')).toBe('audio-test-bytes');
+    expect(harness.comfy.uploadedAudioContents).toEqual(['audio-test-bytes']);
+    await expect(readFile(stagedPath, 'utf8')).rejects.toThrow();
+  });
+
+  test('accepts a trim range within the actual duration read from staged audio', async () => {
+    const durationReader = vi.fn(async () => 8.75);
+    const harness = await createHarness({ durationReader });
+    harness.comfy.outputs = [
+      outputFile({ nodeId: '65', filename: 'audio-result.mp4' }),
+    ];
+
+    const result = await harness.startGeneration({
+      ...harness.audioRequest,
+      trimStart: 2.25,
+      duration: 6.5,
+    });
+    await waitForWork(harness.store, result.id, 'done');
+
+    expect(durationReader).toHaveBeenCalledWith(
+      join(harness.uploadsDirectory, `${result.id}.mp3`),
+    );
+  });
+
+  test.each([
+    {
+      scenario: 'trimStart beyond the actual duration',
+      trimStart: 6,
+      duration: 1,
+    },
+    {
+      scenario: 'trimStart plus duration beyond the actual duration',
+      trimStart: 4,
+      duration: 2,
+    },
+  ])('rejects $scenario before pending and removes staged audio', async ({
+    trimStart,
+    duration,
+  }) => {
+    const harness = await createHarness({ durationReader: async () => 5 });
+
+    await expect(
+      harness.startGeneration({ ...harness.audioRequest, trimStart, duration }),
+    ).rejects.toThrow(/actual.*duration|trim range/i);
+
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+  });
+
+  test('removes staged audio without pending when duration reading fails', async () => {
+    const failure = new Error('ffprobe timed out');
+    const harness = await createHarness({
+      durationReader: async () => {
+        throw failure;
+      },
+    });
+
+    await expect(harness.startGeneration(harness.audioRequest)).rejects.toBe(failure);
+
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
   });
 
   test('rejects unselected audio before creating pending work or a copy', async () => {
@@ -599,6 +670,11 @@ describe('GenerationHandler failures and cancellation', () => {
       expect(work.error).toBe(`${kind} upload failed`);
       expect(work.outputPath).toBeNull();
       expect(harness.comfy.submissions).toEqual([]);
+      if (kind === 'audio') {
+        await expect(
+          readFile(join(harness.uploadsDirectory, `${result.id}.mp3`), 'utf8'),
+        ).rejects.toThrow();
+      }
     },
   );
 

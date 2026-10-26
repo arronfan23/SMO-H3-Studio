@@ -80,3 +80,23 @@ test('shares the generation start result across main and renderer IPC types', ()
 
   expect(result.status, output).toBe(0);
 });
+
+test('rejects the removed inputDirectory from MediaRegistryOptions', () => {
+  const fixtureConfig = join(
+    projectRoot,
+    'tests/fixtures/tsconfig.media-registry-options.json',
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(projectRoot, 'node_modules/typescript/bin/tsc'),
+      '--noEmit',
+      '--project',
+      fixtureConfig,
+    ],
+    { cwd: projectRoot, encoding: 'utf8' },
+  );
+  const output = `${result.stdout}${result.stderr}`;
+
+  expect(result.status, output).toBe(0);
+});

@@ -21,7 +21,6 @@ const MEDIA_EXTENSIONS = new Set([
 
 export interface MediaRegistryOptions {
   avatarsDirectory: string;
-  inputDirectory: string;
   outputDirectory: string;
 }
 

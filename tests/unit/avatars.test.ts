@@ -23,7 +23,6 @@ describe('AvatarService', () => {
     store = new Store(':memory:');
     registry = new MediaRegistry({
       avatarsDirectory,
-      inputDirectory: join(directory, 'input'),
       outputDirectory: join(directory, 'output'),
     });
     showOpenDialog = vi.fn<FileDialog['showOpenDialog']>();
