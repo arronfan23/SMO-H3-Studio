@@ -148,6 +148,9 @@ export class JobCoordinator {
         this.active = null;
       } else if (item.settled !== undefined) {
         const timeout = setTimeout(() => {
+          if (this.active !== item || item.cancelled) {
+            return;
+          }
           item.cancelled = true;
           const error = new Error('Generation cancelled');
           this.reservedIds.delete(item.job.id);

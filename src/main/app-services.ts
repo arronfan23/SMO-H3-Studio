@@ -179,16 +179,16 @@ export async function createAppServices(
           return;
         }
         closed = true;
+        await jobCoordinator!.close();
         await Promise.allSettled([
-          jobCoordinator!.close(),
           comfy!.close(),
           (async () => store!.close())(),
         ]);
       },
     };
   } catch (error) {
+    await jobCoordinator?.close();
     await Promise.allSettled([
-      jobCoordinator?.close() ?? Promise.resolve(),
       comfy?.close() ?? Promise.resolve(),
       (async () => store?.close())(),
     ]);

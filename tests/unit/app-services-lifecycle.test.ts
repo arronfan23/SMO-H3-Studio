@@ -68,6 +68,48 @@ describe('AppServices lifecycle', () => {
     expect(storeClose).toHaveBeenCalledTimes(1);
   });
 
+  test('close waits for jobCoordinator so active job failed events reach Store before Store closes', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const avatar = services.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    services.store.addWork({
+      id: 'active-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'pending',
+    });
+
+    const run = services.jobCoordinator.enqueue({
+      id: 'active-work',
+      run: async () => {
+        await new Promise(() => undefined);
+      },
+      cancel: async () => undefined,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(services.jobCoordinator.activeCount).toBe(1);
+
+    let failedWorkBeforeStoreClose = false;
+    const realClose = services.store.close.bind(services.store);
+    vi.spyOn(services.store, 'close').mockImplementation(() => {
+      failedWorkBeforeStoreClose =
+        services.store.listWorks().some((work) => work.status === 'failed');
+      return realClose();
+    });
+
+    const closePromise = services.close();
+    await expect(run).rejects.toThrow(/cancelled/i);
+    await closePromise;
+
+    expect(failedWorkBeforeStoreClose).toBe(true);
+  });
+
   test('close is idempotent and only releases components once', async () => {
     const dataDirectory = await useDataDirectory();
     const services = await createAppServices({ dataDirectory });

@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { JobCoordinator } from '../../src/main/jobs';
 
 describe('JobCoordinator lifecycle', () => {
@@ -66,6 +66,35 @@ describe('JobCoordinator lifecycle', () => {
     const coordinator = new JobCoordinator();
     await coordinator.close();
     await coordinator.close();
+  });
+
+  test('natural completion before close timeout is not overwritten', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const coordinator = new JobCoordinator({ closeTimeoutMs: 50 });
+
+    let finishRun!: () => void;
+    const first = coordinator.enqueue({
+      id: 'first',
+      run: async () => {
+        await new Promise<void>((resolve) => {
+          finishRun = resolve;
+        });
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(coordinator.activeCount).toBe(1);
+
+    const closePromise = coordinator.close();
+    await vi.advanceTimersByTimeAsync(40);
+
+    finishRun();
+    await closePromise;
+
+    await expect(first).resolves.toBeUndefined();
+    expect(coordinator.completedIds).toContain('first');
+
+    vi.useRealTimers();
   });
 
   test('close times out a non-cancellable active job and rejects queued jobs', async () => {
