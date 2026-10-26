@@ -35,6 +35,8 @@ export interface GenerationHandlerOptions {
   uploadsDirectory: string;
   copyFile?: typeof copyFile;
   durationReader?: AudioDurationReader;
+  removeFile?: typeof rm;
+  cleanupErrorReporter?: (error: unknown) => void;
 }
 
 function errorMessage(error: unknown): string {
@@ -171,11 +173,35 @@ async function stageAudioFile(
 async function uploadStagedAudio(
   comfy: Pick<ComfyClient, 'uploadFile'>,
   stagedPath: string,
+  remove: typeof rm,
 ): Promise<string> {
   try {
     return await comfy.uploadFile({ filePath: stagedPath, kind: 'audio' });
   } finally {
-    await rm(stagedPath, { force: true });
+    await remove(stagedPath, { force: true });
+  }
+}
+
+function reportCleanupError(error: unknown): void {
+  console.error('[SMO.H3 Studio] Failed to clean staged audio', error);
+}
+
+async function cleanupStagedAudio(
+  stagedPath: string | undefined,
+  remove: typeof rm,
+  reportError: (error: unknown) => void,
+): Promise<void> {
+  if (stagedPath === undefined) {
+    return;
+  }
+  try {
+    await remove(stagedPath, { force: true });
+  } catch (error) {
+    try {
+      reportError(error);
+    } catch {
+      // Cleanup reporting must not replace the original job outcome.
+    }
   }
 }
 
@@ -217,6 +243,8 @@ export function createGenerationHandler(
   } = options;
   const copy = options.copyFile ?? copyFile;
   const readDuration = options.durationReader ?? createFfprobeDurationReader();
+  const remove = options.removeFile ?? rm;
+  const cleanupErrorReporter = options.cleanupErrorReporter ?? reportCleanupError;
 
   return async (input) => {
     validateRequest(input);
@@ -286,7 +314,7 @@ export function createGenerationHandler(
         throwIfCancelled();
         const audio =
           request.mode === 'audio'
-            ? await uploadStagedAudio(comfy, stagedAudioPath!)
+            ? await uploadStagedAudio(comfy, stagedAudioPath!, remove)
             : undefined;
         throwIfCancelled();
         const frozen = JSON.parse(
@@ -348,6 +376,7 @@ export function createGenerationHandler(
         throw failure;
       } finally {
         execution.interruptible = false;
+        await cleanupStagedAudio(stagedAudioPath, remove, cleanupErrorReporter);
       }
     };
 

@@ -133,6 +133,9 @@ async function createHarness(
   options: {
     copyFile?: typeof copyFile;
     durationReader?: (filePath: string) => Promise<number>;
+    workflowsDirectory?: string;
+    removeFile?: typeof rm;
+    cleanupErrorReporter?: (error: unknown) => void;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'smo-h3-generation-'));
@@ -176,12 +179,14 @@ async function createHarness(
     store,
     comfy,
     jobCoordinator,
-    workflowsDirectory,
+    workflowsDirectory: options.workflowsDirectory ?? workflowsDirectory,
     outputDirectory,
     mediaRegistry,
     uploadsDirectory,
     copyFile: options.copyFile,
     durationReader: options.durationReader ?? (async () => 60),
+    removeFile: options.removeFile,
+    cleanupErrorReporter: options.cleanupErrorReporter,
   });
   const textRequest: GenerationRequest = {
     mode: 'text',
@@ -236,6 +241,16 @@ async function waitForWork(
     throw new Error(`Expected work ${id} to exist`);
   }
   return work;
+}
+
+async function waitForJobEvent(
+  events: JobEvent[],
+  id: string,
+  status: WorkStatus,
+): Promise<void> {
+  await vi.waitFor(() => {
+    expect(events.some((event) => event.id === id && event.status === status)).toBe(true);
+  });
 }
 
 afterEach(async () => {
@@ -657,6 +672,106 @@ describe('GenerationHandler output selection', () => {
 });
 
 describe('GenerationHandler failures and cancellation', () => {
+  test('cleans staged audio when image upload fails before audio upload', async () => {
+    const harness = await createHarness();
+    harness.comfy.uploadErrors.image = new Error('image upload failed');
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    await waitForJobEvent(harness.events, result.id, 'failed');
+
+    await expect(
+      readFile(join(harness.uploadsDirectory, `${result.id}.mp3`), 'utf8'),
+    ).rejects.toThrow();
+    expect(harness.store.listWorks().find((work) => work.id === result.id)).toMatchObject({
+      status: 'failed',
+      error: 'image upload failed',
+    });
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test('keeps staged cleanup safe when workflow reading fails', async () => {
+    const harness = await createHarness({
+      workflowsDirectory: join(tmpdir(), 'smo-workflows-that-do-not-exist'),
+    });
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    await waitForJobEvent(harness.events, result.id, 'failed');
+
+    await expect(
+      readFile(join(harness.uploadsDirectory, `${result.id}.mp3`), 'utf8'),
+    ).rejects.toThrow();
+    expect(harness.store.listWorks().find((work) => work.id === result.id)?.status).toBe(
+      'failed',
+    );
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test('cleans staged audio when cancellation happens before audio upload and submit', async () => {
+    const harness = await createHarness();
+    const uploadGate = deferred();
+    harness.comfy.uploadGate = uploadGate;
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    await vi.waitFor(() => expect(harness.comfy.uploads).toHaveLength(1));
+    await harness.jobCoordinator.cancelActive();
+    uploadGate.resolve();
+    await waitForJobEvent(harness.events, result.id, 'failed');
+
+    await expect(
+      readFile(join(harness.uploadsDirectory, `${result.id}.mp3`), 'utf8'),
+    ).rejects.toThrow();
+    expect(harness.store.listWorks().find((work) => work.id === result.id)).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/cancel/i),
+    });
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test('reports final cleanup failure without changing a done result', async () => {
+    const cleanupFailure = new Error('final cleanup failed');
+    const cleanupErrorReporter = vi.fn();
+    let removals = 0;
+    const removeFile: typeof rm = async (...args) => {
+      removals += 1;
+      if (removals === 2) {
+        throw cleanupFailure;
+      }
+      return rm(...args);
+    };
+    const harness = await createHarness({ removeFile, cleanupErrorReporter });
+    harness.comfy.outputs = [
+      outputFile({ nodeId: '65', filename: 'audio-result.mp4' }),
+    ];
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    await waitForJobEvent(harness.events, result.id, 'done');
+
+    expect(cleanupErrorReporter).toHaveBeenCalledWith(cleanupFailure);
+    expect(harness.store.listWorks().find((work) => work.id === result.id)).toMatchObject({
+      status: 'done',
+      error: null,
+    });
+  });
+
+  test('reports final cleanup failure without masking the original job error', async () => {
+    const cleanupFailure = new Error('final cleanup failed');
+    const cleanupErrorReporter = vi.fn();
+    const removeFile: typeof rm = async () => {
+      throw cleanupFailure;
+    };
+    const harness = await createHarness({ removeFile, cleanupErrorReporter });
+    harness.comfy.uploadErrors.image = new Error('image upload failed');
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    await waitForJobEvent(harness.events, result.id, 'failed');
+
+    expect(cleanupErrorReporter).toHaveBeenCalledWith(cleanupFailure);
+    expect(harness.store.listWorks().find((work) => work.id === result.id)).toMatchObject({
+      status: 'failed',
+      error: 'image upload failed',
+    });
+  });
+
   test.each(['image', 'audio'] as const)(
     'records an %s upload failure without submitting',
     async (kind) => {
