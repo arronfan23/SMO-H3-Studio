@@ -8,7 +8,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vi
 import { ComfyClient } from '../../src/main/comfy';
 import { AvatarService } from '../../src/main/avatars';
 import { FileService } from '../../src/main/files';
-import { applyHardwareProfile } from '../../src/main/hardware';
+import { applyHardwareWorkflow } from '../../src/main/hardware-workflows';
 import {
   registerIpc,
   type IpcHandler,
@@ -24,7 +24,6 @@ import { MediaRegistry } from '../../src/main/media';
 import {
   createIpcSchema,
   IPC_CHANNELS,
-  type ComfyGraph,
   type IpcChannel,
   type SmoApi,
 } from '../../src/shared/ipc';
@@ -176,7 +175,10 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     openComfy: async () => undefined,
     hardware: {
       detect: async () => hardwareInfo,
-      apply: applyHardwareProfile,
+      apply: (request) =>
+        applyHardwareWorkflow(request, {
+          profilesDirectory: join(directory, 'workflow-profiles'),
+        }),
     },
     ...overrides,
   };
@@ -292,13 +294,8 @@ describe('IPC input schema', () => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
 
-  test('accepts the remaining domain-specific payloads without stripping graph metadata', () => {
+  test('accepts the remaining domain-specific payloads', () => {
     const schema = createIpcSchema();
-    const graphNode = {
-      class_type: 'UNETLoader',
-      inputs: { unet_name: 'int8.safetensors' },
-      _meta: { title: 'Load model' },
-    };
 
     expect(
       schema.parse({
@@ -338,14 +335,14 @@ describe('IPC input schema', () => {
     const hardware = schema.parse({
       channel: 'hardware:apply',
       payload: {
-        graph: { '1': graphNode },
+        mode: 'text',
         profile: hardwareProfile,
         confirmed: true,
         modelDirectory: 'G:\\models',
       },
     });
     expect(hardware).toMatchObject({
-      payload: { graph: { '1': { _meta: { title: 'Load model' } } } },
+      payload: { mode: 'text', profile: hardwareProfile },
     });
   });
 
@@ -363,60 +360,7 @@ describe('IPC input schema', () => {
     expect(() => createIpcSchema().parse(request)).toThrow();
   });
 
-  test.each([
-    {
-      scenario: 'node',
-      node: {
-        class_type: 'UNETLoader',
-        inputs: { unet_name: 'int8.safetensors' },
-        unexpected: 'smuggled',
-      },
-    },
-    {
-      scenario: '_meta',
-      node: {
-        class_type: 'UNETLoader',
-        inputs: { unet_name: 'int8.safetensors' },
-        _meta: { title: 'Load model', unexpected: 'smuggled' },
-      },
-    },
-  ])('rejects undeclared fields nested in a Comfy $scenario object', ({ node }) => {
-    expect(() =>
-      createIpcSchema().parse({
-        channel: 'hardware:apply',
-        payload: {
-          graph: { '1': node },
-          profile: hardwareProfile,
-          confirmed: true,
-          modelDirectory: 'G:\\models',
-        },
-      }),
-    ).toThrow(/unexpected/i);
-  });
 
-  test.each(['text-ref2va.json', 'audio-digital-human.json'])(
-    'accepts every node in the real %s API graph',
-    async (filename) => {
-      const graph = JSON.parse(
-        await readFile(
-          new URL(`../../resources/workflows/${filename}`, import.meta.url),
-          'utf8',
-        ),
-      ) as ComfyGraph;
-
-      expect(
-        createIpcSchema().parse({
-          channel: 'hardware:apply',
-          payload: {
-            graph,
-            profile: hardwareProfile,
-            confirmed: true,
-            modelDirectory: 'G:\\models',
-          },
-        }).channel,
-      ).toBe('hardware:apply');
-    },
-  );
 
   test.each([
     { prompt: '' },
@@ -935,64 +879,35 @@ describe('main-process IPC handlers', () => {
     await expect(harness.invoke('hardware:detect')).resolves.toEqual(hardwareInfo);
   });
 
-  test('applies a confirmed hardware profile through the real hardware function', async () => {
+  test('applies a confirmed hardware profile through the real workflow function', async () => {
     const harness = await createHarness();
     const modelDirectory = join(harness.directory, 'models');
+    const profilesDirectory = join(harness.directory, 'workflow-profiles');
     const unetName = 'minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors';
     await mkdir(modelDirectory, { recursive: true });
     await writeFile(join(modelDirectory, unetName), '');
-    const graph = {
-      '1': { class_type: 'UNETLoader', inputs: { unet_name: 'old.safetensors' } },
-      '2': { class_type: 'ResolutionSelector', inputs: { megapixels: 1 } },
-    };
 
-    const patched = (await harness.invoke('hardware:apply', {
-      graph,
+    const result = (await harness.invoke('hardware:apply', {
+      mode: 'text',
       profile: hardwareProfile,
       confirmed: true,
       modelDirectory,
-    })) as ComfyGraph;
+    })) as { path: string; profile: typeof hardwareProfile };
 
-    expect(patched['1'].inputs.unet_name).toBe(unetName);
-    expect(patched['2'].inputs.megapixels).toBe(0.7);
-    expect(graph['1'].inputs.unet_name).toBe('old.safetensors');
+    const expectedPath = join(profilesDirectory, 'balanced-16gb-text.json');
+    expect(result).toEqual({ path: expectedPath, profile: hardwareProfile });
+    const patched = JSON.parse(await readFile(result.path, 'utf8'));
+    expect(patched['127'].inputs.unet_name).toBe(unetName);
+    expect(patched['115'].inputs.megapixels).toBe(0.7);
   });
 
-  test('rejects nested node fields before calling hardware apply', async () => {
-    let calls = 0;
-    const harness = await createHarness({
-      hardware: {
-        detect: async () => hardwareInfo,
-        apply: (graph) => {
-          calls += 1;
-          return graph;
-        },
-      },
-    });
-
-    await expect(
-      harness.invoke('hardware:apply', {
-        graph: {
-          '1': {
-            class_type: 'UNETLoader',
-            inputs: { unet_name: 'int8.safetensors' },
-            unexpected: 'smuggled',
-          },
-        },
-        profile: hardwareProfile,
-        confirmed: true,
-        modelDirectory: 'G:\\models',
-      }),
-    ).rejects.toThrow(/unexpected/i);
-    expect(calls).toBe(0);
-  });
 
   test('rejects hardware apply without confirmation', async () => {
     const harness = await createHarness();
 
     await expect(
       harness.invoke('hardware:apply', {
-        graph: {},
+        mode: 'text',
         profile: hardwareProfile,
         confirmed: false,
         modelDirectory: 'G:\\models',
@@ -1184,14 +1099,14 @@ describe('preload API', () => {
     {
       channel: 'hardware:apply',
       payload: {
-        graph: {},
+        mode: 'text',
         profile: hardwareProfile,
         confirmed: true,
         modelDirectory: 'G:\\models',
       },
       call: (smo: SmoApi) =>
         smo.hardware.apply({
-          graph: {},
+          mode: 'text',
           profile: hardwareProfile,
           confirmed: true,
           modelDirectory: 'G:\\models',

@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { applyHardwareProfile } from '../../src/main/hardware';
 import {
-  activeWorkflows,
   applyHardwareWorkflow,
+  getActiveWorkflow,
   resetHardwareWorkflow,
 } from '../../src/main/hardware-workflows';
 import type { HardwareProfile, VideoMode } from '../../src/shared/types';
@@ -60,14 +60,64 @@ async function hashFile(path: string): Promise<string> {
 }
 
 afterEach(async () => {
-  delete activeWorkflows.text;
-  delete activeWorkflows.audio;
+  resetHardwareWorkflow('text');
+  resetHardwareWorkflow('audio');
   for (const directory of temporaryDirectories.splice(0)) {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
 describe('hardware workflow copies', () => {
+  test.each([
+    '../evil',
+    '..\\evil',
+    'nested/evil',
+    'nested\\evil',
+    '',
+    null,
+    undefined,
+  ])('rejects an invalid hardware preset: %s', async (preset) => {
+    const harness = await makeHarness();
+    const activeBefore = getActiveWorkflow('text');
+
+    await expect(
+      applyHardwareWorkflow(
+        {
+          mode: 'text',
+          profile: makeProfile({
+            preset: preset as HardwareProfile['preset'],
+          }),
+          confirmed: true,
+          modelDirectory: harness.modelDirectory,
+        },
+        harness.options,
+      ),
+    ).rejects.toThrow(/invalid hardware preset/i);
+
+    expect(getActiveWorkflow('text')).toBe(activeBefore);
+    expect(await readdir(harness.profilesDirectory)).toEqual([]);
+  });
+
+  test('rejects an empty modelDirectory', async () => {
+    const harness = await makeHarness();
+    const activeBefore = getActiveWorkflow('text');
+
+    await expect(
+      applyHardwareWorkflow(
+        {
+          mode: 'text',
+          profile: makeProfile(),
+          confirmed: true,
+          modelDirectory: '',
+        },
+        harness.options,
+      ),
+    ).rejects.toThrow(/modelDirectory must not be empty/i);
+
+    expect(getActiveWorkflow('text')).toBe(activeBefore);
+    expect(await readdir(harness.profilesDirectory)).toEqual([]);
+  });
+
   test('rejects an unconfirmed replacement without changing files or active state', async () => {
     const harness = await makeHarness();
     const applied = await applyHardwareWorkflow(
@@ -93,7 +143,7 @@ describe('hardware workflow copies', () => {
       ),
     ).rejects.toThrow(/confirmation/i);
 
-    expect(activeWorkflows.text).toBe(applied.path);
+    expect(getActiveWorkflow('text')).toBe(applied.path);
     expect(await readdir(harness.profilesDirectory)).toEqual(filesBefore);
   });
 
@@ -126,7 +176,7 @@ describe('hardware workflow copies', () => {
       );
       expect(result).toEqual({ path: expectedPath, profile });
       expect(result.path).not.toBe(sourcePath);
-      expect(activeWorkflows[mode]).toBe(expectedPath);
+      expect(getActiveWorkflow(mode)).toBe(expectedPath);
       const expectedCopy = applyHardwareProfile(
         JSON.parse(frozenSource),
         profile,
@@ -162,8 +212,8 @@ describe('hardware workflow copies', () => {
     const defaultPath = resetHardwareWorkflow('text');
 
     expect(defaultPath).toBe(join(workflowsDirectory, WORKFLOW_FILENAMES.text));
-    expect(activeWorkflows.text).toBeUndefined();
-    expect(activeWorkflows.audio).toBe(audioCopy.path);
+    expect(getActiveWorkflow('text')).toBe(defaultPath);
+    expect(getActiveWorkflow('audio')).toBe(audioCopy.path);
     await expect(readFile(textCopy.path, 'utf8')).resolves.toBeTruthy();
   });
 
@@ -197,9 +247,78 @@ describe('hardware workflow copies', () => {
       ),
     ).rejects.toThrow(/missing/i);
 
-    expect(activeWorkflows.text).toBe(applied.path);
+    expect(getActiveWorkflow('text')).toBe(applied.path);
     const filesAfter = await readdir(harness.profilesDirectory);
     expect(filesAfter).toEqual(filesBefore);
     expect(filesAfter.filter((path) => path.endsWith('.tmp'))).toEqual([]);
+  });
+
+  test('reapplying the same preset overwrites the previous copy idempotently', async () => {
+    const harness = await makeHarness();
+    const first = await applyHardwareWorkflow(
+      {
+        mode: 'text',
+        profile: makeProfile({ preset: 'conservative' }),
+        confirmed: true,
+        modelDirectory: harness.modelDirectory,
+      },
+      harness.options,
+    );
+
+    const second = await applyHardwareWorkflow(
+      {
+        mode: 'text',
+        profile: makeProfile({ preset: 'conservative', megapixels: 0.4 }),
+        confirmed: true,
+        modelDirectory: harness.modelDirectory,
+      },
+      harness.options,
+    );
+
+    expect(second.path).toBe(first.path);
+    expect(getActiveWorkflow('text')).toBe(second.path);
+    expect(await readdir(harness.profilesDirectory)).toEqual([
+      'conservative-text.json',
+    ]);
+    const copy = JSON.parse(await readFile(second.path, 'utf8'));
+    expect(copy).toEqual(
+      applyHardwareProfile(
+        JSON.parse(
+          await readFile(join(workflowsDirectory, WORKFLOW_FILENAMES.text), 'utf8'),
+        ),
+        makeProfile({ preset: 'conservative', megapixels: 0.4 }),
+        true,
+        harness.modelDirectory,
+      ),
+    );
+  });
+
+  test('uses a custom profilesDirectory when provided', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'smo-h3-hardware-workflows-custom-'),
+    );
+    temporaryDirectories.push(directory);
+    const modelDirectory = join(directory, 'models');
+    const customProfilesDirectory = join(directory, 'custom-profiles');
+    await mkdir(modelDirectory, { recursive: true });
+    await writeFile(join(modelDirectory, INT8_UNET), 'int8');
+
+    const result = await applyHardwareWorkflow(
+      {
+        mode: 'text',
+        profile: makeProfile({ preset: 'high-memory-candidate' }),
+        confirmed: true,
+        modelDirectory,
+      },
+      { profilesDirectory: customProfilesDirectory },
+    );
+
+    expect(result.path).toBe(
+      join(customProfilesDirectory, 'high-memory-candidate-text.json'),
+    );
+    expect(getActiveWorkflow('text')).toBe(result.path);
+    expect(await readdir(customProfilesDirectory)).toEqual([
+      'high-memory-candidate-text.json',
+    ]);
   });
 });

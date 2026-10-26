@@ -139,15 +139,20 @@ export type LlmPolishInput = Omit<PolishSchemaOutput, 'referenceLabels'> & {
 };
 
 export interface HardwareApplyRequest {
-  graph: ComfyGraph;
+  mode: 'text' | 'audio';
   profile: HardwareProfile;
   confirmed: boolean;
   modelDirectory: string;
 }
 
+export interface HardwareWorkflowResult {
+  path: string;
+  profile: HardwareProfile;
+}
+
 const hardwareApplySchema = z
   .object({
-    graph: z.record(z.string(), comfyNodeSchema),
+    mode: z.enum(['text', 'audio']),
     profile: hardwareProfileSchema,
     confirmed: z.boolean(),
     modelDirectory: nonEmptyString,
@@ -266,7 +271,7 @@ export interface SmoApi {
   };
   readonly hardware: {
     detect(): Promise<HardwareInfo>;
-    apply(request: HardwareApplyRequest): Promise<ComfyGraph>;
+    apply(request: HardwareApplyRequest): Promise<HardwareWorkflowResult>;
   };
   readonly works: {
     list(): Promise<Work[]>;

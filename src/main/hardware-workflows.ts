@@ -1,16 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import type { HardwareProfile, VideoMode } from '../shared/types';
+import type { HardwarePreset, HardwareProfile, VideoMode } from '../shared/types';
 import { applyHardwareProfile } from './hardware';
+import { defaultWorkflowsDirectory } from './paths';
 
 const WORKFLOW_FILENAMES: Record<VideoMode, string> = {
   text: 'text-ref2va.json',
   audio: 'audio-digital-human.json',
 };
 const DEFAULT_PROFILES_DIRECTORY = 'G:\\SMO-H3-Data\\workflow-profiles';
+const VALID_PRESETS: readonly HardwarePreset[] = [
+  'conservative',
+  'balanced-16gb',
+  'high-memory-candidate',
+];
 
 type WorkflowGraph = Record<
   string,
@@ -33,25 +37,31 @@ export interface HardwareWorkflowResult {
   profile: HardwareProfile;
 }
 
-export const activeWorkflows: Partial<Record<VideoMode, string>> = {};
-
-function defaultWorkflowsDirectory(): string {
-  const resourcesPath = (
-    process as NodeJS.Process & { resourcesPath?: string }
-  ).resourcesPath;
-  if (resourcesPath) {
-    const packagedRoot = join(resourcesPath, 'resources/workflows');
-    if (existsSync(packagedRoot)) {
-      return packagedRoot;
-    }
-  }
-  return fileURLToPath(new URL('../../resources/workflows/', import.meta.url));
-}
+const activeWorkflows = new Map<VideoMode, string>();
 
 const workflowsDirectory = defaultWorkflowsDirectory();
 
 function frozenWorkflowPath(mode: VideoMode): string {
   return join(workflowsDirectory, WORKFLOW_FILENAMES[mode]);
+}
+
+export function getActiveWorkflow(mode: VideoMode): string {
+  return activeWorkflows.get(mode) ?? frozenWorkflowPath(mode);
+}
+
+function validatePreset(preset: unknown): asserts preset is HardwarePreset {
+  if (
+    typeof preset !== 'string' ||
+    !VALID_PRESETS.includes(preset as HardwarePreset)
+  ) {
+    throw new Error(`Invalid hardware preset: ${String(preset)}`);
+  }
+}
+
+function validateModelDirectory(modelDirectory: unknown): asserts modelDirectory is string {
+  if (typeof modelDirectory !== 'string' || modelDirectory.trim().length === 0) {
+    throw new Error('modelDirectory must not be empty');
+  }
 }
 
 export async function applyHardwareWorkflow(
@@ -60,6 +70,8 @@ export async function applyHardwareWorkflow(
 ): Promise<HardwareWorkflowResult> {
   const { mode, profile, confirmed, modelDirectory } = input;
   if (!confirmed) throw new Error('Hardware profile requires confirmation');
+  validatePreset(profile.preset);
+  validateModelDirectory(modelDirectory);
 
   const graph = JSON.parse(
     await readFile(frozenWorkflowPath(mode), 'utf8'),
@@ -83,11 +95,11 @@ export async function applyHardwareWorkflow(
     throw error;
   }
 
-  activeWorkflows[mode] = path;
+  activeWorkflows.set(mode, path);
   return { path, profile };
 }
 
 export function resetHardwareWorkflow(mode: VideoMode): string {
-  delete activeWorkflows[mode];
+  activeWorkflows.delete(mode);
   return frozenWorkflowPath(mode);
 }

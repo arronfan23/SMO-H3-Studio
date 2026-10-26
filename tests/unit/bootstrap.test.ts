@@ -13,7 +13,7 @@ import { AvatarService } from '../../src/main/avatars';
 import { bootstrapApplication } from '../../src/main/bootstrap';
 import { ComfyClient } from '../../src/main/comfy';
 import { FileService } from '../../src/main/files';
-import { applyHardwareProfile, detectHardware } from '../../src/main/hardware';
+import { detectHardware } from '../../src/main/hardware';
 import type { GenerationHandler } from '../../src/main/ipc';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 import { LlmService } from '../../src/main/llm';
@@ -87,7 +87,7 @@ describe('production application services', () => {
       expect.any(Function),
     );
     expect(services.hardware.detect).toBe(detectHardware);
-    expect(services.hardware.apply).toBe(applyHardwareProfile);
+    expect(typeof services.hardware.apply).toBe('function');
   });
 
   test('accepts an injected generation handler', async () => {

@@ -8,7 +8,9 @@ import { AvatarService } from './avatars';
 import { ComfyClient } from './comfy';
 import { FileService, type FileDialog } from './files';
 import { createGenerationHandler, createRetryHandler } from './generation';
-import { applyHardwareProfile, detectHardware } from './hardware';
+import { detectHardware } from './hardware';
+import { applyHardwareWorkflow } from './hardware-workflows';
+import { defaultWorkflowsDirectory } from './paths';
 import { JobCoordinator, type JobEventErrorHandler } from './jobs';
 import { LlmService } from './llm';
 import { FileLlmConfigStore } from './llm-config';
@@ -43,18 +45,6 @@ export interface AppServicesOptions {
   mediaProtocol?: MediaProtocolRegistrar;
 }
 
-function defaultWorkflowsDirectory(): string {
-  const resourcesPath = (
-    process as NodeJS.Process & { resourcesPath?: string }
-  ).resourcesPath;
-  if (resourcesPath) {
-    const packagedRoot = join(resourcesPath, 'resources/workflows');
-    if (existsSync(packagedRoot)) {
-      return packagedRoot;
-    }
-  }
-  return fileURLToPath(new URL('../../resources/workflows/', import.meta.url));
-}
 
 function jobErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -144,7 +134,10 @@ export async function createAppServices(
     openComfy,
     hardware: {
       detect: detectHardware,
-      apply: applyHardwareProfile,
+      apply: (request) =>
+        applyHardwareWorkflow(request, {
+          profilesDirectory: join(dataDirectory, 'workflow-profiles'),
+        }),
     },
     close: () => store.close(),
   };

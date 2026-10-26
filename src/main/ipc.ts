@@ -10,7 +10,8 @@ import type { Store } from './store';
 import {
   createIpcSchema,
   IPC_CHANNELS,
-  type ComfyGraph,
+  type HardwareApplyRequest,
+  type HardwareWorkflowResult,
   type IpcRequest,
 } from '../shared/ipc';
 import type { GenerationHandler } from './generation';
@@ -43,12 +44,7 @@ export interface IpcServices {
   openComfy: () => Promise<void>;
   hardware: {
     detect: () => Promise<HardwareInfo>;
-    apply: (
-      graph: ComfyGraph,
-      profile: HardwareProfile,
-      confirmed: boolean,
-      modelDirectory: string,
-    ) => ComfyGraph;
+    apply: (request: HardwareApplyRequest) => Promise<HardwareWorkflowResult>;
   };
 }
 
@@ -128,12 +124,7 @@ async function dispatch(
     case 'hardware:detect':
       return services.hardware.detect();
     case 'hardware:apply':
-      return services.hardware.apply(
-        request.payload.graph,
-        request.payload.profile,
-        request.payload.confirmed,
-        request.payload.modelDirectory,
-      );
+      return services.hardware.apply(request.payload);
   }
 }
 
