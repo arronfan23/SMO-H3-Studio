@@ -126,6 +126,8 @@ describe("SettingsPage hardware controls", () => {
   test("applies a confirmed audio profile with the default model directory", async () => {
     await renderRecommendation();
     fireEvent.change(screen.getByLabelText("应用模式"), { target: { value: "audio" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
+    await screen.findByText(hardwareProfile.preset);
 
     fireEvent.click(screen.getByRole("button", { name: "应用推荐" }));
 
@@ -165,12 +167,36 @@ describe("SettingsPage hardware controls", () => {
     expect(screen.queryByText(/已应用/)).not.toBeInTheDocument();
   });
 
+  test("clears the old recommendation and applied path when the mode changes", async () => {
+    await renderRecommendation();
+    fireEvent.click(screen.getByRole("button", { name: "应用推荐" }));
+    expect(await screen.findByText(/已应用工作流副本/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("应用模式"), { target: { value: "audio" } });
+
+    expect(screen.queryByText(hardwareProfile.preset)).not.toBeInTheDocument();
+    expect(screen.queryByText(/已应用工作流副本/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("应用模式")).toHaveValue("audio");
+    expect(screen.queryByRole("button", { name: "应用推荐" })).not.toBeInTheDocument();
+  });
+
+  test("does not reset when confirmation is cancelled", async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认" }));
+
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(smo.hardware.reset).not.toHaveBeenCalled();
+  });
+
   test("resets the selected mode and displays the restored frozen path", async () => {
     await renderSettings();
 
     fireEvent.click(screen.getByRole("button", { name: "恢复默认" }));
 
     await waitFor(() => expect(smo.hardware.reset).toHaveBeenCalledWith("text"));
+    expect(window.confirm).toHaveBeenCalledTimes(1);
     expect(await screen.findByText(/text-ref2va\.json/)).toBeInTheDocument();
   });
 });

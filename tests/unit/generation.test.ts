@@ -620,6 +620,35 @@ describe("GenerationHandler workflow selection", () => {
   });
 });
 
+  test.each(["../outside.json", "..\\outside.json"])(
+    "rejects a relative workflowVersion that escapes workflowsDirectory: %s",
+    async (workflowPath) => {
+      const customDirectory = await mkdtemp(join(tmpdir(), "smo-h3-workflow-escape-"));
+      cleanups.push(() => rm(customDirectory, { recursive: true, force: true }));
+      const frozen = await readFile(join(workflowsDirectory, "text-ref2va.json"), "utf8");
+      await writeFile(join(customDirectory, "text-ref2va.json"), frozen);
+      const harness = await createHarness({ workflowsDirectory: customDirectory });
+
+      const outcome = await Promise.resolve(
+        harness.startGeneration(harness.textRequest, { workflowPath }),
+      ).then(
+        (result) => ({ id: result.id, error: null as string | null }),
+        (error: unknown) => ({
+          id: null,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+
+      if (outcome.id !== null) {
+        const work = await waitForWork(harness.store, outcome.id, "failed");
+        expect(work.error).toMatch(/workflow.*escapes/i);
+      } else {
+        expect(outcome.error).toMatch(/workflow.*escapes/i);
+      }
+      expect(harness.comfy.submissions).toEqual([]);
+    },
+  );
+
 describe('GenerationHandler validation', () => {
   test.each(['', '   '])('rejects an empty avatarId %j before creating a work', async (avatarId) => {
     const harness = await createHarness();

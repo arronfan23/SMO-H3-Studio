@@ -13,7 +13,6 @@ import { AvatarService } from '../../src/main/avatars';
 import { bootstrapApplication } from '../../src/main/bootstrap';
 import { ComfyClient } from '../../src/main/comfy';
 import { FileService } from '../../src/main/files';
-import { getActiveWorkflow, resetHardwareWorkflow } from "../../src/main/hardware-workflows";
 import { detectHardware } from '../../src/main/hardware';
 import type { GenerationHandler } from '../../src/main/ipc';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
@@ -38,6 +37,11 @@ vi.mock('electron', () => ({
     decryptString: (value: Buffer) => value.toString('utf8'),
   },
 }));
+
+vi.mock("../../src/main/hardware", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/main/hardware")>();
+  return { ...actual, detectHardware: vi.fn(actual.detectHardware) };
+});
 
 const generationRequest = {
   mode: 'text',
@@ -65,6 +69,7 @@ describe('production application services', () => {
   beforeEach(() => {
     ipcMainHandle.mockReset();
     protocolRegisterFileProtocol.mockClear();
+    vi.mocked(detectHardware).mockClear();
   });
 
   test('creates the real services in the selected data directory', async () => {
@@ -87,8 +92,29 @@ describe('production application services', () => {
       'smo-media',
       expect.any(Function),
     );
-    expect(services.hardware.detect).toBe(detectHardware);
+    expect(typeof services.hardware.detect).toBe("function");
     expect(typeof services.hardware.apply).toBe('function');
+  });
+
+  test("passes outputDirectory to hardware disk detection", async () => {
+    const dataDirectory = await useDataDirectory();
+    const outputDirectory = join(dataDirectory, "custom-output");
+    const info = {
+      gpu: "Test GPU",
+      vramGiB: 16,
+      ramGiB: 64,
+      windowsVersion: "Windows 11",
+      driverVersion: "driver",
+      cudaComputeCapability: "12.0",
+      freeDiskGiB: 128,
+    };
+    vi.mocked(detectHardware).mockResolvedValue(info);
+    const services = await createAppServices({ dataDirectory, outputDirectory });
+    cleanups.push(() => services.close());
+
+    await expect(services.hardware.detect()).resolves.toEqual(info);
+
+    expect(vi.mocked(detectHardware)).toHaveBeenCalledWith(undefined, outputDirectory);
   });
 
   test('accepts an injected generation handler', async () => {
@@ -211,138 +237,12 @@ describe('production application services', () => {
     expect(services.jobCoordinator.activeCount).toBe(0);
   });
 
-  test("restores a persisted active workflow and clears it through reset", async () => {
-    const dataDirectory = await useDataDirectory();
-    resetHardwareWorkflow("text");
-    const frozenPath = getActiveWorkflow("text");
-    const modelDirectory = join(dataDirectory, "models");
-    await mkdir(modelDirectory, { recursive: true });
-    await writeFile(
-      join(modelDirectory, "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors"),
-      "int8",
-    );
-    const profile = {
-      preset: "conservative",
-      modelPolicy: "int8",
-      megapixels: 0.4,
-      lowvram: true,
-      tiling: 4,
-      requiresConfirmation: true,
-    } as const;
-    let appliedPath = "";
-    const first = await createAppServices({ dataDirectory });
-    try {
-      const applied = await first.hardware.apply({
-        mode: "text",
-        profile,
-        confirmed: true,
-        modelDirectory,
-      });
-      appliedPath = applied.path;
-      expect(
-        JSON.parse(
-          await readFile(join(dataDirectory, "workflow-profiles", "active-workflows.json"), "utf8"),
-        ),
-      ).toEqual({ text: appliedPath });
-    } finally {
-      first.close();
-    }
-
-    resetHardwareWorkflow("text");
-    const second = await createAppServices({ dataDirectory });
-    try {
-      expect(getActiveWorkflow("text")).toBe(appliedPath);
-      await expect(second.hardware.reset("text")).resolves.toBe(frozenPath);
-      expect(getActiveWorkflow("text")).toBe(frozenPath);
-      expect(
-        JSON.parse(
-          await readFile(join(dataDirectory, "workflow-profiles", "active-workflows.json"), "utf8"),
-        ),
-      ).toEqual({});
-    } finally {
-      second.close();
-    }
-
-    const reopened = await createAppServices({ dataDirectory });
-    cleanups.push(() => reopened.close());
-    expect(getActiveWorkflow("text")).toBe(frozenPath);
-  });
-
-  test.each([
-    { scenario: "invalid JSON", contents: "{not-json" },
-    {
-      scenario: "an escaping path",
-      contents: JSON.stringify({ text: join(tmpdir(), "outside.json") }),
-    },
-    {
-      scenario: "unsupported fields",
-      contents: JSON.stringify({ text: { path: "balanced-16gb-text.json" }, video: "x" }),
-    },
-  ])("ignores $scenario in active-workflows.json", async ({ contents }) => {
-    const dataDirectory = await useDataDirectory();
-    const profilesDirectory = join(dataDirectory, "workflow-profiles");
-    await mkdir(profilesDirectory, { recursive: true });
-    await writeFile(join(profilesDirectory, "active-workflows.json"), contents);
-    resetHardwareWorkflow("text");
-    const frozenPath = getActiveWorkflow("text");
-
-    const services = await createAppServices({ dataDirectory });
-    try {
-      expect(getActiveWorkflow("text")).toBe(frozenPath);
-    } finally {
-      services.close();
-    }
-  });
-
-  test("rejects the whole persisted mapping when any entry is invalid", async () => {
-    const dataDirectory = await useDataDirectory();
-    const profilesDirectory = join(dataDirectory, "workflow-profiles");
-    await mkdir(profilesDirectory, { recursive: true });
-    const validTextPath = join(profilesDirectory, "balanced-16gb-text.json");
-    await writeFile(validTextPath, "{}");
-    await writeFile(
-      join(profilesDirectory, "active-workflows.json"),
-      JSON.stringify({ text: validTextPath, audio: join(tmpdir(), "outside.json") }),
-    );
-    resetHardwareWorkflow("text");
-    resetHardwareWorkflow("audio");
-    const frozenText = getActiveWorkflow("text");
-    const frozenAudio = getActiveWorkflow("audio");
-
-    const services = await createAppServices({ dataDirectory });
-    try {
-      expect(getActiveWorkflow("text")).toBe(frozenText);
-      expect(getActiveWorkflow("audio")).toBe(frozenAudio);
-    } finally {
-      services.close();
-    }
-  });
-
-  test("new generation uses the confirmed active copy without contacting ComfyUI", async () => {
-    const dataDirectory = await useDataDirectory();
-    const modelDirectory = join(dataDirectory, "models");
-    await mkdir(modelDirectory, { recursive: true });
-    await writeFile(
-      join(modelDirectory, "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors"),
-      "int8",
-    );
+  async function runTextGeneration(
+    services: Awaited<ReturnType<typeof createAppServices>>,
+    dataDirectory: string,
+  ) {
     const photoPath = join(dataDirectory, "avatar.png");
     await writeFile(photoPath, "avatar");
-    const services = await createAppServices({ dataDirectory });
-    cleanups.push(() => services.close());
-    const applied = await services.hardware.apply({
-      mode: "text",
-      profile: {
-        preset: "conservative",
-        modelPolicy: "int8",
-        megapixels: 0.4,
-        lowvram: true,
-        tiling: 4,
-        requiresConfirmation: true,
-      },
-      confirmed: true,
-      modelDirectory,
-    });
     const avatar = services.store.createAvatar({ name: "Presenter", photoPath });
     vi.spyOn(services.comfy, "uploadFile").mockResolvedValue("uploaded/avatar.png");
     const submit = vi.spyOn(services.comfy, "submit").mockResolvedValue({
@@ -361,16 +261,209 @@ describe('production application services', () => {
       },
     ]);
 
-    const queued = await services.startGeneration({ ...generationRequest, avatarId: avatar.id });
+    const queued = await services.startGeneration({
+      ...generationRequest,
+      avatarId: avatar.id,
+    });
     await vi.waitFor(() => {
       expect(services.store.getWork(queued.id)?.status).toBe("done");
     });
+    return {
+      metadata: services.store.getWork(queued.id)?.metadata,
+      submitted: submit.mock.calls[0][0],
+    };
+  }
 
-    expect(services.store.getWork(queued.id)?.metadata).toMatchObject({
-      workflowVersion: applied.path,
+  test("restores a persisted active workflow and clears it through reset", async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, "models");
+    await mkdir(modelDirectory, { recursive: true });
+    await writeFile(
+      join(modelDirectory, "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors"),
+      "int8",
+    );
+    const first = await createAppServices({ dataDirectory });
+    let appliedPath = "";
+    try {
+      const applied = await first.hardware.apply({
+        mode: "text",
+        profile: {
+          preset: "conservative",
+          modelPolicy: "int8",
+          megapixels: 0.4,
+          lowvram: true,
+          tiling: 4,
+          requiresConfirmation: true,
+        },
+        confirmed: true,
+        modelDirectory,
+      });
+      appliedPath = applied.path;
+      expect(
+        JSON.parse(
+          await readFile(join(dataDirectory, "workflow-profiles", "active-workflows.json"), "utf8"),
+        ),
+      ).toEqual({ text: "conservative-text.json" });
+    } finally {
+      first.close();
+    }
+
+    const second = await createAppServices({ dataDirectory });
+    try {
+      const restored = await runTextGeneration(second, dataDirectory);
+      expect(restored.metadata).toMatchObject({ workflowVersion: appliedPath });
+      await expect(second.hardware.reset("text")).resolves.toMatch(/text-ref2va\.json$/);
+      expect(
+        JSON.parse(
+          await readFile(join(dataDirectory, "workflow-profiles", "active-workflows.json"), "utf8"),
+        ),
+      ).toEqual({});
+    } finally {
+      second.close();
+    }
+
+    const reopened = await createAppServices({ dataDirectory });
+    cleanups.push(() => reopened.close());
+    const restoredDefault = await runTextGeneration(reopened, dataDirectory);
+    expect(restoredDefault.metadata).toMatchObject({
+      workflowVersion: "text-ref2va.json",
     });
-    expect(submit.mock.calls[0][0]).toMatchObject({
+  });
+
+  test.each([
+    { scenario: "invalid JSON", contents: "{not-json" },
+    {
+      scenario: "an escaping path",
+      contents: JSON.stringify({ text: "../outside.json" }),
+    },
+    {
+      scenario: "unsupported fields",
+      contents: JSON.stringify({ text: { path: "balanced-16gb-text.json" }, video: "x" }),
+    },
+  ])("ignores $scenario in active-workflows.json", async ({ contents }) => {
+    const dataDirectory = await useDataDirectory();
+    const profilesDirectory = join(dataDirectory, "workflow-profiles");
+    await mkdir(profilesDirectory, { recursive: true });
+    await writeFile(join(profilesDirectory, "active-workflows.json"), contents);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const services = await createAppServices({ dataDirectory });
+    try {
+      const generated = await runTextGeneration(services, dataDirectory);
+      expect(generated.metadata).toMatchObject({
+        workflowVersion: "text-ref2va.json",
+      });
+      expect(warning).toHaveBeenCalled();
+    } finally {
+      services.close();
+      warning.mockRestore();
+    }
+  });
+
+  test("rejects the whole persisted mapping when any entry is invalid", async () => {
+    const dataDirectory = await useDataDirectory();
+    const profilesDirectory = join(dataDirectory, "workflow-profiles");
+    await mkdir(profilesDirectory, { recursive: true });
+    await writeFile(join(profilesDirectory, "balanced-16gb-text.json"), "{}");
+    await writeFile(
+      join(profilesDirectory, "active-workflows.json"),
+      JSON.stringify({ text: "balanced-16gb-text.json", audio: "../outside.json" }),
+    );
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const services = await createAppServices({ dataDirectory });
+    try {
+      const generated = await runTextGeneration(services, dataDirectory);
+      expect(generated.metadata).toMatchObject({
+        workflowVersion: "text-ref2va.json",
+      });
+    } finally {
+      services.close();
+      warning.mockRestore();
+    }
+  });
+
+  test("new generation uses the confirmed active copy without contacting ComfyUI", async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, "models");
+    await mkdir(modelDirectory, { recursive: true });
+    await writeFile(
+      join(modelDirectory, "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors"),
+      "int8",
+    );
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+    const applied = await services.hardware.apply({
+      mode: "text",
+      profile: {
+        preset: "conservative",
+        modelPolicy: "int8",
+        megapixels: 0.4,
+        lowvram: true,
+        tiling: 4,
+        requiresConfirmation: true,
+      },
+      confirmed: true,
+      modelDirectory,
+    });
+
+    const generated = await runTextGeneration(services, dataDirectory);
+
+    expect(generated.metadata).toMatchObject({ workflowVersion: applied.path });
+    expect(generated.submitted).toMatchObject({
       "115": { inputs: { megapixels: 0.4 } },
+    });
+  });
+
+  test("keeps active generation workflows isolated between app service instances", async () => {
+    const firstDirectory = await useDataDirectory();
+    const secondDirectory = await useDataDirectory();
+    for (const directory of [firstDirectory, secondDirectory]) {
+      const modelDirectory = join(directory, "models");
+      await mkdir(modelDirectory, { recursive: true });
+      await writeFile(
+        join(modelDirectory, "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors"),
+        "int8",
+      );
+    }
+    const first = await createAppServices({ dataDirectory: firstDirectory });
+    const second = await createAppServices({ dataDirectory: secondDirectory });
+    cleanups.push(() => first.close(), () => second.close());
+    const firstApplied = await first.hardware.apply({
+      mode: "text",
+      profile: {
+        preset: "conservative",
+        modelPolicy: "int8",
+        megapixels: 0.4,
+        lowvram: true,
+        tiling: 4,
+        requiresConfirmation: true,
+      },
+      confirmed: true,
+      modelDirectory: join(firstDirectory, "models"),
+    });
+    const secondApplied = await second.hardware.apply({
+      mode: "text",
+      profile: {
+        preset: "balanced-16gb",
+        modelPolicy: "int8",
+        megapixels: 0.7,
+        lowvram: true,
+        tiling: "auto",
+        requiresConfirmation: true,
+      },
+      confirmed: true,
+      modelDirectory: join(secondDirectory, "models"),
+    });
+
+    const firstGenerated = await runTextGeneration(first, firstDirectory);
+    const secondGenerated = await runTextGeneration(second, secondDirectory);
+
+    expect(firstGenerated.metadata).toMatchObject({ workflowVersion: firstApplied.path });
+    expect(secondGenerated.metadata).toMatchObject({ workflowVersion: secondApplied.path });
+    expect(firstGenerated.submitted).toMatchObject({
+      "115": { inputs: { megapixels: 0.4 } },
+    });
+    expect(secondGenerated.submitted).toMatchObject({
+      "115": { inputs: { megapixels: 0.7 } },
     });
   });
 

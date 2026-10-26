@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
 import { SettingsPage } from '../../src/renderer/SettingsPage';
 import type { SmoApi } from '../../src/shared/ipc';
-import type { Avatar, HardwareInfo } from '../../src/shared/types';
+import type { Avatar, HardwareInfo, HardwareProfile } from '../../src/shared/types';
 
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react')>();
@@ -32,6 +32,56 @@ async function flushPromises(): Promise<void> {
   });
 }
 
+const hardwareInfo: HardwareInfo = {
+  gpu: "Test GPU",
+  vramGiB: 16,
+  ramGiB: 64,
+  driverVersion: "driver",
+  cudaComputeCapability: "12.0",
+  windowsVersion: "Windows 11",
+  freeDiskGiB: 512,
+};
+
+const hardwareProfile: HardwareProfile = {
+  preset: "balanced-16gb",
+  modelPolicy: "int8",
+  megapixels: 0.7,
+  lowvram: true,
+  tiling: "auto",
+  requiresConfirmation: true,
+};
+
+function useHardwareApi(overrides: Partial<SmoApi["hardware"]> = {}): void {
+  window.smo = {
+    comfy: { health: async () => ({ system: {}, devices: [] }) },
+    llm: { getProfile: async () => null },
+    hardware: {
+      detect: async () => hardwareInfo,
+      recommend: async () => hardwareProfile,
+      apply: async () => ({
+        path: "G:\\SMO-H3-Data\\workflow-profiles\\balanced-16gb-text.json",
+        profile: hardwareProfile,
+      }),
+      reset: async () => "G:\\resources\\workflows\\text-ref2va.json",
+      ...overrides,
+    },
+  } as unknown as SmoApi;
+}
+
+async function renderDetectedHardware() {
+  const view = render(<SettingsPage />);
+  fireEvent.click(await screen.findByRole("button", { name: "检测硬件" }));
+  await screen.findByText(hardwareInfo.gpu);
+  return view;
+}
+
+async function renderRecommendedHardware() {
+  const view = await renderDetectedHardware();
+  fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
+  await screen.findByText(hardwareProfile.preset);
+  return view;
+}
+
 beforeEach(() => {
   stateUpdates.mockClear();
   observedSetters = new WeakMap();
@@ -53,6 +103,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe('async effects on unmounted components', () => {
@@ -116,6 +167,50 @@ describe('async effects on unmounted components', () => {
       windowsVersion: "Windows 11",
       freeDiskGiB: 512,
     });
+    await flushPromises();
+
+    expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
+  });
+
+  test("SettingsPage does not update state when recommend settles after unmount", async () => {
+    const request = deferred<HardwareProfile>();
+    useHardwareApi({ recommend: () => request.promise });
+    const view = await renderDetectedHardware();
+    fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
+
+    view.unmount();
+    const updateCount = stateUpdates.mock.calls.length;
+    request.resolve(hardwareProfile);
+    await flushPromises();
+
+    expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
+  });
+
+  test("SettingsPage does not update state when apply settles after unmount", async () => {
+    const request = deferred<{ path: string; profile: HardwareProfile }>();
+    useHardwareApi({ apply: () => request.promise });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const view = await renderRecommendedHardware();
+    fireEvent.click(screen.getByRole("button", { name: "应用推荐" }));
+
+    view.unmount();
+    const updateCount = stateUpdates.mock.calls.length;
+    request.resolve({ path: "G:\\late\\workflow.json", profile: hardwareProfile });
+    await flushPromises();
+
+    expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
+  });
+
+  test("SettingsPage does not update state when reset settles after unmount", async () => {
+    const request = deferred<string>();
+    useHardwareApi({ reset: () => request.promise });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const view = render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "恢复默认" }));
+
+    view.unmount();
+    const updateCount = stateUpdates.mock.calls.length;
+    request.resolve("G:\\resources\\workflows\\text-ref2va.json");
     await flushPromises();
 
     expect(stateUpdates).toHaveBeenCalledTimes(updateCount);

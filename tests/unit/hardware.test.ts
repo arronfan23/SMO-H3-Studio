@@ -316,14 +316,15 @@ describe('selectUnetModel', () => {
 });
 
 describe('detectHardware', () => {
-  test('parses GPU, Windows, memory, driver, CUDA, and current-drive disk data', async () => {
+  test('parses GPU, Windows, memory, driver, CUDA, and target-drive disk data', async () => {
     const calls: CommandRequest[] = [];
     const runner = async (request: CommandRequest): Promise<string> => {
       calls.push(request);
       return request.command === 'nvidia-smi' ? GPU_OUTPUT : SYSTEM_OUTPUT;
     };
 
-    const info = await hardware.detectHardware(runner);
+    const targetDirectory = "G:\\output $notACommand";
+    const info = await hardware.detectHardware(runner, targetDirectory);
 
     expect(info).toEqual({
       windowsVersion: 'Microsoft Windows 11 Pro 10.0.22631',
@@ -349,10 +350,13 @@ describe('detectHardware', () => {
       '-NonInteractive',
       '-Command',
     ]);
-    expect(calls[1].args).toHaveLength(4);
+    expect(calls[1].args).toHaveLength(5);
+    expect(calls[1].args[4]).toBe(JSON.stringify(targetDirectory));
+    expect(calls[1].args[3]).not.toContain(targetDirectory);
+    expect(calls[1].args[3]).toContain("ConvertFrom-Json");
     expect(calls[1].args[3]).toContain('Get-CimInstance Win32_OperatingSystem');
     expect(calls[1].args[3]).toContain('Get-CimInstance Win32_ComputerSystem');
-    expect(calls[1].args[3]).toContain('$driveName = (Get-Location).Drive.Name');
+    expect(calls[1].args[3]).toContain('$targetDirectory = $TargetDirectoryJson | ConvertFrom-Json;');
     expect(calls[1].args[3]).toContain('Get-PSDrive -Name $driveName');
     expect(calls[1].args[3]).toContain('ConvertTo-Json -Compress');
     expect(calls[1].timeoutMs).toBe(5000);

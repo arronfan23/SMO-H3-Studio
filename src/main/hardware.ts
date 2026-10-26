@@ -12,21 +12,28 @@ const INT8_UNET = 'minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors';
 const BF16_UNET = 'minimax_h3_fl2va_bf16.safetensors';
 const DETECTION_TIMEOUT_MS = 5000;
 const BYTES_PER_GIB = 1024 ** 3;
+const BALANCED_PROFILE_MIN_VRAM_GIB = 12;
+const HIGH_MEMORY_CANDIDATE_MIN_VRAM_GIB = 20;
+const PROFILE_MIN_RAM_GIB = 32;
 const NVIDIA_SMI_ARGS = [
   '--query-gpu=name,memory.total,driver_version,compute_cap',
   '--format=csv,noheader',
 ] as const;
 const POWERSHELL_HARDWARE_SCRIPT = [
-  '$os = Get-CimInstance Win32_OperatingSystem;',
-  '$computer = Get-CimInstance Win32_ComputerSystem;',
-  '$driveName = (Get-Location).Drive.Name;',
-  '$drive = Get-PSDrive -Name $driveName;',
-  '[pscustomobject]@{',
-  'WindowsVersion = "$($os.Caption) $($os.Version)";',
-  'TotalMemoryBytes = [uint64]$computer.TotalPhysicalMemory;',
-  'FreeDiskBytes = [uint64]$drive.Free',
-  '} | ConvertTo-Json -Compress',
-].join(' ');
+  "& {",
+  "param([string]$TargetDirectoryJson)",
+  "$os = Get-CimInstance Win32_OperatingSystem;",
+  "$computer = Get-CimInstance Win32_ComputerSystem;",
+  "$targetDirectory = $TargetDirectoryJson | ConvertFrom-Json;",
+  "$driveName = (Split-Path -Path $targetDirectory -Qualifier).TrimEnd(\":\");",
+  "$drive = Get-PSDrive -Name $driveName;",
+  "[pscustomobject]@{",
+  "WindowsVersion = \"$($os.Caption) $($os.Version)\";",
+  "TotalMemoryBytes = [uint64]$computer.TotalPhysicalMemory;",
+  "FreeDiskBytes = [uint64]$drive.Free;",
+  "} | ConvertTo-Json -Compress",
+  "}",
+].join(" ");
 
 type ComfyNode = {
   class_type: string;
@@ -44,7 +51,10 @@ export type HardwareRunner = (request: HardwareCommandRequest) => Promise<string
 export function recommendHardware(
   input: HardwareRecommendationInput,
 ): HardwareProfile {
-  if (input.vramGiB < 12 || input.ramGiB < 32) {
+  if (
+    input.vramGiB < BALANCED_PROFILE_MIN_VRAM_GIB ||
+    input.ramGiB < PROFILE_MIN_RAM_GIB
+  ) {
     return {
       preset: 'conservative',
       modelPolicy: 'int8',
@@ -55,7 +65,7 @@ export function recommendHardware(
     };
   }
 
-  if (input.vramGiB < 20) {
+  if (input.vramGiB < HIGH_MEMORY_CANDIDATE_MIN_VRAM_GIB) {
     return {
       preset: 'balanced-16gb',
       modelPolicy: 'int8',
@@ -296,6 +306,7 @@ function parseWindowsHardwareOutput(stdout: string) {
 
 export async function detectHardware(
   runner: HardwareRunner = executeProcess,
+  targetDirectory: string = process.cwd(),
 ): Promise<HardwareInfo> {
   const gpuOutput = await runDetectionCommand(
     'GPU detection',
@@ -307,7 +318,13 @@ export async function detectHardware(
   const windowsOutput = await runDetectionCommand(
     'Windows hardware detection',
     'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_HARDWARE_SCRIPT],
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      POWERSHELL_HARDWARE_SCRIPT,
+      JSON.stringify(targetDirectory),
+    ],
     runner,
   );
 

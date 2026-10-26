@@ -7,6 +7,13 @@ import {
   createFfprobeDurationReader,
   type AudioDurationReader,
 } from './audio-duration';
+import type { JobCoordinator } from './jobs';
+import type { MediaRegistry } from './media';
+import type { Store } from './store';
+import { patchWorkflow } from '../shared/workflow';
+import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
+import type { GenerationRequest, GenerationStartResult } from '../shared/types';
+
 export interface GenerationExecutionOptions {
   workflowPath?: string;
 }
@@ -15,12 +22,6 @@ export type GenerationHandler = (
   request: GenerationRequest,
   options?: GenerationExecutionOptions,
 ) => GenerationStartResult | Promise<GenerationStartResult>;
-import type { JobCoordinator } from './jobs';
-import type { MediaRegistry } from './media';
-import type { Store } from './store';
-import { patchWorkflow } from '../shared/workflow';
-import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
-import type { GenerationRequest, GenerationStartResult } from '../shared/types';
 
 const WORKFLOW_FILENAMES = {
   text: 'text-ref2va.json',
@@ -45,6 +46,25 @@ export interface GenerationHandlerOptions {
   durationReader?: AudioDurationReader;
   removeFile?: typeof rm;
   cleanupErrorReporter?: (error: unknown) => void;
+}
+
+function resolveWorkflowPath(
+  workflowsDirectory: string,
+  requestedWorkflowPath: string,
+): string {
+  if (isAbsolute(requestedWorkflowPath)) return requestedWorkflowPath;
+  const root = resolve(workflowsDirectory);
+  const workflowPath = resolve(root, requestedWorkflowPath);
+  const relativePath = relative(root, workflowPath);
+  if (
+    relativePath.length === 0 ||
+    relativePath === ".." ||
+    relativePath.startsWith(".." + sep) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error("Workflow path escapes workflowsDirectory");
+  }
+  return workflowPath;
 }
 
 function errorMessage(error: unknown): string {
@@ -271,9 +291,10 @@ export function createGenerationHandler(
       executionOptions.workflowPath ??
       options.workflowResolver?.(request.mode) ??
       defaultWorkflowPath;
-    const workflowPath = isAbsolute(requestedWorkflowPath)
-      ? requestedWorkflowPath
-      : join(workflowsDirectory, requestedWorkflowPath);
+    const workflowPath = resolveWorkflowPath(
+      workflowsDirectory,
+      requestedWorkflowPath,
+    );
     const workflowVersion =
       executionOptions.workflowPath !== undefined
         ? executionOptions.workflowPath

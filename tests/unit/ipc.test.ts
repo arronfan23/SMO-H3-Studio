@@ -9,7 +9,7 @@ import { ComfyClient } from '../../src/main/comfy';
 import { AvatarService } from '../../src/main/avatars';
 import { FileService } from '../../src/main/files';
 import { recommendHardware } from "../../src/main/hardware";
-import { applyHardwareWorkflow, resetHardwareWorkflowWithPersistence } from '../../src/main/hardware-workflows';
+import { HardwareWorkflowStore } from '../../src/main/hardware-workflows';
 import {
   registerIpc,
   type IpcHandler,
@@ -145,6 +145,9 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     avatarsDirectory: join(directory, 'avatars'),
     outputDirectory: join(directory, 'output'),
   });
+  const hardwareWorkflows = new HardwareWorkflowStore({
+    profilesDirectory: join(directory, 'workflow-profiles'),
+  });
   const services: IpcServices = {
     startGeneration: async () => ({ id: 'injected-job' }),
     retryWork: async () => ({ id: 'injected-retry' }),
@@ -176,15 +179,9 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     openComfy: async () => undefined,
     hardware: {
       detect: async () => hardwareInfo,
-      recommend: recommendHardware,
-      apply: (request) =>
-        applyHardwareWorkflow(request, {
-          profilesDirectory: join(directory, 'workflow-profiles'),
-        }),
-      reset: (mode) =>
-        resetHardwareWorkflowWithPersistence(mode, {
-          profilesDirectory: join(directory, 'workflow-profiles'),
-        }),
+      recommend: async (input) => recommendHardware(input),
+      apply: (request) => hardwareWorkflows.apply(request),
+      reset: (mode) => hardwareWorkflows.reset(mode),
     },
     ...overrides,
   };

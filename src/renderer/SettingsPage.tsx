@@ -230,6 +230,10 @@ export function SettingsPage() {
   const resetHardware = async (): Promise<void> => {
     if (!mountedRef.current || hardwareAction !== null) return;
     const mode = hardwareMode;
+    const confirmed = window.confirm(
+      "确认恢复 " + mode + " 模式的冻结默认工作流？当前激活配置将被清除。",
+    );
+    if (!confirmed || !mountedRef.current) return;
     setHardwareAction("reset");
     setHardwareError(null);
     setHardwareResult(null);
@@ -315,6 +319,23 @@ export function SettingsPage() {
                 <dt>空闲磁盘</dt><dd>{formatGiB(hardwareInfo.freeDiskGiB)}</dd>
               </dl>
             )}
+            <div className="field">
+              <label htmlFor="hardware-mode">应用模式</label>
+              <select
+                id="hardware-mode"
+                value={hardwareMode}
+                disabled={hardwareAction !== null}
+                onChange={(event) => {
+                  setHardwareMode(event.target.value as VideoMode);
+                  setRecommendation(null);
+                  setHardwareResult(null);
+                  setHardwareError(null);
+                }}
+              >
+                <option value="text">文本生视频</option>
+                <option value="audio">音频数字人</option>
+              </select>
+            </div>
             {recommendation && (
               <div>
                 <dl className="status-details">
@@ -328,22 +349,6 @@ export function SettingsPage() {
                 {recommendation.preset === "high-memory-candidate" && (
                   <p className="form-notice">高显存候选配置，尚未实测。</p>
                 )}
-                <div className="field">
-                  <label htmlFor="hardware-mode">应用模式</label>
-                  <select
-                    id="hardware-mode"
-                    value={hardwareMode}
-                    disabled={hardwareAction !== null}
-                    onChange={(event) => {
-                      setHardwareMode(event.target.value as VideoMode);
-                      setHardwareResult(null);
-                      setHardwareError(null);
-                    }}
-                  >
-                    <option value="text">文本生视频</option>
-                    <option value="audio">音频数字人</option>
-                  </select>
-                </div>
                 <div className="field">
                   <label htmlFor="hardware-model-directory">模型目录</label>
                   <input

@@ -46,7 +46,7 @@ export interface IpcServices {
   openComfy: () => Promise<void>;
   hardware: {
     detect: () => Promise<HardwareInfo>;
-    recommend: (input: HardwareRecommendationInput) => HardwareProfile;
+    recommend: (input: HardwareRecommendationInput) => Promise<HardwareProfile>;
     reset: (mode: VideoMode) => Promise<string>;
     apply: (request: HardwareApplyRequest) => Promise<HardwareWorkflowResult>;
   };

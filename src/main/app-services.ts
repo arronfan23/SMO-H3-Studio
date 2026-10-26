@@ -9,12 +9,7 @@ import { ComfyClient } from './comfy';
 import { FileService, type FileDialog } from './files';
 import { createGenerationHandler, createRetryHandler } from './generation';
 import { detectHardware, recommendHardware } from './hardware';
-import {
-  applyHardwareWorkflow,
-  getActiveWorkflow,
-  loadActiveWorkflows,
-  resetHardwareWorkflowWithPersistence,
-} from "./hardware-workflows";
+import { HardwareWorkflowStore } from "./hardware-workflows";
 import { defaultWorkflowsDirectory } from './paths';
 import { JobCoordinator, type JobEventErrorHandler } from './jobs';
 import { LlmService } from './llm';
@@ -72,7 +67,8 @@ export async function createAppServices(
   const outputDirectory = options.outputDirectory ?? DEFAULT_OUTPUT_DIRECTORY;
   await mkdir(dataDirectory, { recursive: true });
   const profilesDirectory = join(dataDirectory, "workflow-profiles");
-  await loadActiveWorkflows({ profilesDirectory });
+  const hardwareWorkflows = new HardwareWorkflowStore({ profilesDirectory });
+  await hardwareWorkflows.load();
 
   const mediaRegistry = new MediaRegistry({
     avatarsDirectory: join(dataDirectory, 'avatars'),
@@ -113,7 +109,7 @@ export async function createAppServices(
       comfy,
       jobCoordinator,
       workflowsDirectory: defaultWorkflowsDirectory(),
-      workflowResolver: getActiveWorkflow,
+      workflowResolver: hardwareWorkflows.getActiveWorkflow,
       outputDirectory,
       mediaRegistry,
       uploadsDirectory: join(dataDirectory, 'uploads'),
@@ -141,12 +137,12 @@ export async function createAppServices(
     comfy,
     openComfy,
     hardware: {
-      detect: detectHardware,
-      recommend: recommendHardware,
+      detect: () => detectHardware(undefined, outputDirectory),
+      recommend: async (input) => recommendHardware(input),
       apply: (request) =>
-        applyHardwareWorkflow(request, { profilesDirectory }),
+        hardwareWorkflows.apply(request),
       reset: (mode) =>
-        resetHardwareWorkflowWithPersistence(mode, { profilesDirectory }),
+        hardwareWorkflows.reset(mode),
     },
     close: () => store.close(),
   };
