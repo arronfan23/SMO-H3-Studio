@@ -20,7 +20,7 @@ export async function bootstrapApplication(
     await createMainWindow();
     return services;
   } catch (error) {
-    services.close();
+    await services.close();
     throw error;
   }
 }

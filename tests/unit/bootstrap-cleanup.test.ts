@@ -12,7 +12,7 @@ vi.mock('../../src/main/app-services', () => ({ createAppServices: vi.fn() }));
 vi.mock('../../src/main/ipc', () => ({ registerIpc: vi.fn() }));
 
 function useServices() {
-  const close = vi.fn();
+  const close = vi.fn().mockResolvedValue(undefined);
   const services = { close } as unknown as AppServices;
   vi.mocked(createAppServices).mockResolvedValue(services);
   return { close, services };

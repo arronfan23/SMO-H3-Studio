@@ -299,6 +299,9 @@ export class ComfyClient {
   private readonly requestTimeoutMs: number;
   private readonly completionTimeoutMs: number;
   private readonly clientId: string;
+  private readonly abortController: AbortController;
+  private activeSocket?: WebSocket;
+  private closed = false;
 
   constructor(baseUrl = DEFAULT_BASE_URL, options: ComfyClientOptions = {}) {
     this.baseUrl = parseBaseUrl(baseUrl);
@@ -315,6 +318,7 @@ export class ComfyClient {
       throw new Error('ComfyUI clientId must be non-empty');
     }
     this.clientId = clientId;
+    this.abortController = new AbortController();
   }
 
   async health(): Promise<ComfySystemStats> {
@@ -407,16 +411,43 @@ export class ComfyClient {
     await this.request('interrupt', { method: 'POST' });
   }
 
+  close(): Promise<void> {
+    if (this.closed) {
+      return Promise.resolve();
+    }
+    this.closed = true;
+    this.abortController.abort();
+    if (this.activeSocket !== undefined) {
+      const socket = this.activeSocket;
+      this.activeSocket = undefined;
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      } else if (socket.readyState === WebSocket.CONNECTING) {
+        socket.terminate();
+      }
+    }
+    return Promise.resolve();
+  }
+
   waitForCompletion(
     promptId: string,
     onProgress?: (progress: ComfyProgress) => void,
   ): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error('ComfyClient is closed'));
+    }
     return new Promise((resolve, reject) => {
       const endpoint = new URL(`ws?clientId=${encodeURIComponent(this.clientId)}`, this.baseUrl);
       endpoint.protocol = this.baseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
       const socket = new WebSocket(endpoint);
+      this.activeSocket = socket;
       let settled = false;
       let timeout: NodeJS.Timeout | undefined;
+
+      const onAbort = () => {
+        queueMicrotask(() => finish(new Error('ComfyClient is closed')));
+      };
+      this.abortController.signal.addEventListener('abort', onAbort, { once: true });
 
       const finish = (error?: Error) => {
         if (settled) {
@@ -431,6 +462,10 @@ export class ComfyClient {
         } else if (socket.readyState === WebSocket.CONNECTING) {
           socket.terminate();
         }
+        if (this.activeSocket === socket) {
+          this.activeSocket = undefined;
+        }
+        this.abortController.signal.removeEventListener('abort', onAbort);
         if (error === undefined) {
           resolve();
         } else {
@@ -560,6 +595,9 @@ export class ComfyClient {
   }
 
   private async requestJson(path: string, init: RequestInit = {}): Promise<unknown> {
+    if (this.closed) {
+      throw new Error('ComfyClient is closed');
+    }
     const body = await this.request(path, init);
     try {
       return JSON.parse(body) as unknown;
@@ -569,22 +607,50 @@ export class ComfyClient {
   }
 
   private async request(path: string, init: RequestInit): Promise<string> {
+    if (this.closed) {
+      throw new Error('ComfyClient is closed');
+    }
     const controller = new AbortController();
+    const signals = [this.abortController.signal, controller.signal];
+    const signal = AbortSignal.any(signals);
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
 
+    let onAbort: (() => void) | undefined;
+    const closeAbortPromise = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        queueMicrotask(() => reject(new Error('ComfyClient is closed')));
+      };
+      if (this.abortController.signal.aborted) {
+        onAbort();
+      } else {
+        this.abortController.signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+
     try {
-      const response = await fetch(this.endpoint(path), {
-        ...init,
-        headers: { Accept: 'application/json', ...init.headers },
-        signal: controller.signal,
-      }).catch(() => {
+      const response = await Promise.race([
+        fetch(this.endpoint(path), {
+          ...init,
+          headers: { Accept: 'application/json', ...init.headers },
+          signal,
+        }),
+        closeAbortPromise,
+      ]).catch((error) => {
+        this.abortController.signal.removeEventListener('abort', onAbort!);
+        if (error instanceof Error && error.message === 'ComfyClient is closed') {
+          throw error;
+        }
         if (controller.signal.aborted) {
           throw new Error(`ComfyUI request timed out after ${this.requestTimeoutMs} ms`);
         }
         throw new Error('Could not connect to ComfyUI');
       });
+      this.abortController.signal.removeEventListener('abort', onAbort!);
 
-      const body = await response.text().catch(() => {
+      const body = await response.text().catch((error) => {
+        if (this.closed) {
+          throw new Error('ComfyClient is closed');
+        }
         if (controller.signal.aborted) {
           throw new Error(`ComfyUI request timed out after ${this.requestTimeoutMs} ms`);
         }

@@ -6,4 +6,9 @@ export default defineConfig({
   timeout: 120000,
   reporter: 'list',
   retries: 0,
+  fullyParallel: false,
+  use: {
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+  },
 });

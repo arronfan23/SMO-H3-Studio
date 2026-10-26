@@ -305,7 +305,7 @@ describe('production application services', () => {
         ),
       ).toEqual({ text: "conservative-text.json" });
     } finally {
-      first.close();
+      await first.close();
     }
 
     const second = await createAppServices({ dataDirectory });
@@ -319,7 +319,7 @@ describe('production application services', () => {
         ),
       ).toEqual({});
     } finally {
-      second.close();
+      await second.close();
     }
 
     const reopened = await createAppServices({ dataDirectory });
@@ -354,7 +354,7 @@ describe('production application services', () => {
       });
       expect(warning).toHaveBeenCalled();
     } finally {
-      services.close();
+      await services.close();
       warning.mockRestore();
     }
   });
@@ -376,7 +376,7 @@ describe('production application services', () => {
         workflowVersion: "text-ref2va.json",
       });
     } finally {
-      services.close();
+      await services.close();
       warning.mockRestore();
     }
   });

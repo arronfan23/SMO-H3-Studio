@@ -34,7 +34,7 @@ export interface AppServices extends IpcServices {
   skills: SkillsService;
   comfy: ComfyClient;
   jobCoordinator: JobCoordinator;
-  close(): void;
+  close(): Promise<void>;
 }
 
 export interface AppServicesOptions {
@@ -47,6 +47,14 @@ export interface AppServicesOptions {
   mediaProtocol?: MediaProtocolRegistrar;
 }
 
+function resolveStringOption(
+  option: string | undefined,
+  env: string | undefined,
+  defaultValue: string,
+): string {
+  const candidate = option ?? env;
+  return candidate === undefined || candidate.trim().length === 0 ? defaultValue : candidate;
+}
 
 function jobErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -65,92 +73,117 @@ const defaultErrorReporter: JobEventErrorHandler = (error, event) => {
 export async function createAppServices(
   options: AppServicesOptions = {},
 ): Promise<AppServices> {
-  const dataDirectory =
-    options.dataDirectory ?? process.env.SMO_DATA_DIRECTORY ?? DEFAULT_DATA_DIRECTORY;
-  const outputDirectory =
-    options.outputDirectory ?? process.env.SMO_OUTPUT_DIRECTORY ?? DEFAULT_OUTPUT_DIRECTORY;
-  const comfyBaseUrl =
-    options.comfyBaseUrl ?? process.env.SMO_COMFYUI_BASE_URL ?? DEFAULT_COMFYUI_BASE_URL;
+  const dataDirectory = resolveStringOption(
+    options.dataDirectory,
+    process.env.SMO_DATA_DIRECTORY,
+    DEFAULT_DATA_DIRECTORY,
+  );
+  const outputDirectory = resolveStringOption(
+    options.outputDirectory,
+    process.env.SMO_OUTPUT_DIRECTORY,
+    DEFAULT_OUTPUT_DIRECTORY,
+  );
+  const comfyBaseUrl = resolveStringOption(
+    options.comfyBaseUrl,
+    process.env.SMO_COMFYUI_BASE_URL,
+    DEFAULT_COMFYUI_BASE_URL,
+  );
 
   await mkdir(dataDirectory, { recursive: true });
   const profilesDirectory = join(dataDirectory, "workflow-profiles");
   const hardwareWorkflows = new HardwareWorkflowStore({ profilesDirectory });
-  await hardwareWorkflows.load();
 
-  const mediaRegistry = new MediaRegistry({
-    avatarsDirectory: join(dataDirectory, 'avatars'),
-    outputDirectory,
-  });
-  registerMediaProtocol(mediaRegistry, options.mediaProtocol ?? protocol);
+  let store: Store | undefined;
+  try {
+    await hardwareWorkflows.load();
 
-  const store = new Store(join(dataDirectory, 'studio.sqlite'));
-  const avatars = new AvatarService({
-    avatarsDirectory: join(dataDirectory, 'avatars'),
-    store,
-    mediaRegistry,
-  });
-  const files = new FileService({
-    mediaRegistry,
-    dialog: options.fileDialog ?? dialog,
-    outputDirectory,
-    dataDirectory,
-  });
-  const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
-  const llm = new LlmService();
-  const comfy = new ComfyClient(comfyBaseUrl);
-  const jobCoordinator = new JobCoordinator({
-    onEvent: (event) => {
-      store.updateWork(event.id, {
-        status: event.status,
-        ...(event.status === 'failed'
-          ? { error: jobErrorMessage(event.error) }
-          : {}),
+    const mediaRegistry = new MediaRegistry({
+      avatarsDirectory: join(dataDirectory, 'avatars'),
+      outputDirectory,
+    });
+    registerMediaProtocol(mediaRegistry, options.mediaProtocol ?? protocol);
+
+    store = new Store(join(dataDirectory, 'studio.sqlite'));
+    const avatars = new AvatarService({
+      avatarsDirectory: join(dataDirectory, 'avatars'),
+      store,
+      mediaRegistry,
+    });
+    const files = new FileService({
+      mediaRegistry,
+      dialog: options.fileDialog ?? dialog,
+      outputDirectory,
+      dataDirectory,
+    });
+    const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
+    const llm = new LlmService();
+    const comfy = new ComfyClient(comfyBaseUrl);
+    const jobCoordinator = new JobCoordinator({
+      onEvent: (event) => {
+        store!.updateWork(event.id, {
+          status: event.status,
+          ...(event.status === 'failed'
+            ? { error: jobErrorMessage(event.error) }
+            : {}),
+        });
+      },
+      onEventError: options.errorReporter ?? defaultErrorReporter,
+    });
+    const startGeneration =
+      options.generationHandler ??
+      createGenerationHandler({
+        store,
+        comfy,
+        jobCoordinator,
+        workflowsDirectory: defaultWorkflowsDirectory(),
+        workflowResolver: hardwareWorkflows.getActiveWorkflow,
+        outputDirectory,
+        mediaRegistry,
+        uploadsDirectory: join(dataDirectory, 'uploads'),
       });
-    },
-    onEventError: options.errorReporter ?? defaultErrorReporter,
-  });
-  const startGeneration =
-    options.generationHandler ??
-    createGenerationHandler({
+
+    const retryWork = createRetryHandler({
+      store,
+      mediaRegistry,
+      startGeneration,
+    });
+    const openComfy = async (): Promise<void> => {
+      await shell.openExternal(comfyBaseUrl);
+    };
+
+    let closed = false;
+    return {
+      startGeneration,
+      retryWork,
+      jobCoordinator,
+      llm,
+      skills: new SkillsService(llm),
+      llmConfig,
+      avatars,
+      files,
       store,
       comfy,
-      jobCoordinator,
-      workflowsDirectory: defaultWorkflowsDirectory(),
-      workflowResolver: hardwareWorkflows.getActiveWorkflow,
-      outputDirectory,
-      mediaRegistry,
-      uploadsDirectory: join(dataDirectory, 'uploads'),
-    });
-
-  const retryWork = createRetryHandler({
-    store,
-    mediaRegistry,
-    startGeneration,
-  });
-  const openComfy = async (): Promise<void> => {
-    await shell.openExternal(comfyBaseUrl);
-  };
-
-  return {
-    startGeneration,
-    retryWork,
-    jobCoordinator,
-    llm,
-    skills: new SkillsService(llm),
-    llmConfig,
-    avatars,
-    files,
-    store,
-    comfy,
-    openComfy,
-    hardware: {
-      detect: () => detectHardware(undefined, outputDirectory),
-      recommend: async (input) => recommendHardware(input),
-      apply: (request) =>
-        hardwareWorkflows.apply(request),
-      reset: (mode) =>
-        hardwareWorkflows.reset(mode),
-    },
-    close: () => store.close(),
-  };
+      openComfy,
+      hardware: {
+        detect: () => detectHardware(undefined, outputDirectory),
+        recommend: async (input) => recommendHardware(input),
+        apply: (request) =>
+          hardwareWorkflows.apply(request),
+        reset: (mode) =>
+          hardwareWorkflows.reset(mode),
+      },
+      close: async () => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        await jobCoordinator.close();
+        comfy.close();
+        store!.close();
+      },
+    };
+  } catch (error) {
+    store?.close();
+    throw error;
+  }
 }

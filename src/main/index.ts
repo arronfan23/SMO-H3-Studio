@@ -39,7 +39,15 @@ void app
   .whenReady()
   .then(async () => {
     const services = await bootstrapApplication({ createMainWindow });
-    app.on('before-quit', services.close);
+    let isQuitting = false;
+    app.on('before-quit', (event) => {
+      if (isQuitting) {
+        return;
+      }
+      event.preventDefault();
+      isQuitting = true;
+      void services.close().finally(() => app.quit());
+    });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

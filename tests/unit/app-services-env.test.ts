@@ -12,6 +12,7 @@ import {
   createAppServices,
   DEFAULT_DATA_DIRECTORY,
   DEFAULT_OUTPUT_DIRECTORY,
+  DEFAULT_COMFYUI_BASE_URL,
 } from '../../src/main/app-services';
 import { detectHardware } from '../../src/main/hardware';
 
@@ -73,29 +74,60 @@ afterEach(async () => {
   delete process.env.SMO_OUTPUT_DIRECTORY;
 });
 
-describe('createAppServices environment overrides', () => {
+describe('createAppServices defaults', () => {
   beforeEach(() => {
     protocolRegisterFileProtocol.mockClear();
     vi.mocked(detectHardware).mockClear();
   });
 
-  test('uses default directories and ComfyUI base URL', async () => {
+  test('exposes default data directory constant', () => {
+    expect(DEFAULT_DATA_DIRECTORY).toBe('G:\\SMO-H3-Data');
+  });
+
+  test('exposes default output directory constant', () => {
+    expect(DEFAULT_OUTPUT_DIRECTORY).toBe(
+      'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\output',
+    );
+  });
+
+  test('exposes default ComfyUI base URL constant', () => {
+    expect(DEFAULT_COMFYUI_BASE_URL).toBe('http://127.0.0.1:8188');
+  });
+
+  test('uses default ComfyUI base URL when no options or env are provided', async () => {
     const dataDirectory = await useDataDirectory();
     const upstream = await startHttpServer();
     cleanups.push(() => upstream.close());
 
-    const services = await createAppServices({ dataDirectory, comfyBaseUrl: upstream.baseUrl });
+    vi.stubGlobal('fetch', async (url: string | URL) => {
+      const requestUrl = String(url);
+      if (requestUrl.startsWith(DEFAULT_COMFYUI_BASE_URL)) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ system: { os: 'default' }, devices: [] }),
+        } as Response;
+      }
+      throw new Error(`Unexpected fetch to ${requestUrl}`);
+    });
+    cleanups.push(() => {
+      vi.unstubAllGlobals();
+    });
+
+    const services = await createAppServices({ dataDirectory });
     cleanups.push(() => services.close());
 
     await expect(services.comfy.health()).resolves.toMatchObject({
-      system: { os: 'test' },
+      system: { os: 'default' },
       devices: [],
     });
+  });
+});
 
-    expect(DEFAULT_DATA_DIRECTORY).toBe('G:\\SMO-H3-Data');
-    expect(DEFAULT_OUTPUT_DIRECTORY).toBe(
-      'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\output',
-    );
+describe('createAppServices environment overrides', () => {
+  beforeEach(() => {
+    protocolRegisterFileProtocol.mockClear();
+    vi.mocked(detectHardware).mockClear();
   });
 
   test('SMO_COMFYUI_BASE_URL overrides default ComfyUI base URL', async () => {
@@ -179,6 +211,86 @@ describe('createAppServices environment overrides', () => {
 
     await expect(services.comfy.health()).resolves.toMatchObject({
       system: { os: 'test' },
+      devices: [],
+    });
+  });
+});
+
+describe('createAppServices empty value fallback', () => {
+  beforeEach(() => {
+    protocolRegisterFileProtocol.mockClear();
+  });
+
+  test.each([
+    { name: 'empty string', value: '' },
+    { name: 'whitespace', value: '   ' },
+    { name: 'tab', value: '\t' },
+  ])('ignores $name dataDirectory option and falls back to default', async ({ value }) => {
+    const services = await createAppServices({ dataDirectory: value });
+    await services.close();
+
+    expect(existsSync(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'))).toBe(true);
+    await rm(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'), { force: true });
+    await rm(join(DEFAULT_DATA_DIRECTORY, 'workflow-profiles'), { recursive: true, force: true });
+  });
+
+  test.each([
+    { name: 'empty string', value: '' },
+    { name: 'whitespace', value: '   ' },
+  ])('ignores $name SMO_DATA_DIRECTORY env and falls back to default', async ({ value }) => {
+    process.env.SMO_DATA_DIRECTORY = value;
+
+    const services = await createAppServices({});
+    await services.close();
+
+    expect(existsSync(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'))).toBe(true);
+    await rm(join(DEFAULT_DATA_DIRECTORY, 'studio.sqlite'), { force: true });
+    await rm(join(DEFAULT_DATA_DIRECTORY, 'workflow-profiles'), { recursive: true, force: true });
+  });
+
+  test('ignores empty outputDirectory option and falls back to default', async () => {
+    const dataDirectory = await useDataDirectory();
+
+    const services = await createAppServices({ dataDirectory, outputDirectory: '' });
+    cleanups.push(() => services.close());
+
+    vi.mocked(detectHardware).mockResolvedValue({
+      gpu: 'Default Output',
+      vramGiB: 8,
+      ramGiB: 16,
+      windowsVersion: 'Windows 10',
+      driverVersion: 'driver',
+      cudaComputeCapability: '8.0',
+      freeDiskGiB: 64,
+    });
+    await services.hardware.detect();
+    expect(vi.mocked(detectHardware)).toHaveBeenCalledWith(undefined, DEFAULT_OUTPUT_DIRECTORY);
+  });
+
+  test('ignores empty SMO_COMFYUI_BASE_URL env and falls back to default', async () => {
+    const dataDirectory = await useDataDirectory();
+    process.env.SMO_COMFYUI_BASE_URL = '';
+
+    vi.stubGlobal('fetch', async (url: string | URL) => {
+      const requestUrl = String(url);
+      if (requestUrl.startsWith(DEFAULT_COMFYUI_BASE_URL)) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ system: { os: 'default' }, devices: [] }),
+        } as Response;
+      }
+      throw new Error(`Unexpected fetch to ${requestUrl}`);
+    });
+    cleanups.push(() => {
+      vi.unstubAllGlobals();
+    });
+
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+
+    await expect(services.comfy.health()).resolves.toMatchObject({
+      system: { os: 'default' },
       devices: [],
     });
   });

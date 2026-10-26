@@ -29,6 +29,9 @@ interface QueueItem {
   resolve: () => void;
   reject: (reason?: unknown) => void;
   cancelPromise?: Promise<void>;
+  cancelled?: boolean;
+  settled?: Promise<void>;
+  settle?: () => void;
 }
 
 export class JobCoordinator {
@@ -38,6 +41,7 @@ export class JobCoordinator {
   private readonly onEvent?: (event: JobEvent) => void;
   private readonly onEventError?: JobEventErrorHandler;
   private active: QueueItem | null = null;
+  private closed = false;
 
   constructor(options: JobCoordinatorOptions = {}) {
     this.onEvent = options.onEvent;
@@ -55,6 +59,9 @@ export class JobCoordinator {
   async enqueue(job: Job): Promise<void> {
     if (job.id.trim().length === 0) {
       throw new Error('Job id must not be empty');
+    }
+    if (this.closed) {
+      throw new Error('JobCoordinator is closed');
     }
     if (this.reservedIds.has(job.id)) {
       throw new Error(`Duplicate job id: ${job.id}`);
@@ -98,6 +105,47 @@ export class JobCoordinator {
     return Promise.resolve();
   }
 
+  async close(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+
+    if (this.active !== null) {
+      const item = this.active;
+      if (item.job.cancel !== undefined && item.cancelPromise === undefined) {
+        item.cancelPromise = (async () => {
+          await item.job.cancel!();
+        })();
+      }
+
+      if (item.cancelPromise !== undefined) {
+        item.cancelled = true;
+        try {
+          await item.cancelPromise;
+        } catch {
+          // The cancellation itself may fail; the job promise is still rejected as cancelled.
+        }
+        const error = new Error('Generation cancelled');
+        this.reservedIds.delete(item.job.id);
+        this.emit({ id: item.job.id, status: 'failed', error });
+        item.reject(error);
+        this.active = null;
+      } else if (item.settled !== undefined) {
+        await item.settled;
+      }
+    }
+
+    // Reject all queued jobs.
+    while (this.queue.length > 0) {
+      const item = this.queue.shift()!;
+      const error = new Error('JobCoordinator is closed');
+      this.reservedIds.delete(item.job.id);
+      this.emit({ id: item.job.id, status: 'failed', error });
+      item.reject(error);
+    }
+  }
+
   recover(records: readonly JobRecoveryRecord[]): void {
     for (const record of records) {
       if (this.reservedIds.has(record.id)) {
@@ -137,15 +185,23 @@ export class JobCoordinator {
     this.active = item;
     this.emit({ id: item.job.id, status: 'running' });
 
+    item.settled = new Promise<void>((resolve) => {
+      item.settle = resolve;
+    });
+
     try {
       await item.job.run();
-      this.completed.push(item.job.id);
-      this.emit({ id: item.job.id, status: 'done' });
-      item.resolve();
+      if (!item.cancelled) {
+        this.completed.push(item.job.id);
+        this.emit({ id: item.job.id, status: 'done' });
+        item.resolve();
+      }
     } catch (error) {
-      this.reservedIds.delete(item.job.id);
-      this.emit({ id: item.job.id, status: 'failed', error });
-      item.reject(error);
+      if (!item.cancelled) {
+        this.reservedIds.delete(item.job.id);
+        this.emit({ id: item.job.id, status: 'failed', error });
+        item.reject(error);
+      }
     } finally {
       if (item.cancelPromise !== undefined) {
         try {
@@ -155,7 +211,10 @@ export class JobCoordinator {
         }
       }
       this.active = null;
-      void this.pump();
+      item.settle?.();
+      if (!this.closed) {
+        void this.pump();
+      }
     }
   }
 }
