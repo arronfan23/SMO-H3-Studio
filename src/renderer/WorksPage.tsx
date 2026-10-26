@@ -3,7 +3,7 @@ import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw } from 'lucide-rea
 import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { useMediaUrl } from './useMediaUrl';
-import { errorMessage } from './ui';
+import { errorMessage, parentPath } from './ui';
 
 const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -99,7 +99,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
       return;
     }
     try {
-      await window.smo.files.openFolder(work.outputPath);
+      await window.smo.files.openFolder(parentPath(work.outputPath));
     } catch (openError) {
       setRetryError((current) => ({ ...current, [work.id]: errorMessage(openError) }));
     }

@@ -531,7 +531,11 @@ describe('works page actions', () => {
     await screen.findByText('已完成（done）');
     fireEvent.click(screen.getByRole('button', { name: '打开目录' }));
 
-    await waitFor(() => expect(smo.files.openFolder).toHaveBeenCalledWith(outputPath));
+    await waitFor(() =>
+      expect(smo.files.openFolder).toHaveBeenCalledWith(
+        'G:\\H3Selflift整合包\\ComfyUI\\output',
+      ),
+    );
   });
 
   test('opens ComfyUI from the works page', async () => {

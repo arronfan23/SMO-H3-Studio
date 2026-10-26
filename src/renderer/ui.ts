@@ -14,3 +14,8 @@ export function errorMessage(error: unknown): string {
 export function fileName(filePath: string): string {
   return filePath.split(/[\\/]/).pop() ?? filePath;
 }
+
+export function parentPath(filePath: string): string {
+  const name = fileName(filePath);
+  return name === filePath ? filePath : filePath.slice(0, -(name.length + 1));
+}
