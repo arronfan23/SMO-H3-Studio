@@ -60,6 +60,7 @@ class FakeComfyClient {
   completionGate?: Deferred<void>;
   uploadGate?: Deferred<void>;
   submitGate?: Deferred<ComfySubmitResult>;
+  historyGate?: Deferred<void>;
   cancellations = 0;
   outputs: ComfyOutputFile[] = [
     outputFile({ nodeId: 'preview', kind: 'images', filename: 'cover.png' }),
@@ -104,6 +105,9 @@ class FakeComfyClient {
     this.histories.push(promptId);
     if (this.historyError) {
       throw this.historyError;
+    }
+    if (this.historyGate) {
+      await this.historyGate.promise;
     }
     return this.outputs;
   }
@@ -627,6 +631,24 @@ describe('GenerationHandler failures and cancellation', () => {
       error: 'ComfyUI execution interrupted',
       outputPath: null,
     });
+  });
+
+  test('cancels during history without interrupting completed execution or writing done', async () => {
+    const harness = await createHarness();
+    const historyGate = deferred();
+    harness.comfy.historyGate = historyGate;
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await vi.waitFor(() => expect(harness.comfy.histories).toEqual(['prompt-1']));
+    await harness.jobCoordinator.cancelActive();
+    const cancellationsDuringHistory = harness.comfy.cancellations;
+    historyGate.resolve();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(cancellationsDuringHistory).toBe(0);
+    expect(harness.comfy.cancellations).toBe(0);
+    expect(work).toMatchObject({ status: 'failed', outputPath: null });
+    expect(work.error).toMatch(/cancel/i);
   });
 
   test.each([

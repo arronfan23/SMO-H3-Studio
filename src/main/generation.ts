@@ -167,7 +167,7 @@ export function createGenerationHandler(
 
     const execution = {
       cancelRequested: false,
-      promptSubmitted: false,
+      interruptible: false,
       cancelSent: false,
     };
     const throwIfCancelled = (): void => {
@@ -178,7 +178,7 @@ export function createGenerationHandler(
     const interruptIfRequested = async (): Promise<void> => {
       if (
         !execution.cancelRequested ||
-        !execution.promptSubmitted ||
+        !execution.interruptible ||
         execution.cancelSent
       ) {
         return;
@@ -228,11 +228,15 @@ export function createGenerationHandler(
         const workflow = patchWorkflow(frozen, changes);
         throwIfCancelled();
         const submitted = await comfy.submit(workflow);
-        execution.promptSubmitted = true;
+        execution.interruptible = true;
         store.updateWork(workId, { promptId: submitted.prompt_id });
         await interruptIfRequested();
         throwIfCancelled();
-        await comfy.waitForCompletion(submitted.prompt_id);
+        try {
+          await comfy.waitForCompletion(submitted.prompt_id);
+        } finally {
+          execution.interruptible = false;
+        }
         throwIfCancelled();
         const files = await comfy.history(submitted.prompt_id);
         throwIfCancelled();
@@ -256,6 +260,8 @@ export function createGenerationHandler(
           error: errorMessage(failure),
         });
         throw failure;
+      } finally {
+        execution.interruptible = false;
       }
     };
 
