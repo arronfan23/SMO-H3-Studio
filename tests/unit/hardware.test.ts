@@ -57,6 +57,12 @@ function makeModelDirectory(): string {
   return directory;
 }
 
+function makeInt8ModelDirectory(): string {
+  const directory = makeModelDirectory();
+  writeFileSync(join(directory, INT8_UNET), 'int8');
+  return directory;
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -146,6 +152,34 @@ describe('applyHardwareProfile', () => {
     expect(graph).toEqual(original);
   });
 
+  test('rejects a missing model directory without changing the source graph', () => {
+    const graph = makeGraph();
+    const original = structuredClone(graph);
+    const apply = () => {
+      // @ts-expect-error Verify the runtime guard for callers that bypass TypeScript.
+      hardware.applyHardwareProfile(graph, makeProfile(), true);
+    };
+
+    expect(apply).toThrow('Model directory is required');
+    expect(graph).toEqual(original);
+  });
+
+  test.each([
+    { scenario: 'an empty', modelDirectory: '' },
+    { scenario: 'a whitespace-only', modelDirectory: ' \t ' },
+  ])(
+    'rejects $scenario model directory without changing the source graph',
+    ({ modelDirectory }) => {
+      const graph = makeGraph();
+      const original = structuredClone(graph);
+      const apply = () =>
+        hardware.applyHardwareProfile(graph, makeProfile(), true, modelDirectory);
+
+      expect(apply).toThrow('Model directory is required');
+      expect(graph).toEqual(original);
+    },
+  );
+
   test('returns a structured clone with megapixels and automatic tiling', () => {
     const graph = makeGraph();
     const original = structuredClone(graph);
@@ -154,6 +188,7 @@ describe('applyHardwareProfile', () => {
       graph,
       makeProfile({ megapixels: 1, tiling: 'auto' }),
       true,
+      makeInt8ModelDirectory(),
     );
 
     expect(copy).not.toBe(graph);
@@ -164,6 +199,7 @@ describe('applyHardwareProfile', () => {
       highres_tiling: true,
       tiling_mode: 'auto',
     });
+    expect(copy.unet.inputs.unet_name).toBe(INT8_UNET);
     expect(graph).toEqual(original);
   });
 
@@ -175,6 +211,7 @@ describe('applyHardwareProfile', () => {
       graph,
       makeProfile({ megapixels: 0.4, tiling: 4 }),
       true,
+      makeInt8ModelDirectory(),
     );
 
     expect(copy.sampler.inputs).toMatchObject({
@@ -182,6 +219,7 @@ describe('applyHardwareProfile', () => {
       tiling_mode: 'manual',
       tiling_tiles: 4,
     });
+    expect(copy.unet.inputs.unet_name).toBe(INT8_UNET);
     expect(graph).toEqual(original);
   });
 
@@ -220,11 +258,17 @@ describe('applyHardwareProfile', () => {
   });
 
   test('never writes lowvram as a ComfyUI node field', () => {
-    const copy = hardware.applyHardwareProfile(makeGraph(), makeProfile(), true);
+    const copy = hardware.applyHardwareProfile(
+      makeGraph(),
+      makeProfile(),
+      true,
+      makeInt8ModelDirectory(),
+    );
 
     for (const node of Object.values(copy)) {
       expect(node.inputs).not.toHaveProperty('lowvram');
     }
+    expect(copy.unet.inputs.unet_name).toBe(INT8_UNET);
   });
 });
 

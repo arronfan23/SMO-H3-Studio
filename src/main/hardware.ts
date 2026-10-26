@@ -104,13 +104,14 @@ export function applyHardwareProfile<T extends Record<string, ComfyNode>>(
   graph: T,
   profile: HardwareProfile,
   confirmed: boolean,
-  modelDirectory?: string,
+  modelDirectory: string,
 ): T {
   if (!confirmed) throw new Error('Hardware profile requires confirmation');
+  if (typeof modelDirectory !== 'string' || modelDirectory.trim().length === 0) {
+    throw new Error('Model directory is required');
+  }
 
-  const unetName = modelDirectory
-    ? selectUnetModel(profile.modelPolicy, modelDirectory)
-    : undefined;
+  const unetName = selectUnetModel(profile.modelPolicy, modelDirectory);
   const copy = structuredClone(graph);
 
   for (const node of Object.values(copy)) {
