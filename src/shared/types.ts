@@ -38,3 +38,32 @@ export interface LlmProfile {
 export interface LlmCredentials extends LlmProfile {
   apiKey: string;
 }
+
+export type HardwarePreset =
+  | 'conservative'
+  | 'balanced-16gb'
+  | 'high-memory-candidate';
+
+export type HardwareModelPolicy = 'int8' | 'bf16-if-present';
+
+export interface HardwareRecommendationInput {
+  gpu: string;
+  vramGiB: number;
+  ramGiB: number;
+}
+
+export interface HardwareProfile {
+  preset: HardwarePreset;
+  modelPolicy: HardwareModelPolicy;
+  megapixels: number;
+  lowvram: boolean;
+  tiling: number | 'auto';
+  requiresConfirmation: boolean;
+}
+
+export interface HardwareInfo extends HardwareRecommendationInput {
+  windowsVersion: string;
+  driverVersion: string;
+  cudaComputeCapability: string;
+  freeDiskGiB: number;
+}
