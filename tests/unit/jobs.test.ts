@@ -168,6 +168,60 @@ describe('JobCoordinator execution', () => {
     expect(coordinator.activeCount).toBe(0);
   });
 
+  test('cancels only the requested queued job', async () => {
+    const events: JobEvent[] = [];
+    const coordinator = new JobCoordinator({ onEvent: (event) => events.push(event) });
+    const firstGate = deferred();
+    let firstCancellations = 0;
+    let secondJobRan = false;
+    const first = coordinator.enqueue({
+      id: 'first',
+      run: () => firstGate.promise,
+      cancel: () => {
+        firstCancellations += 1;
+      },
+    });
+    const second = coordinator.enqueue({
+      id: 'second',
+      run: async () => {
+        secondJobRan = true;
+      },
+    });
+    const secondRejection = expect(second).rejects.toThrow(/cancelled/i);
+
+    await coordinator.cancel('second');
+
+    await secondRejection;
+    expect(firstCancellations).toBe(0);
+    expect(secondJobRan).toBe(false);
+    expect(coordinator.activeCount).toBe(1);
+    expect(events.at(-1)).toMatchObject({ id: 'second', status: 'failed' });
+
+    firstGate.resolve();
+    await first;
+  });
+
+  test('cancels the requested active job without touching a different active id', async () => {
+    const coordinator = new JobCoordinator();
+    const runGate = deferred();
+    let cancellations = 0;
+    const completion = coordinator.enqueue({
+      id: 'active',
+      run: () => runGate.promise,
+      cancel: () => {
+        cancellations += 1;
+        runGate.resolve();
+      },
+    });
+
+    await coordinator.cancel('another-job');
+    expect(cancellations).toBe(0);
+    await coordinator.cancel('active');
+    await completion;
+
+    expect(cancellations).toBe(1);
+  });
+
   test('settles jobs and cleans up when the running event listener throws', async () => {
     const events: string[] = [];
     const coordinator = new JobCoordinator({

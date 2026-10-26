@@ -8,7 +8,12 @@ const api: SmoApi = {
   },
   jobs: {
     start: (request) => ipcRenderer.invoke('jobs:start', request),
-    cancel: () => ipcRenderer.invoke('jobs:cancel', {}),
+    cancel: (id) => ipcRenderer.invoke('jobs:cancel', id === undefined ? {} : { id }),
+  },
+  files: {
+    selectImage: () => ipcRenderer.invoke('files:selectImage', {}),
+    selectAudio: () => ipcRenderer.invoke('files:selectAudio', {}),
+    mediaUrl: (path) => ipcRenderer.invoke('files:mediaUrl', { path }),
   },
   llm: {
     saveProfile: (credentials) => ipcRenderer.invoke('llm:saveProfile', credentials),

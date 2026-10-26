@@ -8,9 +8,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   createAppServices,
   DEFAULT_DATA_DIRECTORY,
+  DEFAULT_INPUT_DIRECTORY,
 } from '../../src/main/app-services';
+import { AvatarService } from '../../src/main/avatars';
 import { bootstrapApplication } from '../../src/main/bootstrap';
 import { ComfyClient } from '../../src/main/comfy';
+import { FileService } from '../../src/main/files';
 import { applyHardwareProfile, detectHardware } from '../../src/main/hardware';
 import type { GenerationHandler } from '../../src/main/ipc';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
@@ -20,12 +23,15 @@ import { SkillsService } from '../../src/main/skills';
 import { Store } from '../../src/main/store';
 import { IPC_CHANNELS } from '../../src/shared/ipc';
 
-const { ipcMainHandle } = vi.hoisted(() => ({
+const { ipcMainHandle, protocolRegisterFileProtocol } = vi.hoisted(() => ({
   ipcMainHandle: vi.fn(),
+  protocolRegisterFileProtocol: vi.fn(() => true),
 }));
 
 vi.mock('electron', () => ({
+  dialog: { showOpenDialog: vi.fn() },
   ipcMain: { handle: ipcMainHandle },
+  protocol: { registerFileProtocol: protocolRegisterFileProtocol },
   safeStorage: {
     isEncryptionAvailable: () => true,
     encryptString: (value: string) => Buffer.from(value, 'utf8'),
@@ -58,6 +64,7 @@ afterEach(async () => {
 describe('production application services', () => {
   beforeEach(() => {
     ipcMainHandle.mockReset();
+    protocolRegisterFileProtocol.mockClear();
   });
 
   test('creates the real services in the selected data directory', async () => {
@@ -67,6 +74,9 @@ describe('production application services', () => {
     cleanups.push(() => services.close());
 
     expect(DEFAULT_DATA_DIRECTORY).toBe('G:\\SMO-H3-Data');
+    expect(DEFAULT_INPUT_DIRECTORY).toBe(
+      'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\input',
+    );
     expect(existsSync(join(dataDirectory, 'studio.sqlite'))).toBe(true);
     expect(services.store).toBeInstanceOf(Store);
     expect(services.llmConfig).toBeInstanceOf(FileLlmConfigStore);
@@ -74,6 +84,12 @@ describe('production application services', () => {
     expect(services.skills).toBeInstanceOf(SkillsService);
     expect(services.comfy).toBeInstanceOf(ComfyClient);
     expect(services.jobCoordinator).toBeInstanceOf(JobCoordinator);
+    expect(services.avatars).toBeInstanceOf(AvatarService);
+    expect(services.files).toBeInstanceOf(FileService);
+    expect(protocolRegisterFileProtocol).toHaveBeenCalledWith(
+      'smo-media',
+      expect.any(Function),
+    );
     expect(services.hardware.detect).toBe(detectHardware);
     expect(services.hardware.apply).toBe(applyHardwareProfile);
   });

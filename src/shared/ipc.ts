@@ -17,6 +17,9 @@ export { SKILL_NAMES } from './skills';
 export const IPC_CHANNELS = [
   'jobs:start',
   'jobs:cancel',
+  'files:selectImage',
+  'files:selectAudio',
+  'files:mediaUrl',
   'llm:saveProfile',
   'llm:getProfile',
   'llm:listModels',
@@ -156,7 +159,16 @@ function requestSchema<T extends (typeof IPC_CHANNELS)[number], P extends z.ZodT
 export function createIpcSchema() {
   return z.discriminatedUnion('channel', [
     requestSchema('jobs:start', generationRequestSchema),
-    requestSchema('jobs:cancel', emptyPayload),
+    requestSchema(
+      'jobs:cancel',
+      z.object({ id: nonEmptyString.optional() }).strict(),
+    ),
+    requestSchema('files:selectImage', emptyPayload),
+    requestSchema('files:selectAudio', emptyPayload),
+    requestSchema(
+      'files:mediaUrl',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
     requestSchema('llm:saveProfile', llmCredentialsSchema),
     requestSchema('llm:getProfile', emptyPayload),
     requestSchema('llm:listModels', emptyPayload),
@@ -207,7 +219,12 @@ export interface SmoApi {
   };
   readonly jobs: {
     start(request: GenerationRequest): Promise<GenerationStartResult>;
-    cancel(): Promise<void>;
+    cancel(id?: string): Promise<void>;
+  };
+  readonly files: {
+    selectImage(): Promise<string | null>;
+    selectAudio(): Promise<string | null>;
+    mediaUrl(path: string): Promise<string>;
   };
   readonly llm: {
     saveProfile(credentials: LlmCredentials): Promise<void>;

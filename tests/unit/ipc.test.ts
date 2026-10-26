@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { ComfyClient } from '../../src/main/comfy';
+import { AvatarService } from '../../src/main/avatars';
+import { FileService } from '../../src/main/files';
 import { applyHardwareProfile } from '../../src/main/hardware';
 import {
   registerIpc,
@@ -18,6 +20,7 @@ import { LlmService } from '../../src/main/llm';
 import { FileLlmConfigStore } from '../../src/main/llm-config';
 import { SkillsService } from '../../src/main/skills';
 import { Store } from '../../src/main/store';
+import { MediaRegistry } from '../../src/main/media';
 import {
   createIpcSchema,
   IPC_CHANNELS,
@@ -137,6 +140,12 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
   );
   const jobCoordinator = new JobCoordinator();
   const registry = new TestIpcRegistry();
+  const showOpenDialog = vi.fn();
+  const mediaRegistry = new MediaRegistry({
+    avatarsDirectory: join(directory, 'avatars'),
+    inputDirectory: join(directory, 'input'),
+    outputDirectory: join(directory, 'output'),
+  });
   const services: IpcServices = {
     startGeneration: async () => ({ id: 'injected-job' }),
     jobCoordinator,
@@ -155,6 +164,11 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     },
     llmConfig,
     store,
+    avatars: new AvatarService({
+      avatarsDirectory: join(directory, 'avatars'),
+      store,
+    }),
+    files: new FileService(mediaRegistry, { showOpenDialog }),
     comfy: {
       health: async () => ({ system: {}, devices: [] }),
     },
@@ -176,6 +190,7 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     jobCoordinator,
     llmConfig,
     registry,
+    showOpenDialog,
     services,
     store,
     invoke: (channel: IpcChannel, payload: unknown = {}) =>
@@ -225,6 +240,26 @@ describe('IPC input schema', () => {
         payload: { ...generationRequest, mode: 'audio' },
       }),
     ).toThrow(/audioPath/i);
+  });
+
+  test.each([
+    { channel: 'files:selectImage', payload: {} },
+    { channel: 'files:selectAudio', payload: {} },
+    { channel: 'files:mediaUrl', payload: { path: 'G:\\media\\result.mp4' } },
+  ])('accepts controlled file request $channel', (request) => {
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('rejects a media URL request with an empty path or extra fields', () => {
+    expect(() =>
+      createIpcSchema().parse({ channel: 'files:mediaUrl', payload: { path: '' } }),
+    ).toThrow();
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'files:mediaUrl',
+        payload: { path: 'G:\\media\\result.mp4', shell: true },
+      }),
+    ).toThrow();
   });
 
   test('accepts a complete audio generation request', () => {
@@ -499,7 +534,7 @@ describe('main-process IPC handlers', () => {
     expect(received).toEqual(generationRequest);
   });
 
-  test('cancels the active job through the real JobCoordinator', async () => {
+  test('cancels only the requested job through the real JobCoordinator', async () => {
     const harness = await createHarness();
     let cancellations = 0;
     let finish = (): void => undefined;
@@ -516,18 +551,25 @@ describe('main-process IPC handlers', () => {
       },
     });
 
-    await harness.invoke('jobs:cancel');
+    await harness.invoke('jobs:cancel', { id: 'another-job' });
+    expect(cancellations).toBe(0);
+    await harness.invoke('jobs:cancel', { id: 'job-1' });
     await completion;
     expect(cancellations).toBe(1);
   });
 
-  test('dispatches avatar and work queries to the real Store', async () => {
+  test('creates managed avatars and dispatches work queries to the real Store', async () => {
     const harness = await createHarness();
+    const source = join(harness.directory, 'presenter.png');
+    await writeFile(source, 'image-data');
 
     const avatar = (await harness.invoke('avatars:create', {
       name: 'Presenter',
-      photoPath: 'G:\\avatars\\presenter.png',
+      photoPath: source,
     })) as Avatar;
+    expect(avatar.photoPath).not.toBe(source);
+    expect(avatar.photoPath).toContain(join(harness.directory, 'avatars'));
+    expect(await readFile(avatar.photoPath, 'utf8')).toBe('image-data');
     await expect(harness.invoke('avatars:list')).resolves.toEqual([avatar]);
 
     const work = harness.store.addWork({
@@ -540,6 +582,20 @@ describe('main-process IPC handlers', () => {
     const works = (await harness.invoke('works:list')) as Work[];
     expect(works).toHaveLength(1);
     expect(works[0]).toMatchObject({ id: work.id, avatarId: avatar.id });
+  });
+
+  test('handles file selection and controlled media URL requests', async () => {
+    const harness = await createHarness();
+    const audioPath = join(harness.directory, 'voice.mp3');
+    await writeFile(audioPath, 'audio');
+    harness.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [audioPath] });
+
+    await expect(harness.invoke('files:selectAudio')).resolves.toBe(audioPath);
+    const mediaUrl = await harness.invoke('files:mediaUrl', { path: audioPath });
+    expect(mediaUrl).toMatch(/^smo-media:\/\/media\//);
+
+    harness.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] });
+    await expect(harness.invoke('files:selectImage')).resolves.toBeNull();
   });
 
   test('uses saved main-process credentials for all LLM services', async () => {
@@ -745,6 +801,7 @@ describe('preload API', () => {
     expect(Object.keys(api).sort()).toEqual([
       'avatars',
       'comfy',
+      'files',
       'hardware',
       'jobs',
       'llm',
@@ -762,6 +819,11 @@ describe('preload API', () => {
     expect(Object.keys(api.comfy)).toEqual(['health']);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect']);
     expect(Object.keys(api.works)).toEqual(['list']);
+    expect(Object.keys(api.files).sort()).toEqual([
+      'mediaUrl',
+      'selectAudio',
+      'selectImage',
+    ]);
 
     const exposedMethods = Object.values(api).flatMap((domain) => Object.keys(domain));
     for (const forbidden of ['invoke', 'shell', 'process', 'require', 'ipcRenderer']) {
@@ -790,6 +852,26 @@ describe('preload API', () => {
       channel: 'jobs:cancel',
       payload: {},
       call: (smo: SmoApi) => smo.jobs.cancel(),
+    },
+    {
+      channel: 'jobs:cancel',
+      payload: { id: 'job-1' },
+      call: (smo: SmoApi) => smo.jobs.cancel('job-1'),
+    },
+    {
+      channel: 'files:selectImage',
+      payload: {},
+      call: (smo: SmoApi) => smo.files.selectImage(),
+    },
+    {
+      channel: 'files:selectAudio',
+      payload: {},
+      call: (smo: SmoApi) => smo.files.selectAudio(),
+    },
+    {
+      channel: 'files:mediaUrl',
+      payload: { path: 'G:\\media\\result.mp4' },
+      call: (smo: SmoApi) => smo.files.mediaUrl('G:\\media\\result.mp4'),
     },
     {
       channel: 'llm:saveProfile',

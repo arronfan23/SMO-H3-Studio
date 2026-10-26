@@ -2,8 +2,11 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { dialog, protocol } from 'electron';
 import type { GenerationHandler, IpcServices } from './ipc';
+import { AvatarService } from './avatars';
 import { ComfyClient } from './comfy';
+import { FileService, type FileDialog } from './files';
 import { createGenerationHandler } from './generation';
 import { applyHardwareProfile, detectHardware } from './hardware';
 import { JobCoordinator, type JobEventErrorHandler } from './jobs';
@@ -11,8 +14,15 @@ import { LlmService } from './llm';
 import { FileLlmConfigStore } from './llm-config';
 import { SkillsService } from './skills';
 import { Store } from './store';
+import {
+  MediaRegistry,
+  registerMediaProtocol,
+  type MediaProtocolRegistrar,
+} from './media';
 
 export const DEFAULT_DATA_DIRECTORY = 'G:\\SMO-H3-Data';
+export const DEFAULT_INPUT_DIRECTORY =
+  'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\input';
 export const DEFAULT_OUTPUT_DIRECTORY =
   'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\output';
 
@@ -30,6 +40,10 @@ export interface AppServicesOptions {
   dataDirectory?: string;
   generationHandler?: GenerationHandler;
   errorReporter?: JobEventErrorHandler;
+  inputDirectory?: string;
+  outputDirectory?: string;
+  fileDialog?: FileDialog;
+  mediaProtocol?: MediaProtocolRegistrar;
 }
 
 function defaultWorkflowsDirectory(): string {
@@ -63,9 +77,23 @@ export async function createAppServices(
   options: AppServicesOptions = {},
 ): Promise<AppServices> {
   const dataDirectory = options.dataDirectory ?? DEFAULT_DATA_DIRECTORY;
+  const inputDirectory = options.inputDirectory ?? DEFAULT_INPUT_DIRECTORY;
+  const outputDirectory = options.outputDirectory ?? DEFAULT_OUTPUT_DIRECTORY;
   await mkdir(dataDirectory, { recursive: true });
 
+  const mediaRegistry = new MediaRegistry({
+    avatarsDirectory: join(dataDirectory, 'avatars'),
+    inputDirectory,
+    outputDirectory,
+  });
+  registerMediaProtocol(mediaRegistry, options.mediaProtocol ?? protocol);
+
   const store = new Store(join(dataDirectory, 'studio.sqlite'));
+  const avatars = new AvatarService({
+    avatarsDirectory: join(dataDirectory, 'avatars'),
+    store,
+  });
+  const files = new FileService(mediaRegistry, options.fileDialog ?? dialog);
   const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
   const llm = new LlmService();
   const comfy = new ComfyClient();
@@ -87,7 +115,7 @@ export async function createAppServices(
       comfy,
       jobCoordinator,
       workflowsDirectory: defaultWorkflowsDirectory(),
-      outputDirectory: DEFAULT_OUTPUT_DIRECTORY,
+      outputDirectory,
     });
 
   return {
@@ -96,6 +124,8 @@ export async function createAppServices(
     llm,
     skills: new SkillsService(llm),
     llmConfig,
+    avatars,
+    files,
     store,
     comfy,
     hardware: {

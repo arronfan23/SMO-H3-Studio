@@ -81,6 +81,23 @@ export class JobCoordinator {
     return item.cancelPromise;
   }
 
+  cancel(id: string): Promise<void> {
+    if (this.active?.job.id === id) {
+      return this.cancelActive();
+    }
+
+    const queueIndex = this.queue.findIndex((item) => item.job.id === id);
+    if (queueIndex === -1) {
+      return Promise.resolve();
+    }
+    const [item] = this.queue.splice(queueIndex, 1);
+    const error = new Error('Generation cancelled');
+    this.reservedIds.delete(id);
+    this.emit({ id, status: 'failed', error });
+    item.reject(error);
+    return Promise.resolve();
+  }
+
   recover(records: readonly JobRecoveryRecord[]): void {
     for (const record of records) {
       if (this.reservedIds.has(record.id)) {

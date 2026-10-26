@@ -1,11 +1,14 @@
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, protocol } from 'electron';
 import { bootstrapApplication } from './bootstrap';
+import { registerPrivilegedMediaScheme } from './media';
 import {
   createRendererLoadFailureMessage,
   loadRenderer,
   selectRendererTarget,
 } from './renderer';
 import { createWindowOptions } from './window-options';
+
+registerPrivilegedMediaScheme(protocol);
 
 function reportRendererLoadFailure(error: unknown): void {
   console.error('[SMO.H3 Studio] 界面加载失败', error);

@@ -1,19 +1,107 @@
+import { useCallback, useEffect, useState } from 'react';
+import { Clapperboard, FolderOpen, Settings, Users } from 'lucide-react';
+import type { Avatar } from '../shared/types';
+import { AvatarsPage } from './AvatarsPage';
+import { SettingsPage } from './SettingsPage';
+import { StudioPage } from './StudioPage';
+import { WorksPage } from './WorksPage';
+import { errorMessage } from './ui';
+
+const NAVIGATION = [
+  { id: 'studio', label: '制作台', icon: Clapperboard },
+  { id: 'avatars', label: '数字模特', icon: Users },
+  { id: 'works', label: '我的作品', icon: FolderOpen },
+  { id: 'settings', label: '设置', icon: Settings },
+] as const;
+
+type PageId = (typeof NAVIGATION)[number]['id'];
+
 export function App() {
+  const [page, setPage] = useState<PageId>('studio');
+  const [avatars, setAvatars] = useState<Avatar[]>([]);
+  const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
+  const [avatarsLoading, setAvatarsLoading] = useState(true);
+  const [avatarsError, setAvatarsError] = useState<string | null>(null);
+
+  const refreshAvatars = useCallback(async (preferredId?: string): Promise<void> => {
+    try {
+      const result = await window.smo.avatars.list();
+      setAvatars(result);
+      setSelectedAvatarId((current) => {
+        if (preferredId && result.some((avatar) => avatar.id === preferredId)) {
+          return preferredId;
+        }
+        if (current && result.some((avatar) => avatar.id === current)) {
+          return current;
+        }
+        return result[0]?.id ?? null;
+      });
+      setAvatarsError(null);
+    } catch (error) {
+      setAvatarsError(errorMessage(error));
+    } finally {
+      setAvatarsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAvatars();
+  }, [refreshAvatars]);
+
+  const avatarCreated = async (avatar: Avatar): Promise<void> => {
+    setAvatars((current) => [avatar, ...current.filter((item) => item.id !== avatar.id)]);
+    setSelectedAvatarId(avatar.id);
+    await refreshAvatars(avatar.id);
+  };
+
+  const selectedAvatar = avatars.find((avatar) => avatar.id === selectedAvatarId) ?? null;
+
   return (
-    <main className="app-shell">
-      <section className="brand-screen" aria-label="SMO.H3 Studio">
-        <img
-          className="brand-logo"
-          src="./brand/icon.png"
-          alt="SMO Logo"
-          width="112"
-          height="112"
-        />
-        <div className="brand-copy">
-          <h1>SMO.H3 Studio</h1>
-          <p>数字人视频工作台</p>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-lockup">
+          <img src="./brand/icon.png" alt="SMO.H3 Studio 标志" width="42" height="42" />
+          <div>
+            <h1>SMO.H3 Studio</h1>
+            <span>数字人制作台</span>
+          </div>
         </div>
-      </section>
-    </main>
+        <nav className="main-nav" aria-label="主导航">
+          {NAVIGATION.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              className={page === id ? 'nav-item nav-item-active' : 'nav-item'}
+              aria-current={page === id ? 'page' : undefined}
+              onClick={() => setPage(id)}
+            >
+              <Icon size={18} aria-hidden="true" />
+              <span>{label}</span>
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <main className="main-content">
+        {page === 'studio' && (
+          <StudioPage
+            avatar={selectedAvatar}
+            loading={avatarsLoading}
+            error={avatarsError}
+            onCreateAvatar={() => setPage('avatars')}
+          />
+        )}
+        {page === 'avatars' && (
+          <AvatarsPage
+            avatars={avatars}
+            selectedAvatarId={selectedAvatarId}
+            error={avatarsError}
+            onSelect={setSelectedAvatarId}
+            onCreated={avatarCreated}
+          />
+        )}
+        {page === 'works' && <WorksPage avatars={avatars} />}
+        {page === 'settings' && <SettingsPage />}
+      </main>
+    </div>
   );
 }

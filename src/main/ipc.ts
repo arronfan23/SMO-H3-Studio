@@ -1,5 +1,7 @@
 import { ipcMain } from 'electron';
 import type { ComfyClient } from './comfy';
+import type { AvatarService } from './avatars';
+import type { FileService } from './files';
 import type { JobCoordinator } from './jobs';
 import type { LlmService } from './llm';
 import type { LlmConfigStore } from './llm-config';
@@ -30,11 +32,13 @@ export type GenerationHandler = (
 
 export interface IpcServices {
   startGeneration: GenerationHandler;
-  jobCoordinator: Pick<JobCoordinator, 'cancelActive'>;
+  jobCoordinator: Pick<JobCoordinator, 'cancel' | 'cancelActive'>;
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
-  store: Pick<Store, 'createAvatar' | 'listAvatars' | 'listWorks'>;
+  store: Pick<Store, 'listAvatars' | 'listWorks'>;
+  avatars: Pick<AvatarService, 'createAvatar'>;
+  files: Pick<FileService, 'selectImage' | 'selectAudio' | 'mediaUrl'>;
   comfy: Pick<ComfyClient, 'health'>;
   hardware: {
     detect: () => Promise<HardwareInfo>;
@@ -69,8 +73,18 @@ async function dispatch(
     case 'jobs:start':
       return services.startGeneration(request.payload);
     case 'jobs:cancel':
-      await services.jobCoordinator.cancelActive();
+      if (request.payload.id === undefined) {
+        await services.jobCoordinator.cancelActive();
+      } else {
+        await services.jobCoordinator.cancel(request.payload.id);
+      }
       return undefined;
+    case 'files:selectImage':
+      return services.files.selectImage();
+    case 'files:selectAudio':
+      return services.files.selectAudio();
+    case 'files:mediaUrl':
+      return services.files.mediaUrl(request.payload.path);
     case 'llm:saveProfile':
       await services.llmConfig.save(request.payload);
       return undefined;
@@ -96,7 +110,7 @@ async function dispatch(
     case 'avatars:list':
       return services.store.listAvatars();
     case 'avatars:create':
-      return services.store.createAvatar(request.payload);
+      return services.avatars.createAvatar(request.payload);
     case 'works:list':
       return services.store.listWorks();
     case 'comfy:health':
