@@ -1052,6 +1052,23 @@ describe('GenerationHandler failures and cancellation', () => {
     expect(work.error).toMatch(/cancel/i);
   });
 
+  test('does not write done when cancelled after the last async step', async () => {
+    const harness = await createHarness();
+    const originalHistory = harness.comfy.history.bind(harness.comfy);
+    harness.comfy.history = async (promptId) => {
+      const result = await originalHistory(promptId);
+      void harness.jobCoordinator.cancelActive();
+      return result;
+    };
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.status).toBe('failed');
+    expect(work.error).toMatch(/cancel/i);
+    expect(work.outputPath).toBeNull();
+  });
+
   test.each([
     { subfolder: '../outside', filename: 'escape.mp4' },
     { subfolder: 'SMO-H3', filename: '../escape.mp4' },

@@ -94,6 +94,8 @@ export async function createAppServices(
   const hardwareWorkflows = new HardwareWorkflowStore({ profilesDirectory });
 
   let store: Store | undefined;
+  let comfy: ComfyClient | undefined;
+  let jobCoordinator: JobCoordinator | undefined;
   try {
     await hardwareWorkflows.load();
 
@@ -117,8 +119,8 @@ export async function createAppServices(
     });
     const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
     const llm = new LlmService();
-    const comfy = new ComfyClient(comfyBaseUrl);
-    const jobCoordinator = new JobCoordinator({
+    comfy = new ComfyClient(comfyBaseUrl);
+    jobCoordinator = new JobCoordinator({
       onEvent: (event) => {
         store!.updateWork(event.id, {
           status: event.status,
@@ -177,13 +179,19 @@ export async function createAppServices(
           return;
         }
         closed = true;
-        await jobCoordinator.close();
-        comfy.close();
-        store!.close();
+        await Promise.allSettled([
+          jobCoordinator!.close(),
+          comfy!.close(),
+          (async () => store!.close())(),
+        ]);
       },
     };
   } catch (error) {
-    store?.close();
+    await Promise.allSettled([
+      jobCoordinator?.close() ?? Promise.resolve(),
+      comfy?.close() ?? Promise.resolve(),
+      (async () => store?.close())(),
+    ]);
     throw error;
   }
 }

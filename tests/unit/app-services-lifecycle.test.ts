@@ -51,13 +51,38 @@ describe('AppServices lifecycle', () => {
     expect(storeClose).toHaveBeenCalledTimes(1);
   });
 
-  test('close is idempotent', async () => {
+  test('close awaits all component releases and does not stop on one failure', async () => {
     const dataDirectory = await useDataDirectory();
     const services = await createAppServices({ dataDirectory });
 
+    const comfyClose = vi
+      .spyOn(services.comfy, 'close')
+      .mockRejectedValueOnce(new Error('comfy close failed'));
+    const coordinatorClose = vi.spyOn(services.jobCoordinator, 'close');
+    const storeClose = vi.spyOn(services.store, 'close');
+
+    await expect(services.close()).resolves.toBeUndefined();
+
+    expect(coordinatorClose).toHaveBeenCalledTimes(1);
+    expect(comfyClose).toHaveBeenCalledTimes(1);
+    expect(storeClose).toHaveBeenCalledTimes(1);
+  });
+
+  test('close is idempotent and only releases components once', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const comfyClose = vi.spyOn(services.comfy, 'close');
+    const coordinatorClose = vi.spyOn(services.jobCoordinator, 'close');
+    const storeClose = vi.spyOn(services.store, 'close');
+
+    await services.close();
     await services.close();
     await services.close();
 
+    expect(comfyClose).toHaveBeenCalledTimes(1);
+    expect(coordinatorClose).toHaveBeenCalledTimes(1);
+    expect(storeClose).toHaveBeenCalledTimes(1);
     expect(services.store).toBeDefined();
   });
 });

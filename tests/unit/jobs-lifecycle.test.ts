@@ -67,4 +67,32 @@ describe('JobCoordinator lifecycle', () => {
     await coordinator.close();
     await coordinator.close();
   });
+
+  test('close times out a non-cancellable active job and rejects queued jobs', async () => {
+    const coordinator = new JobCoordinator({ closeTimeoutMs: 50 });
+    const events: string[] = [];
+
+    const first = coordinator.enqueue({
+      id: 'first',
+      run: async () => {
+        events.push('first-run');
+        await new Promise(() => undefined);
+      },
+    });
+
+    const second = coordinator.enqueue({
+      id: 'second',
+      run: async () => undefined,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(coordinator.activeCount).toBe(1);
+
+    await coordinator.close();
+
+    await expect(first).rejects.toThrow(/cancelled|closed/i);
+    await expect(second).rejects.toThrow(/JobCoordinator is closed/i);
+    expect(coordinator.activeCount).toBe(0);
+    expect(events).toContain('first-run');
+  });
 });

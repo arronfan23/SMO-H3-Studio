@@ -637,6 +637,9 @@ export class ComfyClient {
         closeAbortPromise,
       ]).catch((error) => {
         this.abortController.signal.removeEventListener('abort', onAbort!);
+        if (this.closed) {
+          throw new Error('ComfyClient is closed');
+        }
         if (error instanceof Error && error.message === 'ComfyClient is closed') {
           throw error;
         }

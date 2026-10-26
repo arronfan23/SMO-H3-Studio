@@ -14,9 +14,17 @@ export interface JobEvent {
 
 export type JobEventErrorHandler = (error: unknown, event: JobEvent) => void;
 
+function validateTimeout(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`JobCoordinator ${name} must be a finite positive number`);
+  }
+  return value;
+}
+
 export interface JobCoordinatorOptions {
   onEvent?: (event: JobEvent) => void;
   onEventError?: JobEventErrorHandler;
+  closeTimeoutMs?: number;
 }
 
 export interface JobRecoveryRecord {
@@ -34,18 +42,25 @@ interface QueueItem {
   settle?: () => void;
 }
 
+const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
+
 export class JobCoordinator {
   private readonly queue: QueueItem[] = [];
   private readonly reservedIds = new Set<string>();
   private readonly completed: string[] = [];
   private readonly onEvent?: (event: JobEvent) => void;
   private readonly onEventError?: JobEventErrorHandler;
+  private readonly closeTimeoutMs: number;
   private active: QueueItem | null = null;
   private closed = false;
 
   constructor(options: JobCoordinatorOptions = {}) {
     this.onEvent = options.onEvent;
     this.onEventError = options.onEventError;
+    this.closeTimeoutMs =
+      options.closeTimeoutMs === undefined
+        ? DEFAULT_CLOSE_TIMEOUT_MS
+        : validateTimeout(options.closeTimeoutMs, 'closeTimeoutMs');
   }
 
   get activeCount(): number {
@@ -132,7 +147,17 @@ export class JobCoordinator {
         item.reject(error);
         this.active = null;
       } else if (item.settled !== undefined) {
+        const timeout = setTimeout(() => {
+          item.cancelled = true;
+          const error = new Error('Generation cancelled');
+          this.reservedIds.delete(item.job.id);
+          this.emit({ id: item.job.id, status: 'failed', error });
+          item.reject(error);
+          this.active = null;
+          item.settle?.();
+        }, this.closeTimeoutMs);
         await item.settled;
+        clearTimeout(timeout);
       }
     }
 

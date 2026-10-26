@@ -51,6 +51,23 @@ describe('ComfyClient lifecycle', () => {
     await expect(completionPromise).rejects.toThrow(/closed/i);
   });
 
+  test('close abort reports ComfyClient is closed, not a connection error', async () => {
+    const client = new ComfyClient('http://127.0.0.1:8188', { requestTimeoutMs: 60_000 });
+
+    vi.stubGlobal(
+      'fetch',
+      async (_url: string | URL, _init: RequestInit): Promise<Response> => {
+        return new Promise(() => undefined);
+      },
+    );
+
+    const healthPromise = client.health();
+    await client.close();
+
+    await expect(healthPromise).rejects.toThrow(/ComfyClient is closed/i);
+    await expect(healthPromise).rejects.not.toThrow(/Could not connect to ComfyUI/i);
+  });
+
   test('operations after close reject promptly', async () => {
     const client = new ComfyClient('http://127.0.0.1:8188');
     await client.close();
