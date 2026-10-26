@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { constants } from 'node:fs';
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ComfyClient, ComfyOutputFile } from './comfy';
 import type { GenerationHandler } from './ipc';
 import type { JobCoordinator } from './jobs';
+import type { MediaRegistry } from './media';
 import type { Store } from './store';
 import { patchWorkflow } from '../shared/workflow';
+import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
 import type { GenerationRequest } from '../shared/types';
 
 const WORKFLOW_FILENAMES = {
@@ -24,6 +27,9 @@ export interface GenerationHandlerOptions {
   jobCoordinator: Pick<JobCoordinator, 'enqueue'>;
   workflowsDirectory: string;
   outputDirectory: string;
+  mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
+  uploadsDirectory: string;
+  copyFile?: typeof copyFile;
 }
 
 function errorMessage(error: unknown): string {
@@ -87,7 +93,7 @@ function selectVideoOutput(
   files: ComfyOutputFile[],
   mode: GenerationRequest['mode'],
 ): ComfyOutputFile {
-  const outputNodeId = mode === 'text' ? '180' : '65';
+  const outputNodeId = WORKFLOW_NODES[mode].output;
   const output = files.find(
     (file) =>
       file.type === 'output' &&
@@ -138,10 +144,38 @@ function resolveOutputPath(
   return outputPath;
 }
 
+async function stageAudioFile(
+  sourcePath: string,
+  workId: string,
+  uploadsDirectory: string,
+  copy: typeof copyFile,
+): Promise<string> {
+  await mkdir(uploadsDirectory, { recursive: true });
+  const destination = join(uploadsDirectory, `${workId}${extname(sourcePath).toLowerCase()}`);
+  try {
+    await copy(sourcePath, destination, constants.COPYFILE_EXCL);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      await rm(destination, { force: true }).catch(() => undefined);
+    }
+    throw error;
+  }
+  return destination;
+}
+
 export function createGenerationHandler(
   options: GenerationHandlerOptions,
 ): GenerationHandler {
-  const { store, comfy, jobCoordinator, workflowsDirectory, outputDirectory } = options;
+  const {
+    store,
+    comfy,
+    jobCoordinator,
+    workflowsDirectory,
+    outputDirectory,
+    mediaRegistry,
+    uploadsDirectory,
+  } = options;
+  const copy = options.copyFile ?? copyFile;
 
   return async (input) => {
     validateRequest(input);
@@ -154,6 +188,19 @@ export function createGenerationHandler(
     const request = sanitizeRequest(input);
     const workId = randomUUID();
     const workflowFilename = WORKFLOW_FILENAMES[request.mode];
+    let stagedAudioPath: string | undefined;
+    if (request.mode === 'audio') {
+      const sourcePath = request.audioPath!;
+      if (!(await mediaRegistry.isSelectedFile(sourcePath))) {
+        throw new Error('Audio path must be explicitly selected through files.selectAudio');
+      }
+      stagedAudioPath = await stageAudioFile(
+        sourcePath,
+        workId,
+        uploadsDirectory,
+        copy,
+      );
+    }
     store.addWork({
       id: workId,
       avatarId: request.avatarId,
@@ -198,7 +245,7 @@ export function createGenerationHandler(
         const audio =
           request.mode === 'audio'
             ? await comfy.uploadFile({
-                filePath: request.audioPath!,
+                filePath: stagedAudioPath!,
                 kind: 'audio',
               })
             : undefined;
@@ -210,20 +257,20 @@ export function createGenerationHandler(
         const changes: Record<string, unknown> =
           request.mode === 'text'
             ? {
-                '226.inputs.image': image,
-                '136.inputs.prompt': request.prompt,
-                '132.inputs.value': request.duration,
-                '269.inputs.seed': request.seed,
-                '180.inputs.filename_prefix': `SMO-H3/${workId}`,
+                [WORKFLOW_PATHS.text.image]: image,
+                [WORKFLOW_PATHS.text.prompt]: request.prompt,
+                [WORKFLOW_PATHS.text.duration]: request.duration,
+                [WORKFLOW_PATHS.text.seed]: request.seed,
+                [WORKFLOW_PATHS.text.output]: `SMO-H3/${workId}`,
               }
             : {
-                '36.inputs.image': image,
-                '34.inputs.audio': audio,
-                '42.inputs.prompt': request.prompt,
-                '85.inputs.start_index': request.trimStart ?? 0,
-                '85.inputs.duration': request.duration,
-                '86.inputs.seed': request.seed,
-                '65.inputs.filename_prefix': `SMO-H3/${workId}`,
+                [WORKFLOW_PATHS.audio.image]: image,
+                [WORKFLOW_PATHS.audio.audio]: audio,
+                [WORKFLOW_PATHS.audio.prompt]: request.prompt,
+                [WORKFLOW_PATHS.audio.trimStart]: request.trimStart ?? 0,
+                [WORKFLOW_PATHS.audio.trimDuration]: request.duration,
+                [WORKFLOW_PATHS.audio.seed]: request.seed,
+                [WORKFLOW_PATHS.audio.output]: `SMO-H3/${workId}`,
               };
         const workflow = patchWorkflow(frozen, changes);
         throwIfCancelled();

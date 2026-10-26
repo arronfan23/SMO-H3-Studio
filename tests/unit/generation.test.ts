@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile, type copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,8 +11,10 @@ import type {
   ComfyOutputFile,
   ComfySubmitResult,
 } from '../../src/main/comfy';
+import { FileService } from '../../src/main/files';
 import { createGenerationHandler } from '../../src/main/generation';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
+import { MediaRegistry } from '../../src/main/media';
 import { Store } from '../../src/main/store';
 import type {
   GenerationRequest,
@@ -123,7 +125,7 @@ const workflowsDirectory = fileURLToPath(
   new URL('../../resources/workflows/', import.meta.url),
 );
 
-async function createHarness() {
+async function createHarness(options: { copyFile?: typeof copyFile } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'smo-h3-generation-'));
   const store = new Store(join(directory, 'studio.sqlite'));
   const photoPath = join(directory, 'avatar.png');
@@ -134,6 +136,16 @@ async function createHarness() {
   ]);
   const avatar = store.createAvatar({ name: 'Lin', photoPath });
   const outputDirectory = join(directory, 'output');
+  const uploadsDirectory = join(directory, 'uploads');
+  const mediaRegistry = new MediaRegistry({
+    avatarsDirectory: join(directory, 'avatars'),
+    inputDirectory: join(directory, 'input'),
+    outputDirectory,
+  });
+  const files = new FileService(mediaRegistry, {
+    showOpenDialog: async () => ({ canceled: false, filePaths: [audioPath] }),
+  });
+  await files.selectAudio();
   const comfy = new FakeComfyClient();
   const events: JobEvent[] = [];
   const jobCoordinator = new JobCoordinator({
@@ -158,6 +170,9 @@ async function createHarness() {
     jobCoordinator,
     workflowsDirectory,
     outputDirectory,
+    mediaRegistry,
+    uploadsDirectory,
+    ...options,
   });
   const textRequest: GenerationRequest = {
     mode: 'text',
@@ -184,9 +199,12 @@ async function createHarness() {
     audioRequest,
     avatar,
     comfy,
+    directory,
     events,
     jobCoordinator,
     outputDirectory,
+    uploadsDirectory,
+    mediaRegistry,
     startGeneration,
     store,
     textRequest,
@@ -282,8 +300,15 @@ describe('GenerationHandler workflows', () => {
 
       expect(harness.comfy.uploads).toEqual([
         { filePath: harness.avatar.photoPath, kind: 'image' },
-        { filePath: harness.audioRequest.audioPath, kind: 'audio' },
+        {
+          filePath: join(harness.uploadsDirectory, `${result.id}.mp3`),
+          kind: 'audio',
+        },
       ]);
+      expect(harness.comfy.uploads[1].filePath).not.toBe(request.audioPath);
+      expect(
+        await readFile(join(harness.uploadsDirectory, `${result.id}.mp3`), 'utf8'),
+      ).toBe('audio-test-bytes');
       const expected = JSON.parse(frozenSource) as Record<
         string,
         { inputs: Record<string, unknown> }
@@ -303,6 +328,73 @@ describe('GenerationHandler workflows', () => {
       expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
     },
   );
+
+  test('uses the staged audio copy after the selected source is deleted', async () => {
+    const harness = await createHarness();
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+    harness.comfy.outputs = [
+      outputFile({ nodeId: '65', filename: 'audio-result.mp4' }),
+    ];
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    const stagedPath = join(harness.uploadsDirectory, `${result.id}.mp3`);
+    await rm(harness.audioRequest.audioPath!);
+    completionGate.resolve();
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(work.status).toBe('done');
+    expect(harness.comfy.uploads[1]).toEqual({ filePath: stagedPath, kind: 'audio' });
+    expect(await readFile(stagedPath, 'utf8')).toBe('audio-test-bytes');
+  });
+
+  test('rejects unselected audio before creating pending work or a copy', async () => {
+    const harness = await createHarness();
+    const unselectedPath = join(harness.directory, 'unselected.mp3');
+    await writeFile(unselectedPath, 'unselected-audio');
+
+    await expect(
+      harness.startGeneration({ ...harness.audioRequest, audioPath: unselectedPath }),
+    ).rejects.toThrow(/selectAudio/i);
+
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+    await expect(readdir(harness.uploadsDirectory)).rejects.toThrow();
+  });
+
+  test('removes a partial audio copy when staging fails before pending work', async () => {
+    const failure = Object.assign(new Error('Simulated copy failure'), { code: 'EIO' });
+    const failingCopy: typeof copyFile = async (_source, destination) => {
+      await writeFile(destination, 'partial-audio');
+      throw failure;
+    };
+    const harness = await createHarness({ copyFile: failingCopy });
+
+    await expect(harness.startGeneration(harness.audioRequest)).rejects.toBe(failure);
+
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+  });
+
+  test('does not delete an existing destination when staging reports a collision', async () => {
+    const collision = Object.assign(new Error('Destination already exists'), {
+      code: 'EEXIST',
+    });
+    let destination = '';
+    const collidingCopy: typeof copyFile = async (_source, target) => {
+      destination = target.toString();
+      await writeFile(target, 'existing-audio');
+      throw collision;
+    };
+    const harness = await createHarness({ copyFile: collidingCopy });
+
+    await expect(harness.startGeneration(harness.audioRequest)).rejects.toBe(collision);
+
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(await readFile(destination, 'utf8')).toBe('existing-audio');
+  });
 
   test('returns the work id before ComfyUI execution completes', async () => {
     const harness = await createHarness();

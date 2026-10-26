@@ -117,6 +117,8 @@ export async function createAppServices(
       jobCoordinator,
       workflowsDirectory: defaultWorkflowsDirectory(),
       outputDirectory,
+      mediaRegistry,
+      uploadsDirectory: join(dataDirectory, 'uploads'),
     });
 
   return {

@@ -46,9 +46,9 @@ export class MediaRegistry {
   private readonly tokensByPath = new Map<string, string>();
 
   constructor(options: MediaRegistryOptions) {
+    // ComfyUI input is user-selectable media, not a trusted managed root.
     this.roots = [
       options.avatarsDirectory,
-      options.inputDirectory,
       options.outputDirectory,
     ].map((path) => resolve(path));
   }
@@ -66,6 +66,14 @@ export class MediaRegistry {
   async isSelectedImage(filePath: string): Promise<boolean> {
     try {
       return this.selectedImages.has(await this.realMediaFile(filePath));
+    } catch {
+      return false;
+    }
+  }
+
+  async isSelectedFile(filePath: string): Promise<boolean> {
+    try {
+      return this.selectedFiles.has(await this.realMediaFile(filePath));
     } catch {
       return false;
     }

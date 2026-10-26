@@ -43,7 +43,6 @@ describe('controlled media access', () => {
 
   test.each([
     { root: 'avatars', filename: 'person.png' },
-    { root: 'input', filename: 'voice.mp3' },
     { root: 'output', filename: 'result.mp4' },
   ])('issues an opaque URL only for an allowed $root file', async ({ root, filename }) => {
     const rootDirectories = {
@@ -60,6 +59,28 @@ describe('controlled media access', () => {
     expect(url).toMatch(/^smo-media:\/\/media\/[0-9a-f-]+$/);
     expect(url).not.toContain(filePath);
     expect(registry.resolveMediaUrl(url)).toBe(await realpath(filePath));
+  });
+
+  test.each([
+    { kind: 'audio', filename: 'input-voice.mp3' },
+    { kind: 'image', filename: 'input-photo.png' },
+  ])('requires explicit $kind selection for a file in ComfyUI input', async ({
+    kind,
+    filename,
+  }) => {
+    const filePath = join(inputDirectory, filename);
+    await writeFile(filePath, kind);
+    const showOpenDialog = vi.fn().mockResolvedValue({ canceled: false, filePaths: [filePath] });
+    const service = new FileService(registry, { showOpenDialog });
+
+    await expect(registry.createMediaUrl(filePath)).rejects.toThrow(/not allowed/i);
+
+    if (kind === 'audio') {
+      await expect(service.selectAudio()).resolves.toBe(filePath);
+    } else {
+      await expect(service.selectImage()).resolves.toBe(filePath);
+    }
+    await expect(registry.createMediaUrl(filePath)).resolves.toMatch(/^smo-media:/);
   });
 
   test('rejects files outside the managed roots until the user selects them', async () => {

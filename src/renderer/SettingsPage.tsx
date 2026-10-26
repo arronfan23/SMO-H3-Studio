@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { ComfyHealth } from '../shared/ipc';
 import type { LlmProfile } from '../shared/types';
@@ -10,13 +10,20 @@ export function SettingsPage() {
   const [healthError, setHealthError] = useState<string | null>(null);
   const [profile, setProfile] = useState<LlmProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
   const refresh = useCallback(async (): Promise<void> => {
+    if (!mountedRef.current) {
+      return;
+    }
     setLoading(true);
     const [healthResult, profileResult] = await Promise.allSettled([
       window.smo.comfy.health(),
       window.smo.llm.getProfile(),
     ]);
+    if (!mountedRef.current) {
+      return;
+    }
     setHealth(healthResult.status === 'fulfilled' ? healthResult.value : null);
     setHealthError(healthResult.status === 'rejected' ? errorMessage(healthResult.reason) : null);
     setProfile(profileResult.status === 'fulfilled' ? profileResult.value : null);
@@ -25,7 +32,11 @@ export function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     void refresh();
+    return () => {
+      mountedRef.current = false;
+    };
   }, [refresh]);
 
   return (

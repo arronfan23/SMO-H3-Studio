@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { buildH3Frames, patchWorkflow } from '../../src/shared/workflow';
+import { WORKFLOW_NODES } from '../../src/shared/workflow-nodes';
 
 const projectRoot = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -411,6 +412,40 @@ describe('UI workflow conversion', () => {
 });
 
 describe('generated API workflows', () => {
+  test.each([
+    {
+      filename: 'text-ref2va.json',
+      nodes: WORKFLOW_NODES.text,
+      types: {
+        image: 'LoadImage',
+        prompt: 'MiniMaxH3ReferenceToVideo',
+        duration: 'PrimitiveFloat',
+        seed: 'SelfLiftAvatarH3Sampler',
+        output: 'VHS_VideoCombine',
+      },
+    },
+    {
+      filename: 'audio-digital-human.json',
+      nodes: WORKFLOW_NODES.audio,
+      types: {
+        image: 'LoadImage',
+        audio: 'LoadAudio',
+        prompt: 'MiniMaxH3ReferenceToVideo',
+        trim: 'TrimAudioDuration',
+        seed: 'SelfLiftAvatarH3Sampler',
+        output: 'VHS_VideoCombine',
+      },
+    },
+  ])('keeps shared node ids compatible with $filename', async ({ filename, nodes, types }) => {
+    const graph = await readApiGraph(filename);
+
+    for (const [role, id] of Object.entries(nodes)) {
+      expect(graph[id], `${filename} ${role} node ${id}`).toMatchObject({
+        class_type: types[role as keyof typeof types],
+      });
+    }
+  });
+
   test.each([
     ['text-ref2va.json', '180'],
     ['audio-digital-human.json', '65'],

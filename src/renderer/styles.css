@@ -317,12 +317,15 @@ video:focus-visible {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
   min-height: 40px;
   padding: 9px 14px;
   font-size: 14px;
   font-weight: 650;
   line-height: 1.35;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   border: 1px solid transparent;
   border-radius: 4px;
 }
@@ -727,6 +730,22 @@ video:focus-visible {
 
   .person-preview {
     position: static;
+  }
+}
+
+@media (max-height: 639px) {
+  body {
+    overflow: auto;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 640px;
+    overflow: visible;
+  }
+
+  .main-content {
+    overflow: visible;
   }
 }
 

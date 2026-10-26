@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Clapperboard, FolderOpen, Settings, Users } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import { AvatarsPage } from './AvatarsPage';
@@ -22,10 +22,14 @@ export function App() {
   const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
   const [avatarsLoading, setAvatarsLoading] = useState(true);
   const [avatarsError, setAvatarsError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
   const refreshAvatars = useCallback(async (preferredId?: string): Promise<void> => {
     try {
       const result = await window.smo.avatars.list();
+      if (!mountedRef.current) {
+        return;
+      }
       setAvatars(result);
       setSelectedAvatarId((current) => {
         if (preferredId && result.some((avatar) => avatar.id === preferredId)) {
@@ -38,14 +42,22 @@ export function App() {
       });
       setAvatarsError(null);
     } catch (error) {
-      setAvatarsError(errorMessage(error));
+      if (mountedRef.current) {
+        setAvatarsError(errorMessage(error));
+      }
     } finally {
-      setAvatarsLoading(false);
+      if (mountedRef.current) {
+        setAvatarsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     void refreshAvatars();
+    return () => {
+      mountedRef.current = false;
+    };
   }, [refreshAvatars]);
 
   const avatarCreated = async (avatar: Avatar): Promise<void> => {

@@ -304,7 +304,7 @@ describe('works and settings', () => {
     expect(screen.getByText('失败（failed）')).toBeInTheDocument();
     expect(screen.getByText('ComfyUI 执行失败')).toBeInTheDocument();
     expect(smo.files.mediaUrl).toHaveBeenCalledWith(outputPath);
-    expect(screen.getByLabelText('作品视频 done-work')).toHaveAttribute(
+    expect(await screen.findByLabelText('作品视频 done-work')).toHaveAttribute(
       'src',
       `smo-media://media/${encodeURIComponent(outputPath)}`,
     );

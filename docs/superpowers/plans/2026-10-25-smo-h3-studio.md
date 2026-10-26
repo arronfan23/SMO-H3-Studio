@@ -21,6 +21,7 @@
 - `scripts/build-workflows.mjs`：把 UI 工作流转换成可达节点组成的 API 图，并应用已确认的 16 GB 模板。
 - `src/shared/types.ts`：`Avatar`、`VideoMode`、`GenerationRequest`、`LlmProfile`、`HardwareProfile` 等共享类型。
 - `src/shared/workflow.ts`：H3 帧数、时长与白名单参数替换。
+- `src/shared/workflow-nodes.ts`：两条冻结图的运行时节点 ID 与可修改路径单一来源。
 - `src/shared/prompt-contract.ts`：Skill 输出字段、时间戳、对白和片尾校验。
 - `src/main/store.ts`：SQLite 与本地文件记录。
 - `src/main/secrets.ts`：基于 `safeStorage` 的密钥存取。
@@ -673,6 +674,8 @@ git commit -m 'Build the SMO digital human studio interface'
 ### 任务 10：模特、作品与设置页
 
 **文件：** `src/renderer/pages/AvatarsPage.tsx`、`src/renderer/pages/WorksPage.tsx`、`src/renderer/pages/SettingsPage.tsx`、`tests/unit/settings.test.tsx`
+
+任务 10 的硬件档案集成边界：仅在用户明确确认硬件档案后，才在本次任务的工作流副本上调用 `applyHardwareProfile`，并在 `comfy.submit` 前完成注入。当前默认生成路径仍提交冻结的 16 GB 配置，不改变两条冻结图或其默认参数；这不表示跳过任务 10 的硬件集成。
 
 - [ ] **步骤 1：编写设置页失败测试**
 
