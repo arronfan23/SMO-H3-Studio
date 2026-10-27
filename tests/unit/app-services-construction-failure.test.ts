@@ -158,4 +158,40 @@ describe('createAppServices construction failure', () => {
       delete process.env.SMO_COMFYUI_ROOT;
     }
   });
+
+  test.each([
+    { name: 'empty string', value: '' },
+    { name: 'whitespace', value: '   ' },
+  ])('falls back to DEFAULT_COMFY_ROOT when SMO_COMFYUI_ROOT is $name', async ({ value }) => {
+    const managerOptions: unknown[] = [];
+    vi.doMock('../../src/main/generation', () => ({
+      createGenerationHandler: vi.fn(() => async () => ({ id: 'job' })),
+      createRetryHandler: vi.fn(() => async () => ({ id: 'job' })),
+    }));
+    vi.doMock('../../src/main/comfy-process', () => ({
+      DEFAULT_COMFY_ROOT: 'G:\\default-comfy-root',
+      ComfyProcessManager: vi.fn(function (options: unknown) {
+        managerOptions.push(options);
+        return {
+          ensureReady: vi.fn(),
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      }),
+    }));
+
+    process.env.SMO_COMFYUI_ROOT = value;
+    try {
+      const { createAppServices } = await import('../../src/main/app-services');
+      const dataDirectory = await useDataDirectory();
+      const services = await createAppServices({ dataDirectory });
+      cleanups.push(() => services.close());
+
+      expect(managerOptions).toHaveLength(1);
+      expect(managerOptions[0]).toMatchObject({
+        rootDirectory: 'G:\\default-comfy-root',
+      });
+    } finally {
+      delete process.env.SMO_COMFYUI_ROOT;
+    }
+  });
 });

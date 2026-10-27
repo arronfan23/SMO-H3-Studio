@@ -149,7 +149,11 @@ export async function createAppServices(
     comfyProcess = new ComfyProcessManager(
       {
         baseUrl: comfyBaseUrl,
-        rootDirectory: process.env.SMO_COMFYUI_ROOT ?? DEFAULT_COMFY_ROOT,
+        rootDirectory: resolveStringOption(
+          undefined,
+          process.env.SMO_COMFYUI_ROOT,
+          DEFAULT_COMFY_ROOT,
+        ),
         logPath: join(dataDirectory, 'logs', 'comfyui-backend.log'),
       },
       comfy,
