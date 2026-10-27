@@ -4,6 +4,21 @@ import { promisify } from 'node:util';
 export const DEFAULT_FFPROBE_PATH =
   'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\tools\\ffmpeg\\ffprobe.exe';
 
+function resolveFfprobePath(): string {
+  const envPath = process.env.SMO_FFPROBE_PATH;
+  if (envPath && envPath.length > 0) {
+    return envPath;
+  }
+  const ffmpegPath = process.env.SMO_FFMPEG_PATH;
+  if (ffmpegPath && ffmpegPath.length > 0) {
+    const ffprobePath = ffmpegPath.replace(/ffmpeg\.exe$/i, 'ffprobe.exe');
+    if (ffprobePath !== ffmpegPath) {
+      return ffprobePath;
+    }
+  }
+  return DEFAULT_FFPROBE_PATH;
+}
+
 const FFPROBE_TIMEOUT_MS = 10_000;
 const execFileAsync = promisify(execFile);
 
@@ -34,7 +49,7 @@ export function createFfprobeDurationReader(
   options: FfprobeDurationReaderOptions = {},
 ): AudioDurationReader {
   const execute = options.execute ?? defaultExecute;
-  const ffprobePath = options.ffprobePath ?? DEFAULT_FFPROBE_PATH;
+  const ffprobePath = options.ffprobePath ?? resolveFfprobePath();
   const timeout = options.timeoutMs ?? FFPROBE_TIMEOUT_MS;
 
   return async (filePath) => {

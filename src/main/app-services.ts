@@ -70,6 +70,30 @@ const defaultErrorReporter: JobEventErrorHandler = (error, event) => {
   );
 };
 
+function createTestFileDialog(): FileDialog | undefined {
+  const raw = process.env.SMO_TEST_FILE_DIALOG;
+  if (!raw) {
+    return undefined;
+  }
+  let paths: string[];
+  try {
+    paths = JSON.parse(raw) as string[];
+    if (!Array.isArray(paths) || paths.some((path) => typeof path !== 'string')) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return {
+    showOpenDialog: async () => {
+      const path = paths.shift();
+      return path === undefined
+        ? { canceled: true, filePaths: [] }
+        : { canceled: false, filePaths: [path] };
+    },
+  };
+}
+
 export async function createAppServices(
   options: AppServicesOptions = {},
 ): Promise<AppServices> {
@@ -113,7 +137,7 @@ export async function createAppServices(
     });
     const files = new FileService({
       mediaRegistry,
-      dialog: options.fileDialog ?? dialog,
+      dialog: options.fileDialog ?? createTestFileDialog() ?? dialog,
       outputDirectory,
       dataDirectory,
     });
