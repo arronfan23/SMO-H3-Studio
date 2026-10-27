@@ -17,6 +17,7 @@ if (-not (Test-Path -LiteralPath $resolvedRelease -PathType Container)) {
 }
 
 $exe = Get-ChildItem -LiteralPath $resolvedRelease -Filter 'SMO.H3-Studio-*.exe' -File |
+  Where-Object { $_.BaseName -match '^SMO\.H3-Studio-\d+\.\d+\.\d+$' } |
   Sort-Object { [version]($_.BaseName -replace '^SMO\.H3-Studio-') } -Descending |
   Select-Object -First 1
 if ($null -eq $exe) {

@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import sharp from 'sharp';
 import { seedAvatar } from '../fixtures/seed-avatar';
 import { startComfyMock } from '../fixtures/mock-comfy';
 import { startLlmMock } from '../fixtures/mock-llm';
@@ -37,18 +38,40 @@ interface SmoWorksGlobal {
   };
 }
 
+type SemanticVersion = [number, number, number];
+
+function portableExeVersion(filename: string): SemanticVersion | null {
+  const match = /^SMO\.H3-Studio-(\d+)\.(\d+)\.(\d+)\.exe$/.exec(filename);
+  return match === null
+    ? null
+    : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersion(left: SemanticVersion, right: SemanticVersion): number {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) {
+      return left[index] - right[index];
+    }
+  }
+  return 0;
+}
+
 async function findPortableExe(): Promise<string> {
   const entries = await readdir(RELEASE_DIRECTORY).catch(() => [] as string[]);
-  const executables = entries
-    .filter((entry) => /^SMO\.H3-Studio-.*\.exe$/.test(entry))
-    .sort()
-    .reverse();
-  if (executables.length === 0) {
+  const candidates = entries
+    .map((entry) => ({ entry, version: portableExeVersion(entry) }))
+    .filter(
+      (candidate): candidate is { entry: string; version: SemanticVersion } =>
+        candidate.version !== null,
+    )
+    // Semantic ordering: 1.10.0 must win over 1.9.0 (lexicographic sort would not).
+    .sort((left, right) => compareVersion(right.version, left.version));
+  if (candidates.length === 0) {
     throw new Error(
       'Portable executable missing; run `npm run pack` before test:e2e:package.',
     );
   }
-  return join(RELEASE_DIRECTORY, executables[0]);
+  return join(RELEASE_DIRECTORY, candidates[0].entry);
 }
 
 async function createTestAvatarImage(directory: string): Promise<string> {
@@ -99,39 +122,111 @@ async function connectOverCdp(port: number, timeoutMs: number): Promise<Browser>
   throw new Error(`packaged app did not expose CDP on 127.0.0.1:${port}: ${String(lastError)}`);
 }
 
+async function waitForChildExe(
+  wrapper: ChildProcess,
+  timeoutMs: number,
+  describeFailure?: () => string,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (wrapper.exitCode !== null) {
+      throw new Error(
+        `portable wrapper exited before the app started (code ${wrapper.exitCode})${describeFailure ? `: ${describeFailure()}` : ''}`,
+      );
+    }
+    const executablePath = await childExePath(wrapper.pid!);
+    if (executablePath !== null) {
+      return executablePath;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `timed out waiting for the extracted app process${describeFailure ? `: ${describeFailure()}` : ''}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+interface PackagedLaunchState {
+  wrapper?: ChildProcess;
+  cdpBrowser?: Browser;
+  innerExe?: string;
+  extractionRoot?: string;
+}
+
+// Processes are matched by extraction path with a strict boundary (root equal
+// or root + separator), never by image name, so a user's own SMO.H3 Studio
+// instance is never touched.
+async function countProcessesUnder(root: string): Promise<number> {
+  const escaped = root.replace(/'/g, "''");
+  const { stdout } = await execFileAsync('powershell', [
+    '-NoProfile',
+    '-Command',
+    `$root='${escaped}'; (Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\')) } | Measure-Object).Count`,
+  ]);
+  const count = Number(stdout.trim());
+  return Number.isFinite(count) ? count : 0;
+}
+
 // The portable stub spawns the real Electron app as a child process; killing
-// the Playwright handle may leave the child behind. Stop anything still
-// running from the stub's extraction directory (never by image name, so a
-// user's own SMO.H3 Studio instance is never touched).
+// the Playwright handle may leave the child behind. Stop anything still running
+// from the stub's extraction directory, then wait until the directory is clear.
 async function stopExtractedApp(extractionRoot: string | undefined): Promise<void> {
   if (!extractionRoot) {
     return;
   }
-  const script =
-    `Get-CimInstance Win32_Process | ` +
-    `Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${extractionRoot}') } | ` +
-    `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
-  await execFileAsync('powershell', ['-NoProfile', '-Command', script]).catch(
-    () => undefined,
-  );
-  // The portable child keeps the sqlite handle open briefly after the kill;
-  // wait until the extraction directory no longer hosts our processes.
-  const probe = () =>
-    execFileAsync('powershell', [
-      '-NoProfile',
-      '-Command',
-      `(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${extractionRoot}') } | Measure-Object).Count`,
-    ]).then(
-      ({ stdout }) => Number(stdout.trim()),
-      () => 0,
-    );
+  const escaped = extractionRoot.replace(/'/g, "''");
+  await execFileAsync('powershell', [
+    '-NoProfile',
+    '-Command',
+    `$root='${escaped}'; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -eq $root -or $_.ExecutablePath.StartsWith($root + '\\')) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+  ]).catch(() => undefined);
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
-    if ((await probe()) === 0) {
+    if ((await countProcessesUnder(extractionRoot)) === 0) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
+}
+
+// Idempotent teardown for the two-layer portable launch. Works with whatever
+// state was recorded before a failure: closing the CDP browser first gives the
+// wrapper app a graceful quit; killing leftover extraction processes unblocks
+// the stub's ExecWait; the stub itself is waited on, then force-killed only if
+// it still lingers. A second call is a no-op.
+async function cleanupPackagedLaunch(state: PackagedLaunchState): Promise<void> {
+  const { wrapper, cdpBrowser } = state;
+  const root =
+    state.extractionRoot ??
+    (state.innerExe !== undefined ? dirname(state.innerExe) : undefined);
+  state.wrapper = undefined;
+  state.cdpBrowser = undefined;
+  state.innerExe = undefined;
+  state.extractionRoot = undefined;
+
+  try {
+    await cdpBrowser?.close();
+  } catch {
+    // The wrapper app may already be gone; the extraction kill below covers it.
+  }
+  await stopExtractedApp(root);
+  if (wrapper !== undefined && wrapper.exitCode === null) {
+    const deadline = Date.now() + 15_000;
+    while (wrapper.exitCode === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    if (wrapper.exitCode === null) {
+      wrapper.kill('SIGKILL');
+    }
+  }
+}
+
+async function assertNonBlankScreenshot(path: string): Promise<void> {
+  const stats = await sharp(path).stats();
+  expect(stats.channels.length).toBeGreaterThan(0);
+  const maxStdev = Math.max(...stats.channels.map((channel) => channel.stdev));
+  expect(maxStdev).toBeGreaterThan(5);
 }
 
 async function removeTempDirectory(directory: string): Promise<void> {
@@ -374,19 +469,15 @@ test.describe('SMO.H3 Studio portable package', () => {
   let consoleErrors: string[] = [];
   let rendererLogs: string[] = [];
   let mainProcessRaw: (Buffer | string)[] = [];
-  let extractionRoot: string | undefined;
   let resourcesPath: string | undefined;
-  let harness: PackagedHarness | undefined;
+  // Teardown handles, recorded the moment they exist so afterEach can clean
+  // up even when launchPackaged throws midway through beforeEach.
+  const launchState: PackagedLaunchState = {};
 
   let dataDirectory: string;
   let outputDirectory: string;
   let userDataDir: string;
   let avatarImagePath: string;
-
-  interface PackagedHarness {
-    resourcesPath: string;
-    close(): Promise<void>;
-  }
 
   // Two-layer launch against the REAL portable artifact:
   // 1. Spawn the portable wrapper itself with a fixed CDP port; connect over CDP
@@ -395,10 +486,10 @@ test.describe('SMO.H3 Studio portable package', () => {
   //    release/win-unpacked) and drive THAT file with _electron.launch so the
   //    suite keeps main-process access (app.isPackaged, process.resourcesPath,
   //    BrowserWindow.setContentSize) with the reliable pipe transport.
-  // The wrapper instance keeps running (with throwaway data dirs) while the
-  // inner instance runs the real assertions, and is closed first on teardown so
-  // the stub can clean up its own extraction directory.
-  async function launchPackaged(): Promise<PackagedHarness> {
+  // Every stage records its handle in launchState immediately. Stage budgets
+  // (discovery 90s + CDP 60s + inner launch 60s) stay well under the 300s
+  // hook/test timeout, leaving room for the test body and for teardown.
+  async function launchPackaged(): Promise<string> {
     const portableExe = await findPortableExe();
     const cdpPort = await reserveFreePort();
     const wrapperDataDirectory = join(tempDirectory!, 'wrapper-data');
@@ -428,123 +519,76 @@ test.describe('SMO.H3 Studio portable package', () => {
         stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
+    launchState.wrapper = wrapper;
     const collectWrapperLog = (data: Buffer | string) =>
       wrapperLogs.push(typeof data === 'string' ? data : data.toString());
     wrapper.stdout?.on('data', collectWrapperLog);
     wrapper.stderr?.on('data', collectWrapperLog);
 
-    let cdpBrowser: Browser | undefined;
-    let innerExe: string | null = null;
+    // Layer 1 (budget 90s): find the exe this wrapper extracted.
+    const innerExe = await waitForChildExe(wrapper, 90_000, () => wrapperLogs.join(''));
+    launchState.innerExe = innerExe;
+    launchState.extractionRoot = dirname(innerExe);
+    expect(innerExe.toLowerCase().startsWith(tmpdir().toLowerCase())).toBe(true);
+
+    // Layer 2 (budget 60s): prove the wrapper-launched instance serves the packaged UI.
+    let cdpBrowser: Browser;
     try {
-      // Layer 1: find the exe this wrapper extracted and verify its UI over CDP.
-      const deadline = Date.now() + 150_000;
-      while (innerExe === null && Date.now() < deadline) {
-        if (wrapper.exitCode !== null) {
-          throw new Error(
-            `portable wrapper exited before the app started (code ${wrapper.exitCode}): ${wrapperLogs.join('')}`,
-          );
-        }
-        innerExe = await childExePath(wrapper.pid!);
-        if (innerExe === null) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-      }
-      if (innerExe === null) {
-        throw new Error(`timed out waiting for the extracted app process: ${wrapperLogs.join('')}`);
-      }
-      expect(innerExe.toLowerCase().startsWith(tmpdir().toLowerCase())).toBe(true);
-
-      cdpBrowser = await connectOverCdp(cdpPort, 150_000);
-      const cdpPages = cdpBrowser.contexts().flatMap((context) => context.pages());
-      if (cdpPages.length === 0) {
-        throw new Error('wrapper instance exposed CDP but no pages');
-      }
-      const cdpPage = cdpPages[0];
-      await expect
-        .poll(async () => cdpPage.title(), { timeout: 60_000 })
-        .toBe('SMO.H3 Studio');
-      expect(cdpPage.url().startsWith('file://')).toBe(true);
-
-      // Layer 2: drive the SAME extracted exe with Playwright's Electron transport.
-      app = await electron.launch({
-        executablePath: innerExe,
-        timeout: 120_000,
-        args: [
-          '--disable-gpu',
-          '--disable-software-rasterizer',
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--user-data-dir',
-          userDataDir,
-        ],
-        env: {
-          ...process.env,
-          SMO_DATA_DIRECTORY: dataDirectory,
-          SMO_OUTPUT_DIRECTORY: outputDirectory,
-          SMO_COMFYUI_BASE_URL: comfyMock.baseUrl,
-          SMO_FFMPEG_PATH: FFMPEG_PATH,
-          // Must be ignored by the packaged app (unit-covered guard); the
-          // packaged flow must never depend on the test file dialog.
-          SMO_TEST_FILE_DIALOG: JSON.stringify([avatarImagePath]),
-        },
-      });
-      attachMainProcessLogs(app, mainProcessRaw);
-      app.on('window', (windowPage) =>
-        attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
-      );
-      page = await app.firstWindow();
-
-      const discoveredResourcesPath = await app.evaluate(() => process.resourcesPath);
-      extractionRoot = dirname(discoveredResourcesPath);
-      return {
-        resourcesPath: discoveredResourcesPath,
-        close: async () => {
-          try {
-            await app?.close();
-          } finally {
-            app = undefined;
-            page = undefined;
-            try {
-              await cdpBrowser?.close();
-            } catch {
-              // The wrapper app may already be gone; make sure its processes are.
-              await stopExtractedApp(extractionRoot);
-            }
-            cdpBrowser = undefined;
-            const exitDeadline = Date.now() + 15_000;
-            while (wrapper.exitCode === null && Date.now() < exitDeadline) {
-              await new Promise((resolve) => setTimeout(resolve, 500));
-            }
-            if (wrapper.exitCode === null) {
-              wrapper.kill('SIGKILL');
-            }
-          }
-        },
-      };
+      cdpBrowser = await connectOverCdp(cdpPort, 60_000);
     } catch (error) {
-      try {
-        await app?.close();
-      } catch {
-        // best effort
-      }
-      app = undefined;
-      page = undefined;
-      try {
-        await cdpBrowser?.close();
-      } catch {
-        // best effort
-      }
-      await stopExtractedApp(innerExe === null ? undefined : dirname(innerExe));
-      if (wrapper.exitCode === null) {
-        wrapper.kill('SIGKILL');
-      }
-      throw error;
+      throw new Error(`${String(error)} — wrapper logs: ${wrapperLogs.join('')}`);
     }
+    launchState.cdpBrowser = cdpBrowser;
+    const cdpPages = cdpBrowser.contexts().flatMap((context) => context.pages());
+    if (cdpPages.length === 0) {
+      throw new Error(`wrapper instance exposed CDP but no pages: ${wrapperLogs.join('')}`);
+    }
+    const cdpPage = cdpPages[0];
+    await expect
+      .poll(async () => cdpPage.title(), { timeout: 60_000 })
+      .toBe('SMO.H3 Studio');
+    expect(cdpPage.url().startsWith('file://')).toBe(true);
+
+    // Layer 3 (budget 60s): drive the SAME extracted exe with Playwright's Electron transport.
+    app = await electron.launch({
+      executablePath: innerExe,
+      timeout: 60_000,
+      args: [
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--user-data-dir',
+        userDataDir,
+      ],
+      env: {
+        ...process.env,
+        SMO_DATA_DIRECTORY: dataDirectory,
+        SMO_OUTPUT_DIRECTORY: outputDirectory,
+        SMO_COMFYUI_BASE_URL: comfyMock.baseUrl,
+        SMO_FFMPEG_PATH: FFMPEG_PATH,
+        // Must be ignored by the packaged app (unit-covered guard); the
+        // packaged flow must never depend on the test file dialog.
+        SMO_TEST_FILE_DIALOG: JSON.stringify([avatarImagePath]),
+      },
+    });
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+
+    const discoveredResourcesPath = await app.evaluate(() => process.resourcesPath);
+    launchState.extractionRoot = dirname(discoveredResourcesPath);
+    return discoveredResourcesPath;
   }
 
   test.beforeEach(async () => {
-    harness = undefined;
+    launchState.wrapper = undefined;
+    launchState.cdpBrowser = undefined;
+    launchState.innerExe = undefined;
+    launchState.extractionRoot = undefined;
     tempDirectory = await mkdtemp(join(tmpdir(), 'smo-package-e2e-'));
     const root = tempDirectory;
     const mediaDirectory = join(root, 'media');
@@ -575,22 +619,22 @@ test.describe('SMO.H3 Studio portable package', () => {
     consoleErrors = [];
     rendererLogs = [];
     mainProcessRaw = [];
-    extractionRoot = undefined;
     resourcesPath = undefined;
 
-    harness = await launchPackaged();
-    resourcesPath = harness.resourcesPath;
+    resourcesPath = await launchPackaged();
   });
 
   test.afterEach(async () => {
     try {
-      await harness?.close();
+      try {
+        await app?.close();
+      } catch {
+        // Best effort: the extraction cleanup below covers a stuck inner app.
+      }
     } finally {
-      harness = undefined;
-      await stopExtractedApp(extractionRoot);
       app = undefined;
       page = undefined;
-      extractionRoot = undefined;
+      await cleanupPackagedLaunch(launchState);
       resourcesPath = undefined;
       await llmMock?.close();
       await comfyMock?.close();
@@ -689,16 +733,18 @@ test.describe('SMO.H3 Studio portable package', () => {
         'utf8',
       ),
     ) as Record<string, { class_type: string }>;
-    const workflowClassTypes = new Set(
-      Object.values(packagedWorkflow).map((node) => node.class_type),
-    );
     const submitted = comfyMock.submittedPrompts[comfyMock.submittedPrompts.length - 1];
-    const submittedNodes = Object.values(submitted.prompt) as Array<{
-      class_type: string;
-    }>;
-    expect(submittedNodes.length).toBeGreaterThan(0);
-    for (const node of submittedNodes) {
-      expect(workflowClassTypes.has(node.class_type)).toBe(true);
+    const submittedNodes = submitted.prompt as Record<
+      string,
+      { class_type: string }
+    >;
+    // The submitted graph must be exactly the packaged workflow: same node IDs,
+    // same node types (inputs are patched in place, never added or removed).
+    expect(Object.keys(submittedNodes).sort()).toEqual(
+      Object.keys(packagedWorkflow).sort(),
+    );
+    for (const [nodeId, node] of Object.entries(submittedNodes)) {
+      expect(node.class_type).toBe(packagedWorkflow[nodeId].class_type);
     }
 
     // Works view: completed work with playable packaged output.
@@ -751,6 +797,7 @@ test.describe('SMO.H3 Studio portable package', () => {
       const studioShot = testInfo.outputPath(`package-studio-${width}x${height}.png`);
       await page!.screenshot({ path: studioShot });
       expect((await stat(studioShot)).size).toBeGreaterThan(1000);
+      await assertNonBlankScreenshot(studioShot);
 
       await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
       await expect(page!.locator('.works-filters')).toBeVisible();
@@ -762,6 +809,7 @@ test.describe('SMO.H3 Studio portable package', () => {
       const worksShot = testInfo.outputPath(`package-works-${width}x${height}.png`);
       await page!.screenshot({ path: worksShot });
       expect((await stat(worksShot)).size).toBeGreaterThan(1000);
+      await assertNonBlankScreenshot(worksShot);
     }
   });
 });
@@ -817,6 +865,52 @@ test.describe('create-shortcut.ps1', () => {
     } finally {
       await rm(emptyRelease, { recursive: true, force: true });
       await rm(shortcutDirectory, { recursive: true, force: true });
+    }
+  });
+});
+
+test.describe('portable launch cleanup', () => {
+  // Deterministic fault injection: start the real wrapper, wait until it has
+  // extracted and launched the app (the point where a beforeEach is most likely
+  // to give up), then run the same teardown afterEach uses — without any CDP
+  // connection or inner launch ever happening. Nothing must be left behind.
+  test('aborted launch after extraction leaves no wrapper or extracted processes', async () => {
+    const portableExe = await findPortableExe();
+    const root = await mkdtemp(join(tmpdir(), 'smo-abort-e2e-'));
+    const state: PackagedLaunchState = {};
+    try {
+      const dataDirectory = join(root, 'data');
+      const outputDirectory = join(root, 'output');
+      await mkdir(dataDirectory, { recursive: true });
+      await mkdir(outputDirectory, { recursive: true });
+
+      state.wrapper = spawn(
+        portableExe,
+        ['--disable-gpu', '--no-sandbox', '--disable-setuid-sandbox'],
+        {
+          env: {
+            ...process.env,
+            SMO_DATA_DIRECTORY: dataDirectory,
+            SMO_OUTPUT_DIRECTORY: outputDirectory,
+            SMO_COMFYUI_BASE_URL: 'http://127.0.0.1:65534',
+          },
+          stdio: 'ignore',
+        },
+      );
+      state.innerExe = await waitForChildExe(state.wrapper, 90_000);
+      state.extractionRoot = dirname(state.innerExe);
+
+      const captured = { ...state };
+      // Simulated failed beforeEach: abort right after extraction.
+      await cleanupPackagedLaunch(state);
+      // The teardown is idempotent; a second pass must be a no-op.
+      await cleanupPackagedLaunch(state);
+
+      expect(captured.wrapper!.exitCode).not.toBeNull();
+      expect(await countProcessesUnder(captured.extractionRoot!)).toBe(0);
+    } finally {
+      await cleanupPackagedLaunch(state);
+      await removeTempDirectory(root);
     }
   });
 });
