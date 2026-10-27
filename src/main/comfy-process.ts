@@ -1,6 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { open, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { ComfyClient, ComfySystemStats } from './comfy';
 
 export const DEFAULT_COMFY_ROOT =
@@ -9,8 +8,38 @@ export const DEFAULT_COMFY_ROOT =
 const DEFAULT_STARTUP_TIMEOUT_MS = 180_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const LOG_TAIL_LENGTH = 2_000;
+const INNER_LAUNCHER_FILE_NAME = 'start-comfyui.cmd';
+const HIDDEN_LAUNCHER_FILE_NAME = 'start-comfyui-hidden.cmd';
+const PATHS_FILE_NAME = 'start-comfyui.paths';
 
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+// Paths are passed to the launcher through a generated KEY=VALUE file instead
+// of batch arguments or embedded literals: the .cmd reads it with `for /f`
+// AFTER switching to UTF-8 (chcp 65001), so non-ASCII paths survive any
+// default console codepage, and `set "KEY=VALUE"` stores values verbatim
+// (delayed expansion stays disabled, so no % or ! escaping is needed).
+const LAUNCHER_ENV = {
+  root: 'SMO_COMFY_ROOT_DIR',
+  python: 'SMO_COMFY_PYTHON',
+  launch: 'SMO_COMFY_LAUNCH',
+  port: 'SMO_COMFY_PORT',
+  log: 'SMO_COMFY_LOG',
+  status: 'SMO_COMFY_STATUS',
+} as const;
+
+// The backend must never be a handle-inheriting child of the app: on Windows,
+// child_process.spawn passes bInheritHandles=TRUE, which leaks every
+// inheritable handle (e.g. a test runner's transport pipe) into the detached
+// python tree and hangs tools waiting on pipe EOF. Electron's shell.openPath
+// goes through ShellExecuteEx instead, so the backend process tree inherits
+// nothing. The hidden wrapper detaches the real launcher via `start /min` so
+// openPath returns immediately; the inner launcher records the backend exit
+// code in a status file before exiting.
+async function defaultOpenLauncher(path: string): Promise<string> {
+  const { shell } = await import('electron');
+  return shell.openPath(path);
+}
 
 export interface ComfyProcessManagerOptions {
   baseUrl: string;
@@ -20,7 +49,7 @@ export interface ComfyProcessManagerOptions {
   logPath: string;
   startupTimeoutMs?: number;
   pollIntervalMs?: number;
-  spawnProcess?: typeof spawn;
+  openLauncher?: (path: string) => Promise<string>;
 }
 
 function validateTimeout(value: number, name: string): number {
@@ -41,25 +70,57 @@ function displayUrl(baseUrl: URL): string {
   return url.toString();
 }
 
-interface ChildExitState {
-  exitCode: number | null;
-  exitSignal: NodeJS.Signals | null;
-  spawnFailure: Error | null;
+function validateLaunchPath(value: string, name: string): string {
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`ComfyUI ${name} must not contain CR or LF characters`);
+  }
+  return value;
 }
 
-interface ActiveChild {
-  child: ChildProcess;
-  state: ChildExitState;
+function buildInnerLauncherScript(): string {
+  const lines = [
+    '@echo off',
+    'setlocal DisableDelayedExpansion',
+    'chcp 65001>nul',
+    `for /f "usebackq delims=" %%L in ("%~dp0${PATHS_FILE_NAME}") do set "%%L"`,
+    `cd /d "%${LAUNCHER_ENV.root}%"`,
+    `"%${LAUNCHER_ENV.python}%" -I -X utf8 "%${LAUNCHER_ENV.launch}%" --lowvram --port %${LAUNCHER_ENV.port}% >> "%${LAUNCHER_ENV.log}%" 2>&1`,
+    `set "RESULT=%errorlevel%"`,
+    `>"%${LAUNCHER_ENV.status}%" echo %RESULT%`,
+    'exit /b %RESULT%',
+  ];
+  return `${lines.join('\r\n')}\r\n`;
 }
 
-function isChildDead(entry: ActiveChild): boolean {
-  return (
-    entry.state.spawnFailure !== null ||
-    entry.state.exitCode !== null ||
-    entry.state.exitSignal !== null ||
-    entry.child.exitCode !== null ||
-    entry.child.signalCode !== null
-  );
+function buildHiddenLauncherScript(innerLauncherPath: string): string {
+  const lines = [
+    '@echo off',
+    `start "" /min "${innerLauncherPath}"`,
+  ];
+  return `${lines.join('\r\n')}\r\n`;
+}
+
+function buildPathsFile(input: {
+  rootDirectory: string;
+  pythonPath: string;
+  launchScript: string;
+  port: string;
+  logPath: string;
+  statusPath: string;
+}): string {
+  const lines = [
+    `${LAUNCHER_ENV.root}=${input.rootDirectory}`,
+    `${LAUNCHER_ENV.python}=${input.pythonPath}`,
+    `${LAUNCHER_ENV.launch}=${input.launchScript}`,
+    `${LAUNCHER_ENV.port}=${input.port}`,
+    `${LAUNCHER_ENV.log}=${input.logPath}`,
+    `${LAUNCHER_ENV.status}=${input.statusPath}`,
+  ];
+  return `${lines.join('\r\n')}\r\n`;
+}
+
+interface ActiveStartup {
+  startedAt: number;
 }
 
 export class ComfyProcessManager {
@@ -68,12 +129,13 @@ export class ComfyProcessManager {
   private readonly pythonPath: string;
   private readonly launchScript: string;
   private readonly logPath: string;
+  private readonly statusPath: string;
   private readonly startupTimeoutMs: number;
   private readonly pollIntervalMs: number;
-  private readonly spawnProcess: typeof spawn;
+  private readonly openLauncher: (path: string) => Promise<string>;
   private readonly client: Pick<ComfyClient, 'health'>;
   private startPromise: Promise<ComfySystemStats> | null = null;
-  private activeChild: ActiveChild | null = null;
+  private activeStartup: ActiveStartup | null = null;
   private closed = false;
 
   constructor(
@@ -99,6 +161,7 @@ export class ComfyProcessManager {
     this.launchScript =
       options.launchScript ?? join(this.rootDirectory, 'tools', 'launch.py');
     this.logPath = options.logPath;
+    this.statusPath = `${options.logPath}.exit`;
     this.startupTimeoutMs = validateTimeout(
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
       'startupTimeoutMs',
@@ -107,7 +170,7 @@ export class ComfyProcessManager {
       options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
       'pollIntervalMs',
     );
-    this.spawnProcess = options.spawnProcess ?? spawn;
+    this.openLauncher = options.openLauncher ?? defaultOpenLauncher;
     this.client = client;
   }
 
@@ -145,112 +208,110 @@ export class ComfyProcessManager {
   }
 
   async close(): Promise<void> {
+    // Never kill the backend: it outlives the app by design.
     this.closed = true;
   }
 
   private async startAndWait(): Promise<ComfySystemStats> {
-    let entry = this.activeChild;
-    if (entry !== null && isChildDead(entry)) {
-      this.activeChild = null;
-      entry = null;
-    }
-    if (entry === null) {
-      entry = await this.spawnChild();
+    // Reuse a startup that is still in flight; only a recorded exit (or the
+    // absence of any startup) allows launching a new backend process.
+    if (this.activeStartup === null || (await this.readExitCode()) !== null) {
+      await this.launchBackend();
     }
     try {
-      const stats = await this.waitUntilHealthy(entry.child, entry.state);
-      this.activeChild = null;
+      const stats = await this.waitUntilHealthy();
+      this.activeStartup = null;
       return stats;
     } catch (error) {
-      // Keep a live child for the next retry; only drop confirmed-dead ones.
-      if (isChildDead(entry)) {
-        this.activeChild = null;
+      // A recorded exit means the backend is gone; drop the marker so the
+      // next attempt launches a fresh process. A timeout (no exit record)
+      // keeps the marker so the retry waits on the same backend.
+      if ((await this.readExitCode()) !== null) {
+        this.activeStartup = null;
       }
       throw error;
     }
   }
 
-  private async spawnChild(): Promise<ActiveChild> {
+  private async launchBackend(): Promise<void> {
     const port =
       this.baseUrl.port.length > 0
         ? this.baseUrl.port
         : this.baseUrl.protocol === 'https:'
           ? '443'
           : '80';
-    const logHandle = await open(this.logPath, 'a');
+    validateLaunchPath(this.rootDirectory, 'root directory');
+    validateLaunchPath(this.pythonPath, 'python path');
+    validateLaunchPath(this.launchScript, 'launch script');
+    validateLaunchPath(this.logPath, 'log path');
+
+    const logDirectory = dirname(this.logPath);
+    // The log directory (e.g. <data>/logs) may not exist on a fresh data root.
+    await mkdir(logDirectory, { recursive: true });
     if (this.closed) {
-      await logHandle.close().catch(() => undefined);
       throw new Error('ComfyProcessManager is closed');
     }
-    let child: ChildProcess;
-    try {
-      child = this.spawnProcess(
-        this.pythonPath,
-        ['-I', '-X', 'utf8', this.launchScript, '--lowvram', '--port', port],
-        {
-          cwd: this.rootDirectory,
-          detached: true,
-          windowsHide: true,
-          stdio: ['ignore', logHandle.fd, logHandle.fd],
-        },
-      );
-    } catch (error) {
-      await logHandle.close().catch(() => undefined);
-      throw error instanceof Error
-        ? error
-        : new Error('Failed to start the ComfyUI process');
+    const innerLauncherPath = join(logDirectory, INNER_LAUNCHER_FILE_NAME);
+    const hiddenLauncherPath = join(logDirectory, HIDDEN_LAUNCHER_FILE_NAME);
+    const pathsPath = join(logDirectory, PATHS_FILE_NAME);
+    await writeFile(innerLauncherPath, buildInnerLauncherScript(), 'utf8');
+    await writeFile(
+      pathsPath,
+      buildPathsFile({
+        rootDirectory: this.rootDirectory,
+        pythonPath: this.pythonPath,
+        launchScript: this.launchScript,
+        port,
+        logPath: this.logPath,
+        statusPath: this.statusPath,
+      }),
+      'utf8',
+    );
+    await writeFile(
+      hiddenLauncherPath,
+      buildHiddenLauncherScript(innerLauncherPath),
+      'utf8',
+    );
+    // A stale exit marker from a previous backend must not poison this start.
+    await rm(this.statusPath, { force: true });
+    if (this.closed) {
+      throw new Error('ComfyProcessManager is closed');
     }
-    child.unref();
-    // Listeners stay attached for the child's lifetime so a late 'error'
-    // event on the detached process can never go unhandled.
-    const state: ChildExitState = {
-      exitCode: null,
-      exitSignal: null,
-      spawnFailure: null,
-    };
-    child.once('exit', (code, signal) => {
-      state.exitCode = code;
-      state.exitSignal = signal;
-    });
-    child.once('error', (error) => {
-      state.spawnFailure = error;
-    });
-    await logHandle.close().catch(() => undefined);
-    const entry: ActiveChild = { child, state };
-    this.activeChild = entry;
-    return entry;
+
+    const failure = await this.openLauncher(hiddenLauncherPath);
+    if (failure.length > 0) {
+      throw new Error(`Failed to start the ComfyUI process: ${failure}`);
+    }
+    this.activeStartup = { startedAt: Date.now() };
   }
 
-  private async waitUntilHealthy(
-    child: ChildProcess,
-    state: ChildExitState,
-  ): Promise<ComfySystemStats> {
+  private async readExitCode(): Promise<number | null> {
+    let content: string;
+    try {
+      content = await readFile(this.statusPath, 'utf8');
+    } catch {
+      return null;
+    }
+    const code = Number.parseInt(content.trim(), 10);
+    return Number.isInteger(code) ? code : null;
+  }
+
+  private async waitUntilHealthy(): Promise<ComfySystemStats> {
     const deadline = Date.now() + this.startupTimeoutMs;
     for (;;) {
       if (this.closed) {
         throw new Error('ComfyProcessManager is closed');
       }
-      if (state.spawnFailure !== null) {
-        throw await this.startupError(
-          `ComfyUI process failed: ${state.spawnFailure.message}`,
-        );
-      }
-      if (
-        state.exitCode !== null ||
-        state.exitSignal !== null ||
-        child.exitCode !== null ||
-        child.signalCode !== null
-      ) {
-        const detail =
-          state.exitSignal !== null || child.signalCode !== null
-            ? `signal ${state.exitSignal ?? child.signalCode}`
-            : `code ${state.exitCode ?? child.exitCode}`;
-        throw await this.startupError(`ComfyUI process exited early (${detail})`);
-      }
       try {
         return await this.client.health();
       } catch {
-        // ComfyUI is not up yet; keep polling.
+        // ComfyUI is not up yet; check whether the backend died starting.
+      }
+      const exitCode = await this.readExitCode();
+      if (exitCode !== null) {
+        throw await this.startupError(
+          `ComfyUI process exited early (code ${exitCode})`,
+        );
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
