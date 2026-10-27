@@ -586,6 +586,40 @@ describe('settings page LLM configuration', () => {
     });
   });
 
+  test('enables model discovery before a model is chosen', async () => {
+    smo.llm.getProfile.mockResolvedValue(null);
+    smo.llm.listModels.mockResolvedValue(['model-a', 'model-b']);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByText('未配置 LLM');
+
+    expect(screen.getByRole('button', { name: '获取模型' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '保存设置' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '测试模型' })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('服务地址'), {
+      target: { value: 'https://api.example.com/v1' },
+    });
+    fireEvent.change(screen.getByLabelText('API 密钥'), { target: { value: 'sk-live' } });
+
+    expect(screen.getByRole('button', { name: '获取模型' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '保存设置' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '测试模型' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '获取模型' }));
+
+    expect(await screen.findByRole('listbox')).toBeInTheDocument();
+    expect(smo.llm.listModels).toHaveBeenCalledWith({
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'sk-live',
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'model-b' }));
+    expect(screen.getByDisplayValue('model-b')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存设置' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '测试模型' })).toBeEnabled();
+  });
+
   test('tests the model and shows latency plus summary', async () => {
     smo.llm.getProfile.mockResolvedValue({
       baseUrl: 'https://api.example.com/v1',

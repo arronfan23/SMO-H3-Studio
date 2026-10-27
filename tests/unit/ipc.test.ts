@@ -454,6 +454,40 @@ describe('IPC input schema', () => {
     },
   );
 
+  test('accepts a model discovery request without a model selection', () => {
+    const request = {
+      channel: 'llm:listModels',
+      payload: { baseUrl: 'https://example.com/v1', apiKey: 'renderer-key' },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([
+    {
+      channel: 'llm:listModels',
+      payload: { apiKey: 'renderer-key' },
+      pattern: /base URL|invalid/i,
+    },
+    {
+      channel: 'llm:listModels',
+      payload: { baseUrl: 'https://example.com/v1', model: ' ' },
+      pattern: /empty/i,
+    },
+    {
+      channel: 'llm:testModel',
+      payload: { baseUrl: 'https://example.com/v1', apiKey: 'renderer-key' },
+      pattern: /string|empty/i,
+    },
+  ])(
+    'rejects incomplete model discovery/test input on $channel',
+    ({ channel, payload, pattern }) => {
+      expect(() =>
+        createIpcSchema().parse({ channel, payload }),
+      ).toThrow(pattern);
+    },
+  );
+
   test.each([
     { channel: 'llm:listModels', payload: { apiKey: 'renderer-key' } },
     { channel: 'llm:testModel', payload: { apiKey: 'renderer-key' } },
@@ -791,6 +825,36 @@ describe('main-process IPC handlers', () => {
       }),
     ).resolves.toEqual(['model-a']);
 
+    await expect(harness.llmConfig.getCredentials()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+  });
+
+  test('llm:listModels discovers models without a model selection', async () => {
+    const listModels = vi.fn(async () => ['model-a', 'model-b']);
+    const harness = await createHarness({
+      llm: { listModels, testModel: async () => ({ ok: true as const, latencyMs: 10, summary: 'OK' }) },
+    });
+    const apiKey = 'sk-preserved';
+
+    await harness.invoke('llm:saveProfile', {
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey,
+    });
+
+    await expect(
+      harness.invoke('llm:listModels', {
+        baseUrl: 'https://draft.example.com/v1',
+      }),
+    ).resolves.toEqual(['model-a', 'model-b']);
+
+    expect(listModels).toHaveBeenCalledWith({
+      baseUrl: 'https://draft.example.com/v1',
+      apiKey,
+    });
     await expect(harness.llmConfig.getCredentials()).resolves.toEqual({
       baseUrl: 'https://saved.example.com/v1',
       model: 'saved-model',

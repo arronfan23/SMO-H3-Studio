@@ -76,7 +76,8 @@ export function SettingsPage() {
     };
   }, [refresh]);
 
-  const canSave = baseUrl.trim().length > 0 && model.trim().length > 0;
+  const canListModels = baseUrl.trim().length > 0;
+  const canSave = canListModels && model.trim().length > 0;
 
   const save = async (): Promise<void> => {
     if (!canSave) {
@@ -108,14 +109,15 @@ export function SettingsPage() {
   };
 
   const listModels = async (): Promise<void> => {
-    if (!canSave) {
+    if (!canListModels) {
       return;
     }
     setLlmStatus({ kind: 'loading', message: '正在获取模型列表…' });
     try {
+      const trimmedModel = model.trim();
       const models = await window.smo.llm.listModels({
         baseUrl: baseUrl.trim(),
-        model: model.trim(),
+        ...(trimmedModel.length > 0 ? { model: trimmedModel } : {}),
         apiKey: apiKey.trim(),
       });
       if (mountedRef.current) {
@@ -449,7 +451,7 @@ export function SettingsPage() {
               <button
                 className="button button-secondary"
                 type="button"
-                disabled={!canSave}
+                disabled={!canListModels}
                 onClick={() => void listModels()}
               >
                 <Search size={16} aria-hidden="true" />

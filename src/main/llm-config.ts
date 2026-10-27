@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { LlmCredentials, LlmProfile } from '../shared/types';
+import type {
+  LlmConnection,
+  LlmCredentials,
+  LlmDiscoveryInput,
+  LlmProfile,
+} from '../shared/types';
 import {
   decryptSecret,
   encryptSecret,
@@ -18,6 +23,7 @@ interface StoredLlmConfig {
 export interface LlmConfigStore {
   save(credentials: LlmCredentials): Promise<void>;
   saveProfile(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials>;
+  resolveConnection(input: LlmDiscoveryInput): Promise<LlmConnection>;
   resolveCredentials(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials>;
   getProfile(): Promise<LlmProfile | null>;
   getCredentials(): Promise<LlmCredentials | null>;
@@ -97,21 +103,24 @@ export class FileLlmConfigStore implements LlmConfigStore {
 
   async resolveCredentials(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials> {
     const baseUrl = input.baseUrl.trim();
-    const model = input.model.trim();
+    const model = input.model?.trim() ?? '';
     if (baseUrl.length === 0 || model.length === 0) {
       throw new Error('LLM base URL and model are required');
     }
 
-    let apiKey = input.apiKey?.trim() ?? '';
-    if (apiKey.length === 0) {
-      const existing = await this.getCredentials();
-      if (existing === null) {
-        throw new Error('API key is required for the first LLM configuration');
-      }
-      apiKey = existing.apiKey;
+    const apiKey = await this.resolveApiKey(input.apiKey);
+    return { baseUrl, model, apiKey };
+  }
+
+  async resolveConnection(input: LlmDiscoveryInput): Promise<LlmConnection> {
+    const baseUrl = input.baseUrl.trim();
+    if (baseUrl.length === 0) {
+      throw new Error('LLM base URL is required');
     }
 
-    return { baseUrl, model, apiKey };
+    const apiKey = await this.resolveApiKey(input.apiKey);
+    const model = input.model?.trim() ?? '';
+    return model.length > 0 ? { baseUrl, model, apiKey } : { baseUrl, apiKey };
   }
 
   async getProfile(): Promise<LlmProfile | null> {
@@ -149,5 +158,17 @@ export class FileLlmConfigStore implements LlmConfigStore {
     } catch {
       throw new Error('Unable to read LLM configuration');
     }
+  }
+
+  private async resolveApiKey(apiKeyInput: string | undefined): Promise<string> {
+    let apiKey = apiKeyInput?.trim() ?? '';
+    if (apiKey.length === 0) {
+      const existing = await this.getCredentials();
+      if (existing === null) {
+        throw new Error('API key is required for the first LLM configuration');
+      }
+      apiKey = existing.apiKey;
+    }
+    return apiKey;
   }
 }

@@ -55,6 +55,18 @@ export interface LlmCredentials extends LlmProfile {
   apiKey: string;
 }
 
+export interface LlmDiscoveryInput {
+  baseUrl: string;
+  model?: string;
+  apiKey?: string;
+}
+
+export interface LlmConnection {
+  baseUrl: string;
+  apiKey: string;
+  model?: string;
+}
+
 export type HardwarePreset =
   | 'conservative'
   | 'balanced-16gb'

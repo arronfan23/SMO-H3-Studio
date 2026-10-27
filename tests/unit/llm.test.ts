@@ -93,6 +93,25 @@ describe('LlmService model discovery', () => {
       /invalid model list/i,
     );
   });
+
+  test('does not depend on a selected model for discovery', async () => {
+    const upstream = await useUpstream((_request, response) => {
+      json(response, { data: [{ id: 'model-a' }] });
+    });
+
+    const models = await new LlmService().listModels({
+      baseUrl: `${upstream.baseUrl}/v1`,
+      apiKey: API_KEY,
+      model: 'ignored-model',
+    });
+
+    expect(models).toEqual(['model-a']);
+    expect(upstream.requests[0]).toMatchObject({
+      method: 'GET',
+      url: '/v1/models',
+      body: '',
+    });
+  });
 });
 
 describe('LlmService chat completions', () => {

@@ -1,9 +1,6 @@
-import type { LlmCredentials, LlmProfile } from '../shared/types';
+import type { LlmConnection, LlmCredentials } from '../shared/types';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
-
-export type LlmConnection = Pick<LlmCredentials, 'baseUrl' | 'apiKey'> &
-  Partial<Pick<LlmProfile, 'model'>>;
 
 export interface LlmChatMessage {
   role: 'system' | 'user' | 'assistant';

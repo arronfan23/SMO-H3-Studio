@@ -94,7 +94,7 @@ async function dispatch(
     }
     case 'llm:listModels':
       return services.llm.listModels(
-        await services.llmConfig.resolveCredentials(request.payload),
+        await services.llmConfig.resolveConnection(request.payload),
       );
     case 'llm:testModel':
       return services.llm.testModel(

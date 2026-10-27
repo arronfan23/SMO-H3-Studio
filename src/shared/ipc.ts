@@ -10,6 +10,7 @@ import type {
   HardwareRecommendationInput,
   VideoMode,
   LlmProfile,
+  LlmDiscoveryInput,
   Work,
 } from './types';
 
@@ -101,6 +102,14 @@ const llmProfileInputSchema = z
     apiKey: z.string().optional(),
   })
   .strict();
+
+const llmDiscoveryInputSchema = z
+  .object({
+    baseUrl: httpUrlSchema,
+    model: nonEmptyString.optional(),
+    apiKey: z.string().optional(),
+  })
+  .strict() satisfies z.ZodType<LlmDiscoveryInput>;
 
 const polishRequestSchema = z
   .object({
@@ -205,7 +214,7 @@ export function createIpcSchema() {
     ),
     requestSchema('llm:saveProfile', llmProfileInputSchema),
     requestSchema('llm:getProfile', emptyPayload),
-    requestSchema('llm:listModels', llmProfileInputSchema),
+    requestSchema('llm:listModels', llmDiscoveryInputSchema),
     requestSchema('llm:testModel', llmProfileInputSchema),
     requestSchema('llm:polish', polishRequestSchema),
     requestSchema('avatars:list', emptyPayload),
@@ -279,7 +288,7 @@ export interface SmoApi {
   readonly llm: {
     saveProfile(input: LlmProfile & { apiKey?: string }): Promise<void>;
     getProfile(): Promise<LlmProfile | null>;
-    listModels(input: LlmProfile & { apiKey?: string }): Promise<string[]>;
+    listModels(input: LlmDiscoveryInput): Promise<string[]>;
     testModel(input: LlmProfile & { apiKey?: string }): Promise<LlmTestResult>;
     polish(request: LlmPolishInput): Promise<PolishResult>;
   };
