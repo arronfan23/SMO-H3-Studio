@@ -2,12 +2,13 @@
 
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { app, dialog } from 'electron';
 import {
   createAppServices,
   resolveStringOption,
@@ -22,6 +23,7 @@ const { protocolRegisterFileProtocol } = vi.hoisted(() => ({
 }));
 
 vi.mock('electron', () => ({
+  app: { isPackaged: false },
   dialog: { showOpenDialog: vi.fn() },
   ipcMain: { handle: vi.fn() },
   protocol: { registerFileProtocol: protocolRegisterFileProtocol },
@@ -73,6 +75,9 @@ afterEach(async () => {
   delete process.env.SMO_COMFYUI_BASE_URL;
   delete process.env.SMO_DATA_DIRECTORY;
   delete process.env.SMO_OUTPUT_DIRECTORY;
+  delete process.env.SMO_TEST_FILE_DIALOG;
+  Object.defineProperty(app, 'isPackaged', { value: false, configurable: true });
+  vi.mocked(dialog.showOpenDialog).mockReset();
 });
 
 describe('createAppServices defaults', () => {
@@ -122,6 +127,37 @@ describe('createAppServices defaults', () => {
       system: { os: 'default' },
       devices: [],
     });
+  });
+});
+
+describe('createAppServices test file dialog env', () => {
+  test('unpackaged app uses SMO_TEST_FILE_DIALOG paths', async () => {
+    const dataDirectory = await useDataDirectory();
+    const testImagePath = join(dataDirectory, 'test.png');
+    await writeFile(testImagePath, Buffer.from('dummy'));
+    process.env.SMO_TEST_FILE_DIALOG = JSON.stringify([testImagePath]);
+
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+
+    await expect(services.files.selectImage()).resolves.toBe(testImagePath);
+    expect(dialog.showOpenDialog).not.toHaveBeenCalled();
+  });
+
+  test('packaged app ignores SMO_TEST_FILE_DIALOG and uses system dialog', async () => {
+    const dataDirectory = await useDataDirectory();
+  const testImagePath = join(dataDirectory, 'test.png');
+  await writeFile(testImagePath, Buffer.from('dummy'));
+  process.env.SMO_TEST_FILE_DIALOG = JSON.stringify([testImagePath]);
+  Object.defineProperty(app, 'isPackaged', { value: true, configurable: true });
+
+    vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: true, filePaths: [] });
+
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+
+    await expect(services.files.selectImage()).resolves.toBeNull();
+    expect(dialog.showOpenDialog).toHaveBeenCalled();
   });
 });
 

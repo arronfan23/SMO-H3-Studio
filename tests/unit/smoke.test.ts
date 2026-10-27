@@ -82,7 +82,7 @@ describe('desktop shell manifest', () => {
       build: 'electron-vite build',
       test: 'vitest run',
       'test:e2e': 'npm run build && playwright test',
-      typecheck: 'tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.renderer.json',
+      typecheck: 'tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.e2e.json',
       assets: 'node scripts/prepare-brand.mjs && node scripts/build-workflows.mjs',
       pack: 'npm run build && electron-builder --win portable',
     });

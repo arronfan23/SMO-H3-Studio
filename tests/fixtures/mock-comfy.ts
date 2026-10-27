@@ -106,34 +106,23 @@ async function createSampleMp4(
   ffmpegPath?: string,
 ): Promise<void> {
   await mkdir(dirname(outputPath), { recursive: true });
-  if (ffmpegPath) {
-    try {
-      await execFileAsync(ffmpegPath, [
-        '-y',
-        '-f',
-        'lavfi',
-        '-i',
-        'testsrc=duration=1:size=320x180:rate=24',
-        '-f',
-        'lavfi',
-        '-i',
-        'sine=frequency=1000:duration=1',
-        '-pix_fmt',
-        'yuv420p',
-        outputPath,
-      ]);
-      return;
-    } catch {
-      // Fall through to dummy file.
-    }
+  if (!ffmpegPath) {
+    throw new Error(`FFmpeg path not provided; cannot generate sample MP4 at ${outputPath}`);
   }
-  // Minimal MP4-like file so the path exists and has a plausible extension.
-  const ftyp = Buffer.from([
-    0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
-    0x00, 0x00, 0x00, 0x00, 0x69, 0x73, 0x6f, 0x6d, 0x6d, 0x70, 0x34, 0x31,
+  await execFileAsync(ffmpegPath, [
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc=duration=1:size=320x180:rate=24',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=1000:duration=1',
+    '-pix_fmt',
+    'yuv420p',
+    outputPath,
   ]);
-  const mdatHeader = Buffer.from([0x00, 0x00, 0x00, 0x08, 0x6d, 0x64, 0x61, 0x74]);
-  await writeFile(outputPath, Buffer.concat([ftyp, mdatHeader, Buffer.alloc(64)]));
 }
 
 function outputNodeFromPrompt(prompt: Record<string, unknown>): string | null {

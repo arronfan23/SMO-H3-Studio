@@ -28,6 +28,7 @@ const { ipcMainHandle, protocolRegisterFileProtocol } = vi.hoisted(() => ({
 }));
 
 vi.mock('electron', () => ({
+  app: { isPackaged: false },
   dialog: { showOpenDialog: vi.fn() },
   ipcMain: { handle: ipcMainHandle },
   protocol: { registerFileProtocol: protocolRegisterFileProtocol },

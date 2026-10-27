@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dialog, protocol, shell } from 'electron';
+import { app, dialog, protocol, shell } from 'electron';
 import type { GenerationHandler, IpcServices } from './ipc';
 import { AvatarService } from './avatars';
 import { ComfyClient } from './comfy';
@@ -72,7 +72,7 @@ const defaultErrorReporter: JobEventErrorHandler = (error, event) => {
 
 function createTestFileDialog(): FileDialog | undefined {
   const raw = process.env.SMO_TEST_FILE_DIALOG;
-  if (!raw) {
+  if (app.isPackaged || !raw) {
     return undefined;
   }
   let paths: string[];

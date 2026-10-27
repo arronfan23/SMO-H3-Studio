@@ -57,9 +57,13 @@ test('Electron app starts with isolated env and exposes window.smo domains', asy
       await expect(
         window.evaluate(
           ({ domain: d, methods: ms }) => {
-            const api = (window as unknown as Record<string, Record<string, unknown>>).smo?.[d];
-            if (api === undefined || typeof api !== 'object') return 'missing-domain';
-            return ms.map((m) => (typeof api[m] === 'function' ? 'function' : typeof api[m]));
+           const api = (window as unknown as Record<string, Record<string, unknown>>).smo?.[d];
+            if (api == null || typeof api !== 'object') return 'missing-domain';
+            return ms.map((m) =>
+              typeof (api as Record<string, unknown>)[m] === 'function'
+                ? 'function'
+                : typeof (api as Record<string, unknown>)[m],
+            );
           },
           { domain, methods },
         ),

@@ -10,6 +10,7 @@ const { protocolRegisterFileProtocol } = vi.hoisted(() => ({
 }));
 
 vi.mock('electron', () => ({
+  app: { isPackaged: false },
   dialog: { showOpenDialog: vi.fn() },
   ipcMain: { handle: vi.fn() },
   protocol: { registerFileProtocol: protocolRegisterFileProtocol },

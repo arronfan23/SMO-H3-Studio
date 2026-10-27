@@ -1,12 +1,17 @@
 // @vitest-environment node
 
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   createFfprobeDurationReader,
   DEFAULT_FFPROBE_PATH,
 } from '../../src/main/audio-duration';
 
 describe('ffprobe audio duration reader', () => {
+  afterEach(() => {
+    delete process.env.SMO_FFPROBE_PATH;
+    delete process.env.SMO_FFMPEG_PATH;
+  });
+
   test('uses the fixed H3 executable, arguments, and timeout', async () => {
     const execute = vi.fn(async () => ({ stdout: '12.5\n' }));
     const reader = createFfprobeDurationReader({ execute });
@@ -45,5 +50,47 @@ describe('ffprobe audio duration reader', () => {
     });
 
     await expect(reader('voice.mp3')).rejects.toThrow(/ffprobe.*timed out/i);
+  });
+
+  test('uses SMO_FFPROBE_PATH env when no explicit ffprobePath option', async () => {
+    process.env.SMO_FFPROBE_PATH = 'C:\\custom\\ffprobe.exe';
+    const execute = vi.fn(async () => ({ stdout: '5\n' }));
+    const reader = createFfprobeDurationReader({ execute });
+
+    await reader('voice.mp3');
+
+    expect(execute).toHaveBeenCalledWith(
+      'C:\\custom\\ffprobe.exe',
+      expect.any(Array),
+      expect.any(Object),
+    );
+  });
+
+  test('derives ffprobe path from SMO_FFMPEG_PATH env', async () => {
+    process.env.SMO_FFMPEG_PATH = 'C:\\tools\\ffmpeg.exe';
+    const execute = vi.fn(async () => ({ stdout: '7\n' }));
+    const reader = createFfprobeDurationReader({ execute });
+
+    await reader('voice.mp3');
+
+    expect(execute).toHaveBeenCalledWith(
+      'C:\\tools\\ffprobe.exe',
+      expect.any(Array),
+      expect.any(Object),
+    );
+  });
+
+  test('explicit ffprobePath option takes precedence over env', async () => {
+    process.env.SMO_FFPROBE_PATH = 'C:\\env\\ffprobe.exe';
+    const execute = vi.fn(async () => ({ stdout: '9\n' }));
+    const reader = createFfprobeDurationReader({ execute, ffprobePath: 'C:\\opt\\ffprobe.exe' });
+
+    await reader('voice.mp3');
+
+    expect(execute).toHaveBeenCalledWith(
+      'C:\\opt\\ffprobe.exe',
+      expect.any(Array),
+      expect.any(Object),
+    );
   });
 });

@@ -14,6 +14,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
 const TEST_LLM_API_KEY = 'smo-e2e-test-key';
 
+interface SmoGlobal {
+  smo: {
+    works: {
+      list: () => Promise<Array<{ id: string; status: string; metadata?: { retryOf?: string } }>>;
+    };
+  };
+}
+
 const FFMPEG_PATH =
   process.env.SMO_FFMPEG_PATH ??
   'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\tools\\ffmpeg\\ffmpeg.exe';
@@ -77,40 +85,35 @@ async function launchApp(options: LaunchAppOptions): Promise<ElectronApplication
   });
 }
 
-function collectDiagnostics(
+function attachMainProcessLogs(
   app: ElectronApplication,
-  window: Page,
+  mainProcessRaw: (Buffer | string)[],
+): void {
+  const proc = app.process();
+  const push = (data: Buffer | string) => mainProcessRaw.push(data);
+  proc.stdout?.on('data', push);
+  proc.stderr?.on('data', push);
+}
+
+function attachRendererLogs(
+  page: Page,
   pageErrors: Error[],
   consoleErrors: string[],
   rendererLogs: string[],
-  mainProcessLogs: string[],
 ): void {
-  window.on('pageerror', (error) => {
-    pageErrors.push(error);
-  });
-  window.on('console', (message) => {
+  page.on('pageerror', (error) => pageErrors.push(error));
+  page.on('console', (message) => {
     const text = message.text();
     rendererLogs.push(text);
     if (message.type() === 'error') {
       consoleErrors.push(text);
     }
   });
-
-  const process = app.process();
-  const appendMainLogs = (data: Buffer) => {
-    const lines = data.toString().split(/\r?\n/);
-    for (const line of lines) {
-      if (line.length > 0) {
-        mainProcessLogs.push(line);
-      }
-    }
-  };
-  process.stdout?.on('data', appendMainLogs);
-  process.stderr?.on('data', appendMainLogs);
 }
 
+
 async function waitForStableStatus(
-  window: Page,
+  page: Page,
   jobId: string,
   status: 'done' | 'failed',
   timeoutMs = 30_000,
@@ -118,7 +121,7 @@ async function waitForStableStatus(
   await expect
     .poll(
       async () => {
-        return window.evaluate((id) => {
+        return page.evaluate((id) => {
           const code = Array.from(document.querySelectorAll('code')).find(
             (candidate) => candidate.textContent === id,
           );
@@ -133,47 +136,89 @@ async function waitForStableStatus(
 
 async function setViewport(
   app: ElectronApplication,
-  window: Page,
+  page: Page,
   width: number,
   height: number,
 ): Promise<void> {
   await app.evaluate(({ BrowserWindow }, { width, height }) => {
     const win = BrowserWindow.getAllWindows()[0];
-    if (win) {
-      win.setSize(width, height);
+    if (!win) {
+      throw new Error('No BrowserWindow found');
     }
+    win.webContents.setZoomFactor(1);
+    win.setContentSize(width, height);
   }, { width, height });
 
-  await window.evaluate(() => new Promise<void>((resolve) => {
-    let lastWidth = window.innerWidth;
-    let lastHeight = window.innerHeight;
-    let stableCount = 0;
-    const check = () => {
-      const currentWidth = window.innerWidth;
-      const currentHeight = window.innerHeight;
-      if (currentWidth === lastWidth && currentHeight === lastHeight) {
-        stableCount++;
-        if (stableCount >= 3) {
-          resolve();
-          return;
+
+  let last: { w: number; h: number } | undefined;
+  await expect
+    .poll(
+      async () => {
+        const current = await page.evaluate(() => ({
+          w: window.innerWidth,
+          h: window.innerHeight,
+        }));
+        if (last && last.w === current.w && last.h === current.h) {
+          return current;
         }
-      } else {
-        stableCount = 0;
-        lastWidth = currentWidth;
-        lastHeight = currentHeight;
-      }
-      requestAnimationFrame(check);
-    };
-    requestAnimationFrame(check);
-  }));
+        last = current;
+        return null;
+      },
+      { timeout: 5_000 },
+    )
+    .toBeTruthy();
+
+  await expect
+    .poll(
+      async () => page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight })),
+      { timeout: 5_000 },
+    )
+    .toEqual(last!);
+}
+
+async function setZoomedViewport(
+  app: ElectronApplication,
+  page: Page,
+  cssWidth: number,
+  cssHeight: number,
+): Promise<void> {
+  await app.evaluate(({ BrowserWindow }, { cssWidth, cssHeight }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) {
+      throw new Error('No BrowserWindow found');
+    }
+    win.webContents.setZoomFactor(2);
+    win.setContentSize(cssWidth * 2, cssHeight * 2);
+  }, { cssWidth, cssHeight });
+
+  await expect
+    .poll(async () => page.evaluate(() => window.innerWidth), { timeout: 5_000 })
+    .toBeLessThanOrEqual(cssWidth + 100);
+}
+
+async function waitForVideoReadyByJobId(page: Page, jobId: string): Promise<void> {
+  const selector = `video[aria-label="作品视频 ${jobId}"]`;
+  await page.waitForFunction(
+    (sel) => {
+      const video = document.querySelector(sel) as HTMLVideoElement | null;
+      return (
+        video !== null &&
+        video.readyState >= 1 &&
+        Number.isFinite(video.duration) &&
+        video.duration > 0
+      );
+    },
+    selector,
+    { timeout: 15_000 },
+  );
 }
 
 async function assertViewLayout(
-  window: Page,
+  page: Page,
   viewName: string,
   selectors: string[],
 ): Promise<void> {
-  const violations = await window.evaluate(
+  const violations = await page.evaluate(
     ({ view, selectors }) => {
       const viewport = { width: window.innerWidth, height: window.innerHeight };
       const results: Array<{
@@ -190,12 +235,13 @@ async function assertViewLayout(
           message: `scrollWidth ${document.documentElement.scrollWidth} > innerWidth ${viewport.width}`,
         });
       }
-      for (const selector of selectors) {
-        const element = document.querySelector(selector);
-        if (!element) {
-          results.push({ view, type: 'missing', selector, message: 'element not found' });
-          continue;
-        }
+     for (const selector of selectors) {
+       const element = document.querySelector(selector);
+       if (!element) {
+         results.push({ view, type: 'missing', selector, message: 'element not found' });
+         continue;
+       }
+        element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         const rect = element.getBoundingClientRect();
         if (rect.left < 0 || rect.right > viewport.width || rect.top < 0 || rect.bottom > viewport.height) {
           results.push({
@@ -221,39 +267,39 @@ async function assertViewLayout(
   expect(violations).toEqual([]);
 }
 
-async function createAvatar(window: Page, name: string): Promise<void> {
-  await window.click('nav[aria-label="主导航"] button:has-text("数字模特")');
-  await expect(window.locator('#avatar-name')).toBeVisible();
-  await window.fill('#avatar-name', name);
-  await window.click('button:has-text("选择照片")');
-  await expect(window.locator('.selected-file')).toHaveText('avatar.png');
-  await window.click('button:has-text("保存模特")');
+async function createAvatar(page: Page, name: string): Promise<void> {
+  await page.click('nav[aria-label="主导航"] button:has-text("数字模特")');
+  await expect(page.locator('#avatar-name')).toBeVisible();
+  await page.fill('#avatar-name', name);
+  await page.click('button:has-text("选择照片")');
+  await expect(page.locator('.selected-file')).toHaveText('avatar.png');
+  await page.click('button:has-text("保存模特")');
 
-  const avatar = window.locator('.avatar-list article').filter({ hasText: name });
+  const avatar = page.locator('.avatar-list article').filter({ hasText: name });
   await expect(avatar).toBeVisible();
   await expect(avatar.getByRole('button', { name: '当前模特' })).toBeDisabled();
 }
 
-async function saveLlmProfile(window: Page, baseUrl: string): Promise<void> {
-  await window.click('nav[aria-label="主导航"] button:has-text("设置")');
-  await expect(window.locator('#llm-base-url')).toBeVisible();
-  await window.fill('#llm-base-url', `${baseUrl}/v1`);
-  await window.fill('#llm-model', 'model-a');
-  await window.fill('#llm-api-key', TEST_LLM_API_KEY);
-  await window.click('button:has-text("保存设置")');
-  await expect(window.locator('h3:has-text("已配置 LLM")')).toBeVisible();
-  await expect(window.locator('#llm-api-key')).toHaveValue('');
+async function saveLlmProfile(page: Page, baseUrl: string): Promise<void> {
+  await page.click('nav[aria-label="主导航"] button:has-text("设置")');
+  await expect(page.locator('#llm-base-url')).toBeVisible();
+  await page.fill('#llm-base-url', `${baseUrl}/v1`);
+  await page.fill('#llm-model', 'model-a');
+  await page.fill('#llm-api-key', TEST_LLM_API_KEY);
+  await page.click('button:has-text("保存设置")');
+  await expect(page.locator('h3:has-text("已配置 LLM")')).toBeVisible();
+  await expect(page.locator('#llm-api-key')).toHaveValue('');
 }
 
-async function openStudio(window: Page, avatarName: string): Promise<void> {
-  await window.click('nav[aria-label="主导航"] button:has-text("制作台")');
+async function openStudio(page: Page, avatarName: string): Promise<void> {
+  await page.click('nav[aria-label="主导航"] button:has-text("制作台")');
   await expect(
-    window.locator(`.person-preview h2:has-text("${avatarName}")`),
+    page.locator(`.person-preview h2:has-text("${avatarName}")`),
   ).toBeVisible();
 }
 
-async function readVisibleTextJobId(window: Page): Promise<string> {
-  const jobId = window.locator(
+async function readVisibleTextJobId(page: Page): Promise<string> {
+  const jobId = page.locator(
     '#text-mode-panel section[aria-label="任务状态"]:visible code',
   );
   await expect(jobId).toHaveText(/^[0-9a-f-]{36}$/);
@@ -262,7 +308,7 @@ async function readVisibleTextJobId(window: Page): Promise<string> {
 
 test.describe('SMO.H3 Studio end-to-end', () => {
   let app: ElectronApplication | undefined;
-  let window: Page | undefined;
+  let page: Page | undefined;
   let tempDirectory: string | undefined;
   let launchOptions: LaunchAppOptions;
   let llmMock: Awaited<ReturnType<typeof startLlmMock>>;
@@ -270,7 +316,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   let pageErrors: Error[] = [];
   let consoleErrors: string[] = [];
   let rendererLogs: string[] = [];
-  let mainProcessLogs: string[] = [];
+  let mainProcessRaw: (Buffer | string)[] = [];
 
   let dataDirectory: string;
   let outputDirectory: string;
@@ -304,15 +350,18 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       comfyBaseUrl: comfyMock.baseUrl,
       fileDialogPaths: [media.imagePath, media.audioPath],
     };
-    app = await launchApp(launchOptions);
-    window = await app.firstWindow();
-    await expect(window).toHaveTitle('SMO.H3 Studio');
-
     pageErrors = [];
     consoleErrors = [];
     rendererLogs = [];
-    mainProcessLogs = [];
-    collectDiagnostics(app!, window!, pageErrors, consoleErrors, rendererLogs, mainProcessLogs);
+    mainProcessRaw = [];
+
+    app = await launchApp(launchOptions);
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    await expect(page).toHaveTitle('SMO.H3 Studio');
   });
 
   test.afterEach(async () => {
@@ -320,7 +369,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await app?.close();
     } finally {
       app = undefined;
-      window = undefined;
+      page = undefined;
       await llmMock?.close();
       await comfyMock?.close();
       if (tempDirectory) {
@@ -334,142 +383,145 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     const diagnosticLog = [
       ...pageErrors.map((error) => error.message),
       ...rendererLogs,
-      ...mainProcessLogs,
+      mainProcessRaw
+        .map((chunk) => (typeof chunk === 'string' ? chunk : chunk.toString()))
+        .join(''),
     ].join('\n');
     expect.soft(diagnosticLog).not.toContain(TEST_LLM_API_KEY);
   });
 
   test('creates and selects an avatar', async () => {
-    await createAvatar(window!, 'E2E Avatar Create');
-    await expect(window!.locator('.avatar-list article')).toHaveCount(1);
+    await createAvatar(page!, 'E2E Avatar Create');
+    await expect(page!.locator('.avatar-list article')).toHaveCount(1);
   });
 
   test('configures LLM profile and tests the model', async () => {
-    await saveLlmProfile(window!, llmMock.baseUrl);
-    await window!.click('button:has-text("获取模型")');
-    await expect(window!.locator('.model-options')).toContainText('model-a', {
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await page!.click('button:has-text("获取模型")');
+    await expect(page!.locator('.model-options')).toContainText('model-a', {
       timeout: 15_000,
     });
-    await expect(window!.locator('.model-options')).toContainText('model-b');
-    await window!.click('button:has-text("测试模型")');
-    await expect(window!.locator('text=测试通过')).toBeVisible({ timeout: 15_000 });
+    await expect(page!.locator('.model-options')).toContainText('model-b');
+    await page!.click('button:has-text("测试模型")');
+    await expect(page!.locator('text=测试通过')).toBeVisible({ timeout: 15_000 });
   });
 
   test('text-to-video with polish', async () => {
     const avatarName = 'E2E Text Avatar';
     const originalText = 'A woman waves and says hello.';
-    await createAvatar(window!, avatarName);
-    await saveLlmProfile(window!, llmMock.baseUrl);
-    await openStudio(window!, avatarName);
+    await createAvatar(page!, avatarName);
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await openStudio(page!, avatarName);
 
-    await window!.fill('#original-text', originalText);
-    await window!.click('button:has-text("AI 润色")');
-    await expect(window!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
-    await expect(window!.locator('#polished-tab')).toHaveAttribute('aria-selected', 'true');
-    const polishedText = await window!.inputValue('#polished-text');
+    await page!.fill('#original-text', originalText);
+    await page!.click('button:has-text("AI 润色")');
+    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await expect(page!.locator('#polished-tab')).toHaveAttribute('aria-selected', 'true');
+    const polishedText = await page!.inputValue('#polished-text');
     expect(polishedText).toContain('subject_definitions:');
 
-    await window!.click('#original-tab');
-    await expect(window!.locator('#original-text')).toHaveValue(originalText);
-    await window!.click('#polished-tab');
-    await expect(window!.locator('#polished-text')).toHaveValue(polishedText);
-    await window!.fill('#polished-text', 'Polished: a woman waves and says hello.');
+    await page!.click('#original-tab');
+    await expect(page!.locator('#original-text')).toHaveValue(originalText);
+    await page!.click('#polished-tab');
+    await expect(page!.locator('#polished-text')).toHaveValue(polishedText);
+    await page!.fill('#polished-text', 'Polished: a woman waves and says hello.');
 
     const previousCount = comfyMock.submittedPromptIds.length;
-    await window!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(window!);
-    await waitForStableStatus(window!, jobId, 'done');
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, jobId, 'done');
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
 
-    await window!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
-    const work = window!.locator('.works-list article').filter({ hasText: jobId });
+    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page!.locator('.works-list article').filter({ hasText: jobId });
     await expect(work).toBeVisible();
     await expect(work).toContainText('已完成');
     await expect(work.locator('video')).toBeVisible();
+    await waitForVideoReadyByJobId(page!, jobId);
   });
 
   test('audio digital human', async () => {
     const avatarName = 'E2E Audio Avatar';
-    await createAvatar(window!, avatarName);
-    await openStudio(window!, avatarName);
-    await window!.click('#audio-mode-tab');
-    await window!.click('button:has-text("选择音频")');
-    await expect(window!.locator('.audio-file')).toContainText('voice.mp3');
-    await expect(window!.locator('audio[src^="smo-media://"]')).toBeVisible();
-    await window!.waitForFunction(() => {
+    await createAvatar(page!, avatarName);
+    await openStudio(page!, avatarName);
+    await page!.click('#audio-mode-tab');
+    await page!.click('button:has-text("选择音频")');
+    await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
+    await expect(page!.locator('audio[src^="smo-media://"]')).toBeVisible();
+    await page!.waitForFunction(() => {
       const audio = document.querySelector('audio');
       return audio !== null && Number.isFinite(audio.duration) && audio.duration > 0;
     });
 
-    await window!.fill('#audio-prompt', 'She speaks with a calm expression.');
+    await page!.fill('#audio-prompt', 'She speaks with a calm expression.');
     const previousCount = comfyMock.submittedPromptIds.length;
-    await window!.click('#audio-mode-panel button:has-text("生成视频")');
-    const jobLocator = window!.locator(
+    await page!.click('#audio-mode-panel button:has-text("生成视频")');
+    const jobLocator = page!.locator(
       '#audio-mode-panel section[aria-label="任务状态"]:visible code',
     );
     await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
     const jobId = (await jobLocator.textContent())!;
-    await waitForStableStatus(window!, jobId, 'done');
+    await waitForStableStatus(page!, jobId, 'done');
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
   });
 
   test('works list shows completed work and filters by status and mode', async () => {
     const avatarName = 'E2E Works Avatar';
-    await createAvatar(window!, avatarName);
-    await saveLlmProfile(window!, llmMock.baseUrl);
-    await openStudio(window!, avatarName);
+    await createAvatar(page!, avatarName);
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await openStudio(page!, avatarName);
 
-    await window!.fill('#original-text', 'Works list test.');
-    await window!.click('button:has-text("AI 润色")');
-    await expect(window!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
-    await window!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(window!);
-    await waitForStableStatus(window!, jobId, 'done');
+    await page!.fill('#original-text', 'Works list test.');
+    await page!.click('button:has-text("AI 润色")');
+    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, jobId, 'done');
 
-    await window!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
-    const work = window!.locator('.works-list article').filter({ hasText: jobId });
+    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page!.locator('.works-list article').filter({ hasText: jobId });
     await expect(work).toBeVisible();
     await expect(work).toContainText('已完成');
     await expect(work).toContainText('文字生视频');
 
-    await window!.click('.works-filters button:has-text("音频数字人")');
-    await expect(window!.locator('.works-list article')).toHaveCount(0);
-    await window!.click('.works-filters button:has-text("文字生视频")');
+    await page!.click('.works-filters button:has-text("音频数字人")');
+    await expect(page!.locator('.works-list article')).toHaveCount(0);
+    await page!.click('.works-filters button:has-text("文字生视频")');
     await expect(work).toBeVisible();
 
-    await window!.click('.works-filters button:has-text("失败")');
-    await expect(window!.locator('.works-list article')).toHaveCount(0);
-    await window!.click('.works-filters button:has-text("已完成")');
+    await page!.click('.works-filters button:has-text("失败")');
+    await expect(page!.locator('.works-list article')).toHaveCount(0);
+    await page!.click('.works-filters button:has-text("已完成")');
     await expect(work).toBeVisible();
   });
 
   test('failed generation is retried successfully', async () => {
     const avatarName = 'E2E Retry Avatar';
-    await createAvatar(window!, avatarName);
-    await saveLlmProfile(window!, llmMock.baseUrl);
-    await openStudio(window!, avatarName);
+    await createAvatar(page!, avatarName);
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await openStudio(page!, avatarName);
 
-    await window!.fill('#original-text', 'Failure scenario test.');
-    await window!.click('button:has-text("AI 润色")');
-    await expect(window!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await page!.fill('#original-text', 'Failure scenario test.');
+    await page!.click('button:has-text("AI 润色")');
+    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
 
     comfyMock.failNext();
     const previousCount = comfyMock.submittedPromptIds.length;
-    await window!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(window!);
-    await waitForStableStatus(window!, jobId, 'failed');
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, jobId, 'failed');
     expect(comfyMock.submittedPromptIds.length).toBe(previousCount + 1);
 
-    await window!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
-    const failedWork = window!.locator('.works-list article').filter({ hasText: jobId });
+    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const failedWork = page!.locator('.works-list article').filter({ hasText: jobId });
     await expect(failedWork).toBeVisible();
-    const worksBefore = await window!.locator('.works-list article').count();
+    const worksBefore = await page!.locator('.works-list article').count();
 
-    await window!.click('button:has-text("重试")');
+    await page!.click('button:has-text("重试")');
 
     await expect
       .poll(
-        async () => window!.locator('.works-list article').count(),
+        async () => page!.locator('.works-list article').count(),
         { timeout: 30_000 },
       )
       .toBe(worksBefore + 1);
@@ -478,7 +530,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect
       .poll(
         async () => {
-          const works = await window!.evaluate(() => window.smo.works.list());
+         const works = await page!.evaluate(() => (window as unknown as SmoGlobal).smo.works.list());
           retryWork = (works as Array<{ id: string; status: string; metadata?: { retryOf?: string } }>).find(
             (w) => w.metadata?.retryOf === jobId && w.status === 'done',
           );
@@ -491,26 +543,26 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     expect(retryWork!.id).not.toBe(jobId);
     expect(retryWork!.metadata!.retryOf).toBe(jobId);
     expect(retryWork!.status).toBe('done');
-    await waitForStableStatus(window!, retryWork!.id, 'done');
+    await waitForStableStatus(page!, retryWork!.id, 'done');
     expect(comfyMock.submittedPromptIds.length).toBe(previousCount + 2);
   });
 
   test('restart preserves avatar, works and LLM config', async () => {
     const avatarName = 'E2E Restart Avatar';
-    await createAvatar(window!, avatarName);
-    await saveLlmProfile(window!, llmMock.baseUrl);
-    await openStudio(window!, avatarName);
+    await createAvatar(page!, avatarName);
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await openStudio(page!, avatarName);
 
-    await window!.fill('#original-text', 'Restart persistence test.');
-    await window!.click('button:has-text("AI 润色")');
-    await expect(window!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
-    await window!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(window!);
-    await waitForStableStatus(window!, jobId, 'done');
+    await page!.fill('#original-text', 'Restart persistence test.');
+    await page!.click('button:has-text("AI 润色")');
+    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, jobId, 'done');
 
     await app!.close();
     app = undefined;
-    window = undefined;
+    page = undefined;
 
     app = await launchApp({
       dataDirectory,
@@ -519,27 +571,31 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       comfyBaseUrl: comfyMock.baseUrl,
       fileDialogPaths: [],
     });
-    window = await app.firstWindow();
-    await expect(window).toHaveTitle('SMO.H3 Studio');
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    await expect(page).toHaveTitle('SMO.H3 Studio');
 
-    collectDiagnostics(app, window, pageErrors, consoleErrors, rendererLogs, mainProcessLogs);
+    // no array reset: logs must persist across the restart
 
-    await window.click('nav[aria-label="主导航"] button:has-text("数字模特")');
-    await expect(window.locator('.avatar-list')).toContainText(avatarName);
+    await page.click('nav[aria-label="主导航"] button:has-text("数字模特")');
+    await expect(page.locator('.avatar-list')).toContainText(avatarName);
 
-    await window.click('nav[aria-label="主导航"] button:has-text("我的作品")');
-    const work = window.locator('.works-list article').filter({ hasText: jobId });
+    await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page.locator('.works-list article').filter({ hasText: jobId });
     await expect(work).toBeVisible();
     await expect(work).toContainText('已完成');
 
-    await window.click('nav[aria-label="主导航"] button:has-text("设置")');
-    await expect(window.locator('#llm-base-url')).toHaveValue(`${llmMock.baseUrl}/v1`);
-    await expect(window.locator('#llm-model')).toHaveValue('model-a');
-    await expect(window.locator('#llm-api-key')).toHaveValue('');
+    await page.click('nav[aria-label="主导航"] button:has-text("设置")');
+    await expect(page.locator('#llm-base-url')).toHaveValue(`${llmMock.baseUrl}/v1`);
+    await expect(page.locator('#llm-model')).toHaveValue('model-a');
+    await expect(page.locator('#llm-api-key')).toHaveValue('');
 
     const requestsBefore = llmMock.requests.length;
-    await window.click('button:has-text("测试模型")');
-    await expect(window.locator('text=测试通过')).toBeVisible({ timeout: 15_000 });
+    await page.click('button:has-text("测试模型")');
+    await expect(page.locator('text=测试通过')).toBeVisible({ timeout: 15_000 });
 
     const testRequest = llmMock.requests
       .slice(requestsBefore)
@@ -549,8 +605,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   });
 
   test('no layout regressions on main views', async () => {
-    await expect(window!.locator('.app-shell')).toBeVisible();
-    await createAvatar(window!, 'E2E Layout Avatar');
+    await expect(page!.locator('.app-shell')).toBeVisible();
+    await createAvatar(page!, 'E2E Layout Avatar');
 
     const viewports = [
       { width: 1280, height: 820 },
@@ -558,45 +614,87 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     ];
 
     for (const viewport of viewports) {
-      await setViewport(app!, window!, viewport.width, viewport.height);
+      await setViewport(app!, page!, viewport.width, viewport.height);
 
-      await window!.click('nav[aria-label="主导航"] button:has-text("制作台")');
-      await expect(window!.locator('#text-mode-panel')).toBeVisible();
-      await assertViewLayout(window!, 'studio-text', [
+      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await expect(page!.locator('#text-mode-panel')).toBeVisible();
+      await assertViewLayout(page!, 'studio-text', [
         '#original-text',
         '#polished-tab',
         '#text-mode-panel .button-generate',
       ]);
 
-      await window!.click('#audio-mode-tab');
-      await expect(window!.locator('#audio-mode-panel')).toBeVisible();
-      await assertViewLayout(window!, 'studio-audio', [
+      await page!.click('#audio-mode-tab');
+      await expect(page!.locator('#audio-mode-panel')).toBeVisible();
+      await assertViewLayout(page!, 'studio-audio', [
         '#audio-mode-tab',
         '#audio-mode-panel .button-generate',
       ]);
 
-      await window!.click('nav[aria-label="主导航"] button:has-text("数字模特")');
-      await expect(window!.locator('.avatar-list')).toBeVisible();
-      await assertViewLayout(window!, 'avatars', [
+      await page!.click('nav[aria-label="主导航"] button:has-text("数字模特")');
+      await expect(page!.locator('.avatar-list')).toBeVisible();
+      await assertViewLayout(page!, 'avatars', [
         '#avatar-name',
         '.avatar-form .button-primary',
         '.avatar-list',
       ]);
 
-      await window!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
-      await expect(window!.locator('.works-filters')).toBeVisible();
-      await assertViewLayout(window!, 'works', [
+      await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+      await expect(page!.locator('.works-filters')).toBeVisible();
+      await assertViewLayout(page!, 'works', [
         '.works-filters',
         '.page-header .button-secondary',
       ]);
 
-      await window!.click('nav[aria-label="主导航"] button:has-text("设置")');
-      await expect(window!.locator('#llm-base-url')).toBeVisible();
-      await assertViewLayout(window!, 'settings', [
+      await page!.click('nav[aria-label="主导航"] button:has-text("设置")');
+      await expect(page!.locator('#llm-base-url')).toBeVisible();
+      await assertViewLayout(page!, 'settings', [
         '#llm-base-url',
         '#llm-model',
         '.settings-actions .button-primary',
       ]);
     }
+  });
+
+  test('settings layout handles narrow viewport at 200% zoom', async () => {
+    await expect(page!.locator('.app-shell')).toBeVisible();
+    await createAvatar(page!, 'E2E Zoom Avatar');
+    await setZoomedViewport(app!, page!, 400, 320);
+
+    await page!.click('nav[aria-label="主导航"] button:has-text("设置")');
+    await expect(page!.locator('#llm-base-url')).toBeVisible();
+
+    const violations = await page!.evaluate(() => {
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const results: Array<{
+        type: string;
+        index?: number;
+        width?: number;
+        right?: number;
+        message: string;
+      }> = [];
+      if (document.documentElement.scrollWidth > viewport.width) {
+        results.push({
+          type: 'document-overflow',
+          message: `scrollWidth ${document.documentElement.scrollWidth} > innerWidth ${viewport.width}`,
+        });
+      }
+      document.querySelectorAll('.settings-section').forEach((element, index) => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 100) {
+          results.push({ type: 'too-narrow', index, width: rect.width, message: `section ${index} width ${rect.width}` });
+        }
+        if (rect.right > viewport.width + 0.5) {
+          results.push({
+            type: 'overflow-right',
+            index,
+            right: rect.right,
+            message: `section ${index} right ${rect.right} > viewport ${viewport.width}`,
+          });
+        }
+      });
+      return results;
+    });
+    expect(violations).toEqual([]);
   });
 });
