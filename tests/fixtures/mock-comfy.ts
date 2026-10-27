@@ -20,6 +20,10 @@ export interface ComfyMock {
   close: () => Promise<void>;
   failNext: () => void;
   submittedPromptIds: string[];
+  submittedPrompts: Array<{
+    promptId: string;
+    prompt: Record<string, unknown>;
+  }>;
 }
 
 interface PromptRecord {
@@ -171,6 +175,7 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
   const submittedPromptIds: string[] = [];
   let activePromptId: string | null = null;
   let shouldFailNext = false;
+  const submittedPrompts: ComfyMock['submittedPrompts'] = [];
 
   const server = createServer((request, response) => {
     let body = Buffer.alloc(0);
@@ -224,6 +229,7 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
             client_id?: string;
           };
           const promptId = randomUUID();
+          submittedPrompts.push({ promptId, prompt: parsed.prompt });
           const outputNode = outputNodeFromPrompt(parsed.prompt) ?? '180';
           const outputPrefix = outputPrefixFromPrompt(parsed.prompt);
           const record: PromptRecord = {
@@ -422,5 +428,6 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
       shouldFailNext = true;
     },
     submittedPromptIds,
+    submittedPrompts,
   };
 }
