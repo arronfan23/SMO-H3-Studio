@@ -225,6 +225,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     await act(async () => {
       resolveSelect?.(null);
     });
+    expect(screen.getByRole('button', { name: '移除照片' })).toBeEnabled();
 
     let resolveSave: ((value: Avatar) => void) | undefined;
     smo.avatars.create.mockImplementation(
@@ -239,6 +240,40 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     await act(async () => {
       resolveSave?.({ ...avatar, id: 'avatar-save', name: '保存中' });
     });
+    expect(screen.getByRole('button', { name: '选择照片' })).toBeEnabled();
+    expect(screen.queryByRole('img', { name: '待保存模特照片预览' })).not.toBeInTheDocument();
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+  });
+
+  test('disables photo selection and removal while saving', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\saving.png');
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '保存中' } });
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    let resolveSave: ((value: Avatar) => void) | undefined;
+    smo.avatars.create.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+
+    expect(screen.getByRole('button', { name: '移除照片' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '选择照片' })).toBeDisabled();
+
+    await act(async () => {
+      resolveSave?.({ ...avatar, id: 'avatar-save', name: '保存中' });
+    });
+
+    expect(screen.getByRole('button', { name: '选择照片' })).toBeEnabled();
+    expect(screen.queryByRole('img', { name: '待保存模特照片预览' })).not.toBeInTheDocument();
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
   });
 
   test('rejects an empty avatar rename before calling IPC', async () => {

@@ -192,7 +192,7 @@ export function AvatarsPage({
               onChange={(event) => setName(event.target.value)}
             />
           </div>
-          <button className="button button-secondary" type="button" onClick={() => void selectPhoto()} disabled={selecting}>
+          <button className="button button-secondary" type="button" onClick={() => void selectPhoto()} disabled={selecting || saving}>
             <ImagePlus size={16} aria-hidden="true" />
             {selecting ? '正在选择…' : '选择照片'}
           </button>
@@ -210,7 +210,7 @@ export function AvatarsPage({
                 ) : (
                   <div
                     className="avatar-preview-empty"
-                    role={photoUrlError ? 'alert' : undefined}
+                    role={photoUrlError ? 'alert' : 'status'}
                   >
                     {photoUrlError ?? '正在读取照片…'}
                   </div>
