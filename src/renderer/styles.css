@@ -543,6 +543,48 @@ video:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.avatar-preview {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.avatar-preview-image {
+  display: block;
+  width: 100%;
+  height: 160px;
+  object-fit: contain;
+  box-sizing: border-box;
+  border: 1px solid #dce3dd;
+  border-radius: 6px;
+  background: #f4f6f4;
+}
+
+.avatar-preview-empty {
+  display: grid;
+  place-items: center;
+  height: 160px;
+  box-sizing: border-box;
+  border: 1px dashed #c9d2cc;
+  border-radius: 6px;
+  color: #68746c;
+  font-size: 13px;
+  text-align: center;
+}
+
+.avatar-preview-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.avatar-preview-meta .selected-file {
+  flex: 1;
+  min-width: 0;
+}
+
 .avatar-list,
 .works-list {
   display: grid;

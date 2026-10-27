@@ -279,7 +279,19 @@ async function assertViewLayout(
 async function createAvatar(page: Page, name: string): Promise<void> {
   await page.click('nav[aria-label="主导航"] button:has-text("数字模特")');
   await expect(page.locator('#avatar-name')).toBeVisible();
+  await expect(page.locator('.avatar-preview-empty')).toHaveText('尚未选择照片');
   await page.fill('#avatar-name', name);
+
+  await page.click('button:has-text("选择照片")');
+  const preview = page.locator('img[alt="待保存模特照片预览"]');
+  await expect(preview).toBeVisible();
+  await expect(preview).toHaveAttribute('src', /^smo-media:\/\//);
+  await expect(page.locator('.selected-file')).toHaveText('avatar.png');
+
+  await page.click('button:has-text("移除照片")');
+  await expect(preview).toHaveCount(0);
+  await expect(page.locator('.avatar-preview-empty')).toHaveText('尚未选择照片');
+
   await page.click('button:has-text("选择照片")');
   await expect(page.locator('.selected-file')).toHaveText('avatar.png');
   await page.click('button:has-text("保存模特")');
@@ -357,7 +369,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       outputDirectory,
       userDataDir,
       comfyBaseUrl: comfyMock.baseUrl,
-      fileDialogPaths: [media.imagePath, media.audioPath],
+      // createAvatar verifies preview and removal, which re-selects the image once.
+      fileDialogPaths: [media.imagePath, media.imagePath, media.audioPath],
     };
     pageErrors = [];
     consoleErrors = [];

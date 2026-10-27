@@ -141,6 +141,85 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(await screen.findByRole('heading', { name: '新模特' })).toBeInTheDocument();
   });
 
+  test('previews the selected photo before saving and removes it without deleting the avatar', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\preview-photo.png');
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: '待保存模特照片预览' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\photos\\preview-photo.png')}`,
+    );
+    expect(screen.queryByText('尚未选择照片')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '移除照片' }));
+
+    expect(screen.queryByRole('img', { name: '待保存模特照片预览' })).not.toBeInTheDocument();
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+    expect(smo.avatars.delete).not.toHaveBeenCalled();
+  });
+
+  test('keeps the photo preview when saving fails', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\keep-photo.png');
+    smo.avatars.create.mockRejectedValue(new Error('保存失败：磁盘已满'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '保留预览' } });
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('磁盘已满');
+    expect(screen.getByRole('img', { name: '待保存模特照片预览' })).toBeInTheDocument();
+    expect(screen.getByText('keep-photo.png')).toBeInTheDocument();
+  });
+
+  test('disables photo removal while re-selecting or saving', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValueOnce('G:\\photos\\first.png');
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    let resolveSelect: ((value: string | null) => void) | undefined;
+    smo.files.selectImage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSelect = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    expect(screen.getByRole('button', { name: '移除照片' })).toBeDisabled();
+    await act(async () => {
+      resolveSelect?.(null);
+    });
+
+    let resolveSave: ((value: Avatar) => void) | undefined;
+    smo.avatars.create.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '保存中' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+    expect(screen.getByRole('button', { name: '移除照片' })).toBeDisabled();
+    await act(async () => {
+      resolveSave?.({ ...avatar, id: 'avatar-save', name: '保存中' });
+    });
+  });
+
   test('rejects an empty avatar rename before calling IPC', async () => {
     await renderStudio();
     fireEvent.click(screen.getByRole('button', { name: '数字模特' }));

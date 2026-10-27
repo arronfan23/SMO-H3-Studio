@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ImagePlus, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import { AvatarImage } from './AvatarImage';
+import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName } from './ui';
 
 type DialogState =
@@ -34,6 +35,7 @@ export function AvatarsPage({
   const [renameValue, setRenameValue] = useState('');
   const [mutationLoading, setMutationLoading] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const { url: photoUrl, error: photoUrlError } = useMediaUrl(photoPath);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -87,6 +89,10 @@ export function AvatarsPage({
         setSaving(false);
       }
     }
+  };
+
+  const removePhoto = (): void => {
+    setPhotoPath(null);
   };
 
   const openRename = (avatar: Avatar): void => {
@@ -189,7 +195,40 @@ export function AvatarsPage({
             <ImagePlus size={16} aria-hidden="true" />
             {selecting ? '正在选择…' : '选择照片'}
           </button>
-          <div className="selected-file">{photoPath ? fileName(photoPath) : '尚未选择照片'}</div>
+          <div className="avatar-preview">
+            {photoPath === null ? (
+              <div className="avatar-preview-empty">尚未选择照片</div>
+            ) : (
+              <>
+                {photoUrl ? (
+                  <img
+                    className="avatar-preview-image"
+                    src={photoUrl}
+                    alt="待保存模特照片预览"
+                  />
+                ) : (
+                  <div
+                    className="avatar-preview-empty"
+                    role={photoUrlError ? 'alert' : undefined}
+                  >
+                    {photoUrlError ?? '正在读取照片…'}
+                  </div>
+                )}
+                <div className="avatar-preview-meta">
+                  <span className="selected-file">{fileName(photoPath)}</span>
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    onClick={removePhoto}
+                    disabled={selecting || saving}
+                  >
+                    <X size={16} aria-hidden="true" />
+                    移除照片
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
           {error && <p className="form-error" role="alert">{error}</p>}
           {notice && <p className="form-notice" role="status">{notice}</p>}
           <button className="button button-primary" type="submit" disabled={saving}>
