@@ -31,17 +31,15 @@ interface SpawnCall {
 function createSpawnFake(implementation?: (child: FakeChild) => void) {
   const children: FakeChild[] = [];
   const calls: SpawnCall[] = [];
-  const spawnFake = ((
-    command: string,
-    args: string[],
-    options: SpawnCall['options'],
-  ): ChildProcess => {
-    const child = new FakeChild();
-    children.push(child);
-    calls.push({ command, args, options });
-    implementation?.(child);
-    return child as unknown as ChildProcess;
-  }) as unknown as typeof spawn;
+  const spawnFake = vi.fn(
+    (command: string, args: string[], options: SpawnOptions): ChildProcess => {
+      const child = new FakeChild();
+      children.push(child);
+      calls.push({ command, args, options });
+      implementation?.(child);
+      return child as unknown as ChildProcess;
+    },
+  ) as unknown as typeof spawn;
   return { children, calls, spawnFake };
 }
 
@@ -162,6 +160,44 @@ describe('ComfyProcessManager', () => {
     healthy = true;
     await expect(retry).resolves.toEqual(STATS);
     expect(calls).toHaveLength(2);
+  });
+
+  test('reuses the still-starting child after a startup timeout', async () => {
+    const { children, calls, spawnFake } = createSpawnFake();
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) {
+        throw new Error('ComfyUI is offline');
+      }
+      return STATS;
+    });
+    const { manager } = createManager({
+      spawnProcess: spawnFake,
+      client: { health },
+      startupTimeoutMs: 80,
+      pollIntervalMs: 30,
+    });
+
+    // First attempt times out while the child is still starting.
+    await expect(manager.ensureReady()).rejects.toThrow(/timed out/i);
+    expect(calls).toHaveLength(1);
+    expect(children[0].exitCode).toBeNull();
+    expect(children[0].listenerCount('exit')).toBe(1);
+    expect(children[0].listenerCount('error')).toBe(1);
+
+    // A retry must reuse the same live child instead of spawning again.
+    const retry = manager.ensureReady();
+    await vi.waitFor(() => expect(health.mock.calls.length).toBeGreaterThan(2));
+    expect(calls).toHaveLength(1);
+    expect(children[0].listenerCount('exit')).toBe(1);
+    expect(children[0].listenerCount('error')).toBe(1);
+
+    healthy = true;
+    await expect(retry).resolves.toEqual(STATS);
+    expect(calls).toHaveLength(1);
+    expect(children[0].listenerCount('exit')).toBe(1);
+    expect(children[0].listenerCount('error')).toBe(1);
+    expect(children[0].kill).not.toHaveBeenCalled();
   });
 
   test('refuses to start a local process for a remote offline base URL', async () => {
@@ -445,6 +481,22 @@ describe('ComfyProcessManager', () => {
     healthy = true;
     await expect(retry).resolves.toEqual(STATS);
     expect(calls).toHaveLength(1);
+  });
+
+  test('close during log open prevents spawn', async () => {
+    const { calls, spawnFake } = createSpawnFake();
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      throw new Error('ComfyUI is offline');
+    });
+    const { manager } = createManager({ spawnProcess: spawnFake, client: { health } });
+
+    const pending = manager.ensureReady();
+    await null;
+    await manager.close();
+
+    await expect(pending).rejects.toThrow(/closed/i);
+    expect(spawnFake).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
   });
 
   test('close stops waiting without killing the detached child', async () => {

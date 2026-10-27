@@ -41,6 +41,27 @@ function displayUrl(baseUrl: URL): string {
   return url.toString();
 }
 
+interface ChildExitState {
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  spawnFailure: Error | null;
+}
+
+interface ActiveChild {
+  child: ChildProcess;
+  state: ChildExitState;
+}
+
+function isChildDead(entry: ActiveChild): boolean {
+  return (
+    entry.state.spawnFailure !== null ||
+    entry.state.exitCode !== null ||
+    entry.state.exitSignal !== null ||
+    entry.child.exitCode !== null ||
+    entry.child.signalCode !== null
+  );
+}
+
 export class ComfyProcessManager {
   private readonly baseUrl: URL;
   private readonly rootDirectory: string;
@@ -52,6 +73,7 @@ export class ComfyProcessManager {
   private readonly spawnProcess: typeof spawn;
   private readonly client: Pick<ComfyClient, 'health'>;
   private startPromise: Promise<ComfySystemStats> | null = null;
+  private activeChild: ActiveChild | null = null;
   private closed = false;
 
   constructor(
@@ -127,6 +149,28 @@ export class ComfyProcessManager {
   }
 
   private async startAndWait(): Promise<ComfySystemStats> {
+    let entry = this.activeChild;
+    if (entry !== null && isChildDead(entry)) {
+      this.activeChild = null;
+      entry = null;
+    }
+    if (entry === null) {
+      entry = await this.spawnChild();
+    }
+    try {
+      const stats = await this.waitUntilHealthy(entry.child, entry.state);
+      this.activeChild = null;
+      return stats;
+    } catch (error) {
+      // Keep a live child for the next retry; only drop confirmed-dead ones.
+      if (isChildDead(entry)) {
+        this.activeChild = null;
+      }
+      throw error;
+    }
+  }
+
+  private async spawnChild(): Promise<ActiveChild> {
     const port =
       this.baseUrl.port.length > 0
         ? this.baseUrl.port
@@ -134,6 +178,10 @@ export class ComfyProcessManager {
           ? '443'
           : '80';
     const logHandle = await open(this.logPath, 'a');
+    if (this.closed) {
+      await logHandle.close().catch(() => undefined);
+      throw new Error('ComfyProcessManager is closed');
+    }
     let child: ChildProcess;
     try {
       child = this.spawnProcess(
@@ -147,25 +195,19 @@ export class ComfyProcessManager {
         },
       );
     } catch (error) {
-      await logHandle.close();
+      await logHandle.close().catch(() => undefined);
       throw error instanceof Error
         ? error
         : new Error('Failed to start the ComfyUI process');
     }
     child.unref();
-    try {
-      return await this.waitUntilHealthy(child);
-    } finally {
-      await logHandle.close();
-    }
-  }
-
-  private async waitUntilHealthy(child: ChildProcess): Promise<ComfySystemStats> {
-    const state: {
-      exitCode: number | null;
-      exitSignal: NodeJS.Signals | null;
-      spawnFailure: Error | null;
-    } = { exitCode: null, exitSignal: null, spawnFailure: null };
+    // Listeners stay attached for the child's lifetime so a late 'error'
+    // event on the detached process can never go unhandled.
+    const state: ChildExitState = {
+      exitCode: null,
+      exitSignal: null,
+      spawnFailure: null,
+    };
     child.once('exit', (code, signal) => {
       state.exitCode = code;
       state.exitSignal = signal;
@@ -173,7 +215,16 @@ export class ComfyProcessManager {
     child.once('error', (error) => {
       state.spawnFailure = error;
     });
+    await logHandle.close().catch(() => undefined);
+    const entry: ActiveChild = { child, state };
+    this.activeChild = entry;
+    return entry;
+  }
 
+  private async waitUntilHealthy(
+    child: ChildProcess,
+    state: ChildExitState,
+  ): Promise<ComfySystemStats> {
     const deadline = Date.now() + this.startupTimeoutMs;
     for (;;) {
       if (this.closed) {
