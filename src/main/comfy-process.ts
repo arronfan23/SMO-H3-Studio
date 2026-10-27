@@ -6,6 +6,11 @@ export const DEFAULT_COMFY_ROOT =
   'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130';
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 180_000;
+// A startup with neither a health check success nor an exit record is
+// considered dead after this long (e.g. the backend was killed externally
+// without writing the status file); the next start attempt then launches a
+// fresh backend instead of waiting forever.
+const DEFAULT_STALE_STARTUP_MS = 600_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const LOG_TAIL_LENGTH = 2_000;
 const INNER_LAUNCHER_FILE_NAME = 'start-comfyui.cmd';
@@ -48,6 +53,7 @@ export interface ComfyProcessManagerOptions {
   launchScript?: string;
   logPath: string;
   startupTimeoutMs?: number;
+  staleStartupMs?: number;
   pollIntervalMs?: number;
   openLauncher?: (path: string) => Promise<string>;
 }
@@ -71,8 +77,10 @@ function displayUrl(baseUrl: URL): string {
 }
 
 function validateLaunchPath(value: string, name: string): string {
-  if (/[\r\n]/.test(value)) {
-    throw new Error(`ComfyUI ${name} must not contain CR or LF characters`);
+  if (/[\r\n"]/.test(value)) {
+    throw new Error(
+      `ComfyUI ${name} must not contain CR, LF, or double quote characters`,
+    );
   }
   return value;
 }
@@ -92,10 +100,11 @@ function buildInnerLauncherScript(): string {
   return `${lines.join('\r\n')}\r\n`;
 }
 
-function buildHiddenLauncherScript(innerLauncherPath: string): string {
+function buildHiddenLauncherScript(): string {
   const lines = [
     '@echo off',
-    `start "" /min "${innerLauncherPath}"`,
+    'setlocal DisableDelayedExpansion',
+    `start "" /min "%~dp0${INNER_LAUNCHER_FILE_NAME}"`,
   ];
   return `${lines.join('\r\n')}\r\n`;
 }
@@ -131,6 +140,7 @@ export class ComfyProcessManager {
   private readonly logPath: string;
   private readonly statusPath: string;
   private readonly startupTimeoutMs: number;
+  private readonly staleStartupMs: number;
   private readonly pollIntervalMs: number;
   private readonly openLauncher: (path: string) => Promise<string>;
   private readonly client: Pick<ComfyClient, 'health'>;
@@ -165,6 +175,10 @@ export class ComfyProcessManager {
     this.startupTimeoutMs = validateTimeout(
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
       'startupTimeoutMs',
+    );
+    this.staleStartupMs = validateTimeout(
+      options.staleStartupMs ?? DEFAULT_STALE_STARTUP_MS,
+      'staleStartupMs',
     );
     this.pollIntervalMs = validateTimeout(
       options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
@@ -213,9 +227,19 @@ export class ComfyProcessManager {
   }
 
   private async startAndWait(): Promise<ComfySystemStats> {
+    const exitCode = await this.readExitCode();
+    if (
+      this.activeStartup !== null &&
+      exitCode === null &&
+      Date.now() - this.activeStartup.startedAt >= this.staleStartupMs
+    ) {
+      // Neither healthy nor exited within the stale window: assume the
+      // backend died without a trace and allow a fresh launch below.
+      this.activeStartup = null;
+    }
     // Reuse a startup that is still in flight; only a recorded exit (or the
     // absence of any startup) allows launching a new backend process.
-    if (this.activeStartup === null || (await this.readExitCode()) !== null) {
+    if (this.activeStartup === null || exitCode !== null) {
       await this.launchBackend();
     }
     try {
@@ -269,7 +293,7 @@ export class ComfyProcessManager {
     );
     await writeFile(
       hiddenLauncherPath,
-      buildHiddenLauncherScript(innerLauncherPath),
+      buildHiddenLauncherScript(),
       'utf8',
     );
     // A stale exit marker from a previous backend must not poison this start.

@@ -20,6 +20,10 @@ function offlineHealth() {
   });
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 describe('ComfyProcessManager', () => {
   let tempDir: string;
   let logPath: string;
@@ -52,12 +56,10 @@ describe('ComfyProcessManager', () => {
       clientOverride?.health ?? vi.fn(async () => STATS);
     const client: Pick<ComfyClient, 'health'> = { health };
     const openCalls: string[] = [];
-    const openLauncherFake =
-      openLauncher ??
-      (async (path: string): Promise<string> => {
-        openCalls.push(path);
-        return '';
-      });
+    const openLauncherFake = async (path: string): Promise<string> => {
+      openCalls.push(path);
+      return openLauncher ? openLauncher(path) : '';
+    };
     const options: ComfyProcessManagerOptions = {
       baseUrl: 'http://127.0.0.1:8188',
       logPath,
@@ -214,10 +216,32 @@ describe('ComfyProcessManager', () => {
     expect(openCalls).toHaveLength(1);
   });
 
-  test('refuses to start a local process for a remote offline base URL', async () => {
-    const { openCalls } = createManager({ baseUrl: 'http://203.0.113.10:8188' });
+  test('discards a stale startup with no exit record and relaunches', async () => {
     const health = offlineHealth();
-    const { manager } = createManager({
+    const { manager, openCalls } = createManager({
+      client: { health },
+      startupTimeoutMs: 60,
+      pollIntervalMs: 20,
+      staleStartupMs: 140,
+    });
+
+    // First attempt times out; the startup marker is kept for reuse.
+    await expect(manager.ensureReady()).rejects.toThrow(/timed out/i);
+    expect(openCalls).toHaveLength(1);
+
+    // Past the stale deadline with no exit record (e.g. the backend was
+    // killed externally without writing one), the next attempt must launch
+    // a fresh backend instead of waiting forever.
+    await delay(180);
+    const retry = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(2));
+    expect(openCalls[1]).toBe(hiddenLauncherPath);
+    await expect(retry).rejects.toThrow(/timed out/i);
+  });
+
+  test('refuses to start a local process for a remote offline base URL', async () => {
+    const health = offlineHealth();
+    const { manager, openCalls } = createManager({
       baseUrl: 'http://203.0.113.10:8188',
       client: { health },
     });
@@ -301,11 +325,43 @@ describe('ComfyProcessManager', () => {
     );
 
     const hidden = await readFile(hiddenLauncherPath, 'utf8');
-    expect(hidden).toContain(`start "" /min "${innerLauncherPath}"`);
+    expect(hidden).toContain('start "" /min "%~dp0start-comfyui.cmd"');
 
     // The spawn itself must not create or hold the log file; the launcher
     // creates it via shell redirection when ComfyUI actually starts.
     expect(existsSync(logPath)).toBe(false);
+  });
+
+  test('hidden launcher references the inner script only via %~dp0', async () => {
+    // Directory names deliberately contain %, !, spaces, and non-ASCII
+    // characters; none of them may end up embedded in the hidden launcher.
+    const specialDir = join(tempDir, 'smo 100%!整合 目录');
+    const specialLogPath = join(specialDir, 'comfy.log');
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) {
+        throw new Error('ComfyUI is offline');
+      }
+      return STATS;
+    });
+    const { manager, openCalls } = createManager({
+      client: { health },
+      logPath: specialLogPath,
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    const hidden = await readFile(
+      join(specialDir, 'start-comfyui-hidden.cmd'),
+      'utf8',
+    );
+    expect(hidden).toContain('setlocal DisableDelayedExpansion');
+    expect(hidden).toContain('start "" /min "%~dp0start-comfyui.cmd"');
+    expect(hidden).not.toContain(specialDir);
+    expect(hidden).not.toContain('!');
   });
 
   test('paths file carries real values verbatim, including percent signs', async () => {
@@ -343,7 +399,19 @@ describe('ComfyProcessManager', () => {
       client: { health },
     });
 
-    await expect(manager.ensureReady()).rejects.toThrow(/CR or LF/);
+    await expect(manager.ensureReady()).rejects.toThrow(/must not contain/);
+    expect(openCalls).toHaveLength(0);
+    expect(existsSync(innerLauncherPath)).toBe(false);
+  });
+
+  test('rejects double quotes in launch paths before writing launcher files', async () => {
+    const health = offlineHealth();
+    const { manager, openCalls } = createManager({
+      rootDirectory: 'C:\\evil" & whoami',
+      client: { health },
+    });
+
+    await expect(manager.ensureReady()).rejects.toThrow(/must not contain/);
     expect(openCalls).toHaveLength(0);
     expect(existsSync(innerLauncherPath)).toBe(false);
   });
@@ -356,7 +424,8 @@ describe('ComfyProcessManager', () => {
     });
 
     await expect(manager.ensureReady()).rejects.toThrow(/file not found/);
-    expect(openCalls).toHaveLength(0); // custom fake records nothing
+    expect(openCalls).toHaveLength(1);
+    expect(openCalls[0]).toBe(hiddenLauncherPath);
   });
 
   test('early exit reports the last 2000 characters of the log', async () => {
