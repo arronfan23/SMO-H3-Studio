@@ -93,6 +93,7 @@ export function AvatarsPage({
 
   const removePhoto = (): void => {
     setPhotoPath(null);
+    setError(null);
   };
 
   const openRename = (avatar: Avatar): void => {

@@ -166,6 +166,27 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(smo.avatars.delete).not.toHaveBeenCalled();
   });
 
+  test('clears the form error when removing the selected photo', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\clear-error.png');
+    smo.avatars.create.mockRejectedValue(new Error('保存失败：磁盘已满'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '清错' } });
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('磁盘已满');
+
+    fireEvent.click(screen.getByRole('button', { name: '移除照片' }));
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+    expect(smo.avatars.delete).not.toHaveBeenCalled();
+  });
+
   test('keeps the photo preview when saving fails', async () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\keep-photo.png');
