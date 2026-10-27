@@ -215,4 +215,26 @@ describe('async effects on unmounted components', () => {
 
     expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
   });
+
+  test("SettingsPage does not update state when ComfyUI startup settles after unmount", async () => {
+    const request = deferred<{ system: Record<string, unknown>; devices: Record<string, unknown>[] }>();
+    window.smo = {
+      comfy: {
+        health: async () => {
+          throw new Error("offline");
+        },
+        start: () => request.promise,
+      },
+      llm: { getProfile: async () => null },
+    } as unknown as SmoApi;
+    const view = render(<SettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "启动 ComfyUI" }));
+
+    view.unmount();
+    const updateCount = stateUpdates.mock.calls.length;
+    request.resolve({ system: {}, devices: [] });
+    await flushPromises();
+
+    expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
+  });
 });

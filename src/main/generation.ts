@@ -42,6 +42,7 @@ export interface GenerationHandlerOptions {
   mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
   uploadsDirectory: string;
   workflowResolver?: (mode: GenerationRequest["mode"]) => string;
+  ensureReady?: () => Promise<unknown>;
   copyFile?: typeof copyFile;
   durationReader?: AudioDurationReader;
   removeFile?: typeof rm;
@@ -354,6 +355,8 @@ export function createGenerationHandler(
 
     const run = async (): Promise<void> => {
       try {
+        throwIfCancelled();
+        await options.ensureReady?.();
         throwIfCancelled();
         const image = await comfy.uploadFile({
           filePath: avatar.photoPath,

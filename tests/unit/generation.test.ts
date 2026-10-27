@@ -137,6 +137,7 @@ async function createHarness(
     removeFile?: typeof rm;
     cleanupErrorReporter?: (error: unknown) => void;
     workflowResolver?: (mode: GenerationRequest["mode"]) => string;
+    ensureReady?: () => Promise<unknown>;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'smo-h3-generation-'));
@@ -190,6 +191,7 @@ async function createHarness(
     outputDirectory,
     mediaRegistry,
     uploadsDirectory,
+    ensureReady: options.ensureReady,
     copyFile: options.copyFile,
     durationReader: options.durationReader ?? (async () => 60),
     removeFile: options.removeFile,
@@ -1225,4 +1227,21 @@ describe('GenerationHandler retry', () => {
       expect(harness.store.listWorks()).toHaveLength(1);
     },
   );
+});
+
+describe('GenerationHandler ComfyUI startup', () => {
+  test('fails the queued work without uploading when ComfyUI startup fails', async () => {
+    const ensureReady = vi
+      .fn()
+      .mockRejectedValue(new Error('ComfyUI startup timed out after 180000 ms'));
+    const harness = await createHarness({ ensureReady });
+
+    const { id } = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, id, 'failed');
+
+    expect(work.error).toContain('ComfyUI startup timed out');
+    expect(ensureReady).toHaveBeenCalledTimes(1);
+    expect(harness.comfy.uploads).toHaveLength(0);
+    expect(harness.comfy.submissions).toHaveLength(0);
+  });
 });

@@ -176,6 +176,7 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     comfy: {
       health: async () => ({ system: {}, devices: [] }),
     },
+    startComfy: async () => ({ system: {}, devices: [] }),
     openComfy: async () => undefined,
     hardware: {
       detect: async () => hardwareInfo,
@@ -290,6 +291,7 @@ describe('IPC input schema', () => {
     'avatars:list',
     'works:list',
     'comfy:health',
+    'comfy:start',
     'hardware:detect',
   ])('accepts %s with an empty payload', (channel) => {
     const request = { channel, payload: {} };
@@ -697,6 +699,22 @@ describe('main-process IPC handlers', () => {
     expect(opened).toBe(true);
   });
 
+  test('starts ComfyUI and returns the latest health stats', async () => {
+    const harness = await createHarness();
+    const stats = {
+      system: { os: 'started' },
+      devices: [{ name: 'NVIDIA GeForce RTX 5090 Laptop GPU' }],
+    };
+    let calls = 0;
+    harness.services.startComfy = async () => {
+      calls += 1;
+      return stats;
+    };
+
+    await expect(harness.invoke('comfy:start')).resolves.toEqual(stats);
+    expect(calls).toBe(1);
+  });
+
   test('renames and deletes avatars through the real service', async () => {
     const harness = await createHarness();
     const source = join(harness.directory, 'presenter.png');
@@ -1088,7 +1106,7 @@ describe('preload API', () => {
       'saveProfile',
       'testModel',
     ]);
-    expect(Object.keys(api.comfy)).toEqual(['health', 'open']);
+    expect(Object.keys(api.comfy)).toEqual(['health', 'start', 'open']);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
     expect(Object.keys(api.works)).toEqual(['list']);
     expect(Object.keys(api.files).sort()).toEqual([
@@ -1200,6 +1218,11 @@ describe('preload API', () => {
       channel: 'comfy:health',
       payload: {},
       call: (smo: SmoApi) => smo.comfy.health(),
+    },
+    {
+      channel: 'comfy:start',
+      payload: {},
+      call: (smo: SmoApi) => smo.comfy.start(),
     },
     {
       channel: 'hardware:detect',

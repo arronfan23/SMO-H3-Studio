@@ -245,6 +245,7 @@ describe('production application services', () => {
     const photoPath = join(dataDirectory, "avatar.png");
     await writeFile(photoPath, "avatar");
     const avatar = services.store.createAvatar({ name: "Presenter", photoPath });
+    vi.spyOn(services.comfy, "health").mockResolvedValue({ system: {}, devices: [] });
     vi.spyOn(services.comfy, "uploadFile").mockResolvedValue("uploaded/avatar.png");
     const submit = vi.spyOn(services.comfy, "submit").mockResolvedValue({
       prompt_id: "prompt-active",

@@ -28,6 +28,7 @@ const api: SmoApi = {
   },
   comfy: {
     health: () => ipcRenderer.invoke('comfy:health', {}),
+    start: () => ipcRenderer.invoke('comfy:start', {}),
     open: () => ipcRenderer.invoke('comfy:open', {}),
   },
   hardware: {

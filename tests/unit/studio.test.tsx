@@ -44,7 +44,7 @@ function createSmoMock() {
       testModel: vi.fn(),
       polish: vi.fn(),
     },
-    comfy: { health: vi.fn(), open: vi.fn() },
+    comfy: { health: vi.fn(), open: vi.fn(), start: vi.fn() },
     hardware: { detect: vi.fn(), apply: vi.fn() },
     works: { list: vi.fn() },
   };
@@ -77,6 +77,7 @@ beforeEach(() => {
   smo.llm.saveProfile.mockResolvedValue(undefined);
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
+  smo.comfy.start.mockResolvedValue({ system: {}, devices: [] });
 });
 
 afterEach(() => {
@@ -539,6 +540,73 @@ describe('works and settings', () => {
   });
 });
 
+describe('settings page ComfyUI startup', () => {
+  async function renderOfflineSettings() {
+    smo.comfy.health.mockRejectedValueOnce(new Error('连接被拒绝'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    return screen.findByRole('button', { name: '启动 ComfyUI' });
+  }
+
+  test('offers to start ComfyUI when the health check fails', async () => {
+    await renderOfflineSettings();
+
+    expect(screen.getByText('ComfyUI 不可用')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('连接被拒绝');
+    expect(screen.queryByRole('button', { name: '打开 ComfyUI' })).not.toBeInTheDocument();
+  });
+
+  test('starts ComfyUI and shows the healthy state with fresh stats', async () => {
+    smo.comfy.start.mockResolvedValue({
+      system: { os: 'Windows 11' },
+      devices: [{ name: 'NVIDIA GeForce RTX 5090 Laptop GPU' }],
+    });
+    const startButton = await renderOfflineSettings();
+
+    fireEvent.click(startButton);
+
+    const startingButton = screen.getByRole('button', { name: '正在启动…' });
+    expect(startingButton).toBeDisabled();
+    expect(await screen.findByText('ComfyUI 连接正常')).toBeInTheDocument();
+    expect(screen.getByText('Windows 11')).toBeInTheDocument();
+    expect(screen.getByText('NVIDIA GeForce RTX 5090 Laptop GPU')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '打开 ComfyUI' })).toBeInTheDocument();
+    expect(smo.comfy.start).toHaveBeenCalledTimes(1);
+  });
+
+  test('shows the startup error and stays offline when ComfyUI fails to start', async () => {
+    smo.comfy.start.mockRejectedValue(new Error('ComfyUI 启动超时'));
+    await renderOfflineSettings();
+
+    fireEvent.click(screen.getByRole('button', { name: '启动 ComfyUI' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('ComfyUI 启动超时');
+    expect(screen.getByText('ComfyUI 不可用')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '启动 ComfyUI' })).toBeEnabled();
+  });
+
+  test('does not start ComfyUI twice while startup is in flight', async () => {
+    let resolveStart:
+      | ((value: { system: Record<string, unknown>; devices: Record<string, unknown>[] }) => void)
+      | undefined;
+    smo.comfy.start.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    await renderOfflineSettings();
+
+    fireEvent.click(screen.getByRole('button', { name: '启动 ComfyUI' }));
+    fireEvent.click(screen.getByRole('button', { name: '正在启动…' }));
+
+    expect(smo.comfy.start).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveStart?.({ system: {}, devices: [] });
+    });
+    expect(screen.getByText('ComfyUI 连接正常')).toBeInTheDocument();
+  });
+});
 
 describe('settings page LLM configuration', () => {
   test('saves the LLM profile and refreshes displayed values', async () => {

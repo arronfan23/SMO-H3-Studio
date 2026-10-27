@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
+import { ComfyProcessManager } from '../../src/main/comfy-process';
 import { createAppServices } from '../../src/main/app-services';
 
 const { protocolRegisterFileProtocol } = vi.hoisted(() => ({
@@ -37,6 +38,52 @@ afterEach(async () => {
 });
 
 describe('AppServices lifecycle', () => {
+  test('startComfy delegates to the ComfyUI process manager', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+    const stats = { system: { os: 'test' }, devices: [] };
+    const ensureReady = vi
+      .spyOn(ComfyProcessManager.prototype, 'ensureReady')
+      .mockResolvedValue(stats);
+
+    try {
+      await expect(services.startComfy()).resolves.toEqual(stats);
+      expect(ensureReady).toHaveBeenCalledTimes(1);
+    } finally {
+      ensureReady.mockRestore();
+      await services.close();
+    }
+  });
+
+  test('close stops the ComfyUI process manager after the coordinator and before ComfyClient', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const order: string[] = [];
+    vi.spyOn(services.jobCoordinator, 'close').mockImplementation(async () => {
+      order.push('coordinator');
+    });
+    const managerClose = vi
+      .spyOn(ComfyProcessManager.prototype, 'close')
+      .mockImplementation(async () => {
+        order.push('manager');
+      });
+    vi.spyOn(services.comfy, 'close').mockImplementation(async () => {
+      order.push('comfy');
+    });
+    const storeClose = vi.spyOn(services.store, 'close');
+
+    try {
+      await services.close();
+
+      expect(order).toEqual(['coordinator', 'manager', 'comfy']);
+      expect(managerClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalledTimes(1);
+    } finally {
+      managerClose.mockRestore();
+    }
+  });
+
   test('close releases ComfyClient, JobCoordinator, and Store', async () => {
     const dataDirectory = await useDataDirectory();
     const services = await createAppServices({ dataDirectory });

@@ -6,6 +6,7 @@ import { app, dialog, protocol, shell } from 'electron';
 import type { GenerationHandler, IpcServices } from './ipc';
 import { AvatarService } from './avatars';
 import { ComfyClient } from './comfy';
+import { ComfyProcessManager, DEFAULT_COMFY_ROOT } from './comfy-process';
 import { FileService, type FileDialog } from './files';
 import { createGenerationHandler, createRetryHandler } from './generation';
 import { detectHardware, recommendHardware } from './hardware';
@@ -119,6 +120,7 @@ export async function createAppServices(
 
   let store: Store | undefined;
   let comfy: ComfyClient | undefined;
+  let comfyProcess: ComfyProcessManager | undefined;
   let jobCoordinator: JobCoordinator | undefined;
   try {
     await hardwareWorkflows.load();
@@ -144,6 +146,14 @@ export async function createAppServices(
     const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
     const llm = new LlmService();
     comfy = new ComfyClient(comfyBaseUrl);
+    comfyProcess = new ComfyProcessManager(
+      {
+        baseUrl: comfyBaseUrl,
+        rootDirectory: process.env.SMO_COMFYUI_ROOT ?? DEFAULT_COMFY_ROOT,
+        logPath: join(dataDirectory, 'logs', 'comfyui-backend.log'),
+      },
+      comfy,
+    );
     jobCoordinator = new JobCoordinator({
       onEvent: (event) => {
         store!.updateWork(event.id, {
@@ -167,6 +177,7 @@ export async function createAppServices(
         outputDirectory,
         mediaRegistry,
         uploadsDirectory: join(dataDirectory, 'uploads'),
+        ensureReady: () => comfyProcess!.ensureReady(),
       });
 
     const retryWork = createRetryHandler({
@@ -191,6 +202,7 @@ export async function createAppServices(
       store,
       comfy,
       openComfy,
+      startComfy: () => comfyProcess!.ensureReady(),
       hardware: {
         detect: () => detectHardware(undefined, outputDirectory),
         recommend: async (input) => recommendHardware(input),
@@ -205,6 +217,7 @@ export async function createAppServices(
         }
         closed = true;
         await jobCoordinator!.close();
+        await comfyProcess!.close();
         await Promise.allSettled([
           comfy!.close(),
           (async () => store!.close())(),
@@ -213,6 +226,7 @@ export async function createAppServices(
     };
   } catch (error) {
     await jobCoordinator?.close();
+    await comfyProcess?.close();
     await Promise.allSettled([
       comfy?.close() ?? Promise.resolve(),
       (async () => store?.close())(),

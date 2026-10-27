@@ -47,7 +47,7 @@ test('Electron app starts with isolated env and exposes window.smo domains', asy
       avatars: ['list', 'create', 'update', 'delete'],
       jobs: ['start', 'retry', 'cancel'],
       llm: ['saveProfile', 'getProfile', 'listModels', 'testModel', 'polish'],
-      comfy: ['health', 'open'],
+      comfy: ['health', 'open', 'start'],
       hardware: ['detect', 'recommend', 'reset', 'apply'],
       works: ['list'],
       files: ['selectImage', 'selectAudio', 'mediaUrl', 'openFolder'],

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Cpu, ExternalLink, RefreshCw, RotateCcw, Save, Search, TestTube } from 'lucide-react';
+import { Check, Cpu, ExternalLink, Play, RefreshCw, RotateCcw, Save, Search, TestTube } from 'lucide-react';
 import type { ComfyHealth } from '../shared/ipc';
 import type { HardwareInfo, HardwareProfile, LlmProfile, VideoMode } from '../shared/types';
 import { errorMessage } from './ui';
@@ -21,6 +21,7 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [health, setHealth] = useState<ComfyHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [startingComfy, setStartingComfy] = useState(false);
   const [profile, setProfile] = useState<LlmProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
@@ -126,6 +127,31 @@ export function SettingsPage() {
     } catch (error) {
       if (mountedRef.current) {
         setLlmStatus({ kind: 'error', message: errorMessage(error) });
+      }
+    }
+  };
+
+  const startComfy = async (): Promise<void> => {
+    if (!mountedRef.current || startingComfy) {
+      return;
+    }
+    setStartingComfy(true);
+    try {
+      const stats = await window.smo.comfy.start();
+      if (!mountedRef.current) {
+        return;
+      }
+      setHealth(stats);
+      setHealthError(null);
+    } catch (error) {
+      if (!mountedRef.current) {
+        return;
+      }
+      setHealth(null);
+      setHealthError(errorMessage(error));
+    } finally {
+      if (mountedRef.current) {
+        setStartingComfy(false);
       }
     }
   };
@@ -397,14 +423,26 @@ export function SettingsPage() {
                 )}
               </dl>
             )}
-            <button
-              className="button button-secondary"
-              type="button"
-              onClick={() => void window.smo.comfy.open()}
-            >
-              <ExternalLink size={16} aria-hidden="true" />
-              打开 ComfyUI
-            </button>
+            {health ? (
+              <button
+                className="button button-secondary"
+                type="button"
+                onClick={() => void window.smo.comfy.open()}
+              >
+                <ExternalLink size={16} aria-hidden="true" />
+                打开 ComfyUI
+              </button>
+            ) : (
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={startingComfy}
+                onClick={() => void startComfy()}
+              >
+                <Play size={16} aria-hidden="true" />
+                {startingComfy ? '正在启动…' : '启动 ComfyUI'}
+              </button>
+            )}
           </section>
           <section className="settings-section">
             <span className="page-kicker">文字润色</span>

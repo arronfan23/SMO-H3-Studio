@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron';
-import type { ComfyClient } from './comfy';
+import type { ComfyClient, ComfySystemStats } from './comfy';
 import type { AvatarService } from './avatars';
 import type { FileService } from './files';
 import type { JobCoordinator } from './jobs';
@@ -43,6 +43,7 @@ export interface IpcServices {
   avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
   files: Pick<FileService, 'selectImage' | 'selectAudio' | 'mediaUrl' | 'openFolder'>;
   comfy: Pick<ComfyClient, 'health'>;
+  startComfy: () => Promise<ComfySystemStats>;
   openComfy: () => Promise<void>;
   hardware: {
     detect: () => Promise<HardwareInfo>;
@@ -122,6 +123,8 @@ async function dispatch(
       return services.store.listWorks();
     case 'comfy:health':
       return services.comfy.health();
+    case 'comfy:start':
+      return services.startComfy();
     case 'comfy:open':
       await services.openComfy();
       return undefined;

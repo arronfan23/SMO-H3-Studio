@@ -35,6 +35,7 @@ export const IPC_CHANNELS = [
   'avatars:delete',
   'works:list',
   'comfy:health',
+  'comfy:start',
   'comfy:open',
   'hardware:detect',
   'hardware:recommend',
@@ -232,6 +233,7 @@ export function createIpcSchema() {
     ),
     requestSchema('works:list', emptyPayload),
     requestSchema('comfy:health', emptyPayload),
+    requestSchema('comfy:start', emptyPayload),
     requestSchema('comfy:open', emptyPayload),
     requestSchema('hardware:detect', emptyPayload),
     requestSchema('hardware:recommend', hardwareRecommendationSchema),
@@ -294,6 +296,7 @@ export interface SmoApi {
   };
   readonly comfy: {
     health(): Promise<ComfyHealth>;
+    start(): Promise<ComfyHealth>;
     open(): Promise<void>;
   };
   readonly hardware: {
