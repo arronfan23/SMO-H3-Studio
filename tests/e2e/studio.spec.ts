@@ -140,40 +140,26 @@ async function setViewport(
   width: number,
   height: number,
 ): Promise<void> {
-  await app.evaluate(({ BrowserWindow }, { width, height }) => {
+  const [actualWidth, actualHeight] = await app.evaluate(({ BrowserWindow }, { width, height }) => {
     const win = BrowserWindow.getAllWindows()[0];
     if (!win) {
       throw new Error('No BrowserWindow found');
     }
     win.webContents.setZoomFactor(1);
     win.setContentSize(width, height);
+    return win.getContentSize();
   }, { width, height });
 
-
-  let last: { w: number; h: number } | undefined;
-  await expect
-    .poll(
-      async () => {
-        const current = await page.evaluate(() => ({
-          w: window.innerWidth,
-          h: window.innerHeight,
-        }));
-        if (last && last.w === current.w && last.h === current.h) {
-          return current;
-        }
-        last = current;
-        return null;
-      },
-      { timeout: 5_000 },
-    )
-    .toBeTruthy();
+  // Windows fractional-DPI rounding: observed diff is 0-2 px on a 1.75 scale display.
+  expect(Math.abs(actualWidth - width)).toBeLessThanOrEqual(2);
+  expect(Math.abs(actualHeight - height)).toBeLessThanOrEqual(2);
 
   await expect
     .poll(
       async () => page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight })),
       { timeout: 5_000 },
     )
-    .toEqual(last!);
+    .toEqual({ w: actualWidth, h: actualHeight });
 }
 
 async function setZoomedViewport(
@@ -182,18 +168,41 @@ async function setZoomedViewport(
   cssWidth: number,
   cssHeight: number,
 ): Promise<void> {
-  await app.evaluate(({ BrowserWindow }, { cssWidth, cssHeight }) => {
+  const [actualWidth, actualHeight] = await app.evaluate(({ BrowserWindow }, { cssWidth, cssHeight }) => {
     const win = BrowserWindow.getAllWindows()[0];
     if (!win) {
       throw new Error('No BrowserWindow found');
     }
     win.webContents.setZoomFactor(2);
     win.setContentSize(cssWidth * 2, cssHeight * 2);
+    return win.getContentSize();
   }, { cssWidth, cssHeight });
 
+  // Renderer CSS pixels are content pixels divided by zoom factor.
+  // BrowserWindow minWidth/minHeight may enlarge the content area; keep that real value.
+  const expectedWidth = actualWidth / 2;
+  const expectedHeight = actualHeight / 2;
   await expect
-    .poll(async () => page.evaluate(() => window.innerWidth), { timeout: 5_000 })
-    .toBeLessThanOrEqual(cssWidth + 100);
+    .poll(
+      async () => {
+        const size = await page.evaluate(() => ({
+          w: window.innerWidth,
+          h: window.innerHeight,
+        }));
+        return {
+          size,
+          withinTolerance:
+            Math.abs(size.w - expectedWidth) <= 2 &&
+            Math.abs(size.h - expectedHeight) <= 2,
+        };
+      },
+      { timeout: 5_000 },
+    )
+    .toEqual({ size: expect.any(Object), withinTolerance: true });
+
+  // Confirm the effective CSS viewport is still narrow (< 800 px matches the max-width breakpoint).
+  const innerWidth = await page.evaluate(() => window.innerWidth);
+  expect(innerWidth).toBeLessThanOrEqual(800);
 }
 
 async function waitForVideoReadyByJobId(page: Page, jobId: string): Promise<void> {
