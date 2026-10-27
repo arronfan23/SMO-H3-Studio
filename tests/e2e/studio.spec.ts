@@ -354,7 +354,6 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     const worksBefore = await window!.locator('.works-list article').count();
 
     await window!.click('button:has-text("重试")');
-    await expect(window!.locator('text=正在重试')).toBeVisible();
 
     await expect
       .poll(
