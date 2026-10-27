@@ -77,19 +77,36 @@ async function launchApp(options: LaunchAppOptions): Promise<ElectronApplication
   });
 }
 
-function collectErrors(
+function collectDiagnostics(
+  app: ElectronApplication,
   window: Page,
   pageErrors: Error[],
   consoleErrors: string[],
+  rendererLogs: string[],
+  mainProcessLogs: string[],
 ): void {
   window.on('pageerror', (error) => {
     pageErrors.push(error);
   });
   window.on('console', (message) => {
+    const text = message.text();
+    rendererLogs.push(text);
     if (message.type() === 'error') {
-      consoleErrors.push(message.text());
+      consoleErrors.push(text);
     }
   });
+
+  const process = app.process();
+  const appendMainLogs = (data: Buffer) => {
+    const lines = data.toString().split(/\r?\n/);
+    for (const line of lines) {
+      if (line.length > 0) {
+        mainProcessLogs.push(line);
+      }
+    }
+  };
+  process.stdout?.on('data', appendMainLogs);
+  process.stderr?.on('data', appendMainLogs);
 }
 
 async function waitForStableStatus(
@@ -112,6 +129,96 @@ async function waitForStableStatus(
       { timeout: timeoutMs },
     )
     .toContain(status === 'done' ? '已完成' : '失败');
+}
+
+async function setViewport(
+  app: ElectronApplication,
+  window: Page,
+  width: number,
+  height: number,
+): Promise<void> {
+  await app.evaluate(({ BrowserWindow }, { width, height }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      win.setSize(width, height);
+    }
+  }, { width, height });
+
+  await window.evaluate(() => new Promise<void>((resolve) => {
+    let lastWidth = window.innerWidth;
+    let lastHeight = window.innerHeight;
+    let stableCount = 0;
+    const check = () => {
+      const currentWidth = window.innerWidth;
+      const currentHeight = window.innerHeight;
+      if (currentWidth === lastWidth && currentHeight === lastHeight) {
+        stableCount++;
+        if (stableCount >= 3) {
+          resolve();
+          return;
+        }
+      } else {
+        stableCount = 0;
+        lastWidth = currentWidth;
+        lastHeight = currentHeight;
+      }
+      requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  }));
+}
+
+async function assertViewLayout(
+  window: Page,
+  viewName: string,
+  selectors: string[],
+): Promise<void> {
+  const violations = await window.evaluate(
+    ({ view, selectors }) => {
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const results: Array<{
+        view: string;
+        type: string;
+        selector?: string;
+        message: string;
+        rect?: { left: number; top: number; right: number; bottom: number; width: number; height: number };
+      }> = [];
+      if (document.documentElement.scrollWidth > viewport.width) {
+        results.push({
+          view,
+          type: 'document-overflow',
+          message: `scrollWidth ${document.documentElement.scrollWidth} > innerWidth ${viewport.width}`,
+        });
+      }
+      for (const selector of selectors) {
+        const element = document.querySelector(selector);
+        if (!element) {
+          results.push({ view, type: 'missing', selector, message: 'element not found' });
+          continue;
+        }
+        const rect = element.getBoundingClientRect();
+        if (rect.left < 0 || rect.right > viewport.width || rect.top < 0 || rect.bottom > viewport.height) {
+          results.push({
+            view,
+            type: 'out-of-viewport',
+            selector,
+            message: `element overflows viewport ${JSON.stringify(viewport)}`,
+            rect: {
+              left: rect.left,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              width: rect.width,
+              height: rect.height,
+            },
+          });
+        }
+      }
+      return results;
+    },
+    { view: viewName, selectors },
+  );
+  expect(violations).toEqual([]);
 }
 
 async function createAvatar(window: Page, name: string): Promise<void> {
@@ -162,6 +269,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   let comfyMock: Awaited<ReturnType<typeof startComfyMock>>;
   let pageErrors: Error[] = [];
   let consoleErrors: string[] = [];
+  let rendererLogs: string[] = [];
+  let mainProcessLogs: string[] = [];
 
   let dataDirectory: string;
   let outputDirectory: string;
@@ -201,7 +310,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     pageErrors = [];
     consoleErrors = [];
-    collectErrors(window, pageErrors, consoleErrors);
+    rendererLogs = [];
+    mainProcessLogs = [];
+    collectDiagnostics(app!, window!, pageErrors, consoleErrors, rendererLogs, mainProcessLogs);
   });
 
   test.afterEach(async () => {
@@ -221,8 +332,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     expect.soft(pageErrors).toHaveLength(0);
     expect.soft(consoleErrors).toHaveLength(0);
     const diagnosticLog = [
-      ...consoleErrors,
       ...pageErrors.map((error) => error.message),
+      ...rendererLogs,
+      ...mainProcessLogs,
     ].join('\n');
     expect.soft(diagnosticLog).not.toContain(TEST_LLM_API_KEY);
   });
@@ -399,8 +511,6 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await app!.close();
     app = undefined;
     window = undefined;
-    pageErrors = [];
-    consoleErrors = [];
 
     app = await launchApp({
       dataDirectory,
@@ -412,7 +522,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     window = await app.firstWindow();
     await expect(window).toHaveTitle('SMO.H3 Studio');
 
-    collectErrors(window, pageErrors, consoleErrors);
+    collectDiagnostics(app, window, pageErrors, consoleErrors, rendererLogs, mainProcessLogs);
 
     await window.click('nav[aria-label="主导航"] button:has-text("数字模特")');
     await expect(window.locator('.avatar-list')).toContainText(avatarName);
@@ -425,12 +535,68 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await window.click('nav[aria-label="主导航"] button:has-text("设置")');
     await expect(window.locator('#llm-base-url')).toHaveValue(`${llmMock.baseUrl}/v1`);
     await expect(window.locator('#llm-model')).toHaveValue('model-a');
+    await expect(window.locator('#llm-api-key')).toHaveValue('');
+
+    const requestsBefore = llmMock.requests.length;
+    await window.click('button:has-text("测试模型")');
+    await expect(window.locator('text=测试通过')).toBeVisible({ timeout: 15_000 });
+
+    const testRequest = llmMock.requests
+      .slice(requestsBefore)
+      .find((request) => request.method === 'POST' && request.url === '/v1/chat/completions');
+    expect(testRequest).toBeDefined();
+    expect(testRequest!.authorization).toBe(`Bearer ${TEST_LLM_API_KEY}`);
   });
 
   test('no layout regressions on main views', async () => {
-    const overflow = await window!.evaluate(() => {
-      return document.documentElement.scrollWidth > window.innerWidth;
-    });
-    expect(overflow).toBe(false);
+    await expect(window!.locator('.app-shell')).toBeVisible();
+    await createAvatar(window!, 'E2E Layout Avatar');
+
+    const viewports = [
+      { width: 1280, height: 820 },
+      { width: 960, height: 640 },
+    ];
+
+    for (const viewport of viewports) {
+      await setViewport(app!, window!, viewport.width, viewport.height);
+
+      await window!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await expect(window!.locator('#text-mode-panel')).toBeVisible();
+      await assertViewLayout(window!, 'studio-text', [
+        '#original-text',
+        '#polished-tab',
+        '#text-mode-panel .button-generate',
+      ]);
+
+      await window!.click('#audio-mode-tab');
+      await expect(window!.locator('#audio-mode-panel')).toBeVisible();
+      await assertViewLayout(window!, 'studio-audio', [
+        '#audio-mode-tab',
+        '#audio-mode-panel .button-generate',
+      ]);
+
+      await window!.click('nav[aria-label="主导航"] button:has-text("数字模特")');
+      await expect(window!.locator('.avatar-list')).toBeVisible();
+      await assertViewLayout(window!, 'avatars', [
+        '#avatar-name',
+        '.avatar-form .button-primary',
+        '.avatar-list',
+      ]);
+
+      await window!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+      await expect(window!.locator('.works-filters')).toBeVisible();
+      await assertViewLayout(window!, 'works', [
+        '.works-filters',
+        '.page-header .button-secondary',
+      ]);
+
+      await window!.click('nav[aria-label="主导航"] button:has-text("设置")');
+      await expect(window!.locator('#llm-base-url')).toBeVisible();
+      await assertViewLayout(window!, 'settings', [
+        '#llm-base-url',
+        '#llm-model',
+        '.settings-actions .button-primary',
+      ]);
+    }
   });
 });

@@ -875,3 +875,55 @@ video:focus-visible {
 .model-options li {
   margin: 0;
 }
+
+@media (max-height: 700px) {
+  .app-shell {
+    min-height: 100dvh;
+  }
+  .main-content {
+    padding: 12px;
+  }
+  .person-preview,
+  .production-controls,
+  .avatar-form,
+  .settings-section {
+    padding: 12px;
+  }
+  .section-heading {
+    margin-bottom: 8px;
+  }
+  .section-heading h2 {
+    font-size: 18px;
+  }
+  .avatar-image {
+    max-height: 240px;
+  }
+  .field textarea,
+  .prompt-editor textarea {
+    min-height: 64px;
+  }
+  .mode-tabs {
+    margin-bottom: 10px;
+  }
+  .tab-list button {
+    min-height: 30px;
+  }
+  .form-row {
+    gap: 8px;
+  }
+  .generation-form {
+    gap: 8px;
+  }
+  .settings-section:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .settings-section:nth-child(2) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .settings-section:nth-child(3) {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
