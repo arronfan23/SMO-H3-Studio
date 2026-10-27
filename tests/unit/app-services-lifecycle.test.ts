@@ -128,4 +128,62 @@ describe('AppServices lifecycle', () => {
     expect(storeClose).toHaveBeenCalledTimes(1);
     expect(services.store).toBeDefined();
   });
+
+  test('reopening services fails interrupted works and reserves completed ones', async () => {
+    const dataDirectory = await useDataDirectory();
+
+    const first = await createAppServices({ dataDirectory });
+    const avatar = first.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    first.store.addWork({
+      id: 'running-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'running',
+    });
+    first.store.addWork({
+      id: 'pending-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'pending',
+    });
+    first.store.addWork({
+      id: 'done-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: 'output/done-work.mp4',
+      status: 'done',
+    });
+    await first.close();
+
+    const second = await createAppServices({ dataDirectory });
+    try {
+      const works = new Map(second.store.listWorks().map((work) => [work.id, work]));
+
+      const running = works.get('running-work');
+      expect(running?.status).toBe('failed');
+      expect(running?.error).toMatch(/interrupted.*restart/i);
+
+      const pending = works.get('pending-work');
+      expect(pending?.status).toBe('failed');
+      expect(pending?.error).toMatch(/interrupted.*restart/i);
+
+      expect(works.get('done-work')?.status).toBe('done');
+      expect(second.jobCoordinator.completedIds).toEqual(['done-work']);
+      expect(second.jobCoordinator.activeCount).toBe(0);
+
+      await expect(
+        second.jobCoordinator.enqueue({
+          id: 'done-work',
+          run: async () => undefined,
+        }),
+      ).rejects.toThrow(/duplicate job id/i);
+    } finally {
+      await second.close();
+    }
+  });
 });

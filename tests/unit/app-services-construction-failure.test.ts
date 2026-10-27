@@ -40,6 +40,7 @@ describe('createAppServices construction failure', () => {
   test('releases ComfyClient, JobCoordinator, and Store when construction fails', async () => {
     const comfyClose = vi.fn().mockResolvedValue(undefined);
     const coordinatorClose = vi.fn().mockResolvedValue(undefined);
+    const coordinatorRecover = vi.fn();
     const storeClose = vi.fn();
 
     vi.doMock('../../src/main/comfy', () => ({
@@ -58,6 +59,7 @@ describe('createAppServices construction failure', () => {
       JobCoordinator: vi.fn(function () {
         return {
           close: coordinatorClose,
+          recover: coordinatorRecover,
           enqueue: vi.fn(),
           cancel: vi.fn(),
           cancelActive: vi.fn(),
@@ -95,5 +97,6 @@ describe('createAppServices construction failure', () => {
     expect(comfyClose).toHaveBeenCalledTimes(1);
     expect(coordinatorClose).toHaveBeenCalledTimes(1);
     expect(storeClose).toHaveBeenCalledTimes(1);
+    expect(coordinatorRecover).toHaveBeenCalledWith([]);
   });
 });

@@ -155,6 +155,7 @@ export async function createAppServices(
       },
       onEventError: options.errorReporter ?? defaultErrorReporter,
     });
+    jobCoordinator.recover(store.listWorks());
     const startGeneration =
       options.generationHandler ??
       createGenerationHandler({
