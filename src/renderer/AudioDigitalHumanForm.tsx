@@ -74,7 +74,7 @@ export function AudioDigitalHumanForm({
     if (
       !Number.isFinite(resolvedDuration) ||
       resolvedDuration <= 0 ||
-      trimStart + resolvedDuration > audioSeconds
+      trimStart + resolvedDuration > audioSeconds + 0.001
     ) {
       setError('截取范围不能超出实际音频时长。');
       return;

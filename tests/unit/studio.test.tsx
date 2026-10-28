@@ -561,6 +561,36 @@ describe('audio digital human studio', () => {
     );
   });
 
+  test('allows automatic remaining duration within the floating-point epsilon', async () => {
+    const audioPath = 'G:\\recordings\\floating-point.mp3';
+    smo.files.selectAudio.mockResolvedValue(audioPath);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 10.01 });
+    fireEvent.loadedMetadata(audio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(10.01);
+
+    fireEvent.change(screen.getByLabelText('起始截取（秒）'), { target: { value: '0.71' } });
+    fireEvent.change(screen.getByLabelText('截取时长（秒）'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '自然说话，轻微点头' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          audioPath,
+          trimStart: 0.71,
+          duration: 9.3,
+        }),
+      ),
+    );
+  });
+
   test('reads audio metadata, starts with the selected clip seconds, and cancels by job id', async () => {
     const audioPath = 'G:\\recordings\\voice.mp3';
     smo.files.selectAudio.mockResolvedValue(audioPath);

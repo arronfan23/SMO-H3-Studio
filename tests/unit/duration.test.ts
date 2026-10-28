@@ -13,6 +13,6 @@ describe('estimateNarrationDuration', () => {
   });
 
   test('adds Chinese and English speaking time together', () => {
-    expect(estimateNarrationDuration('你好 one two')).toBe(4);
+    expect(estimateNarrationDuration('你好世界 one two three four five six seven eight nine ten')).toBe(7);
   });
 });
