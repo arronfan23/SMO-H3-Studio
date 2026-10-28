@@ -33,6 +33,10 @@ export function AudioDigitalHumanForm({
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const { url: audioUrl, error: mediaError } = useMediaUrl(audioPath);
+  const remainingSeconds =
+    audioSeconds !== null && Number.isFinite(trimStart) && trimStart >= 0
+      ? audioSeconds - trimStart
+      : null;
 
   const selectAudio = async (): Promise<void> => {
     setSelecting(true);
@@ -175,7 +179,7 @@ export function AudioDigitalHumanForm({
             type="number"
             min={0}
             step={0.01}
-            value={trimStart}
+            value={Number.isNaN(trimStart) ? '' : trimStart}
             onChange={(event) => setTrimStart(event.target.valueAsNumber)}
           />
         </div>
@@ -196,7 +200,11 @@ export function AudioDigitalHumanForm({
           />
           {duration === '' && audioSeconds !== null && (
             <p id="audio-duration-hint" className="skill-description">
-              留空自动：使用剩余 {(audioSeconds - trimStart).toFixed(2)} 秒
+              {remainingSeconds !== null &&
+              Number.isFinite(remainingSeconds) &&
+              remainingSeconds > 0
+                ? `留空自动：使用剩余 ${remainingSeconds.toFixed(2)} 秒`
+                : '留空自动：使用剩余音频时长'}
             </p>
           )}
         </div>

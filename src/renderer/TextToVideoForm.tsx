@@ -176,7 +176,7 @@ export function TextToVideoForm({
           />
           {duration === '' && (
             <p id="text-duration-hint" className="skill-description">
-              留空自动：约 {estimateNarrationDuration(originalText)} 秒（含 2 秒收尾）
+              留空自动：约 {resolveDuration(activeTab === 'polished')} 秒（含 2 秒收尾）
             </p>
           )}
         </div>

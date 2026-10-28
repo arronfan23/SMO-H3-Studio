@@ -8,7 +8,7 @@ import {
   SKILL_OPTIONS,
 } from '../../src/renderer/skill-options';
 import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
-import type { SmoApi } from '../../src/shared/ipc';
+import type { PolishResult, SmoApi } from '../../src/shared/ipc';
 import type { Avatar, Work } from '../../src/shared/types';
 
 const avatar: Avatar = {
@@ -430,15 +430,17 @@ describe('text-to-video studio', () => {
 
   test('estimates a blank duration from the original text and reuses it after polishing', async () => {
     const originalText = 'one two three four five six seven eight nine ten';
+    const changedOriginalText = '汉'.repeat(100);
     const polishedText =
       '<Picture 1> 中的主播在明亮演播室里面对镜头，' +
       '缓慢转身并自然挥手，镜头平稳推进。'.repeat(12);
-    smo.llm.polish.mockResolvedValue({
-      text: polishedText,
-      skill: 'h3-prompt-writing',
-      mode: 'ref2va',
-      attempts: 1,
-    });
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
     await renderStudio();
     fireEvent.change(screen.getByLabelText('原始文字'), {
       target: { value: originalText },
@@ -454,8 +456,24 @@ describe('text-to-video studio', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
 
+    await waitFor(() =>
+      expect(smo.llm.polish).toHaveBeenCalledWith(expect.objectContaining({ duration: 6 })),
+    );
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: changedOriginalText },
+    });
+    expect(screen.getByText('留空自动：约 15 秒（含 2 秒收尾）')).toBeInTheDocument();
+
+    await act(async () => {
+      resolvePolish?.({
+        text: polishedText,
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+
     expect(await screen.findByRole('textbox', { name: '润色结果' })).toHaveValue(polishedText);
-    expect(smo.llm.polish).toHaveBeenCalledWith(expect.objectContaining({ duration: 6 }));
 
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
 
@@ -464,6 +482,11 @@ describe('text-to-video studio', () => {
         expect.objectContaining({ prompt: polishedText, duration: 6 }),
       ),
     );
+    expect(screen.getByText('留空自动：约 6 秒（含 2 秒收尾）')).toHaveAttribute(
+      'id',
+      'text-duration-hint',
+    );
+    expect(screen.queryByText('留空自动：约 15 秒（含 2 秒收尾）')).not.toBeInTheDocument();
   });
 
   test('keeps the original text after a polish failure and can generate it', async () => {
@@ -522,6 +545,74 @@ describe('text-to-video studio', () => {
 });
 
 describe('audio digital human studio', () => {
+  async function renderLoadedAudio(audioPath: string, seconds: number): Promise<void> {
+    smo.files.selectAudio.mockResolvedValue(audioPath);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: seconds });
+    fireEvent.loadedMetadata(audio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(seconds);
+  }
+
+  test.each([
+    { scenario: 'blank', trimStart: '' },
+    { scenario: 'out-of-range', trimStart: '13' },
+  ])('shows generic automatic duration feedback when trim start is $scenario', async ({ trimStart }) => {
+    await renderLoadedAudio('G:\\recordings\\invalid-trim.mp3', 12.5);
+    const trimInput = screen.getByLabelText('起始截取（秒）');
+    fireEvent.change(screen.getByLabelText('截取时长（秒）'), { target: { value: '' } });
+    fireEvent.change(trimInput, { target: { value: trimStart } });
+
+    expect(screen.getByText('留空自动：使用剩余音频时长')).toHaveAttribute(
+      'id',
+      'audio-duration-hint',
+    );
+    expect(screen.queryByText(/留空自动：使用剩余 .* 秒/)).not.toBeInTheDocument();
+
+    fireEvent.change(trimInput, { target: { value: '1.25' } });
+
+    expect(screen.getByText('留空自动：使用剩余 11.25 秒')).toBeInTheDocument();
+    expect(screen.queryByText('留空自动：使用剩余音频时长')).not.toBeInTheDocument();
+  });
+
+  test.each([
+    {
+      scenario: 'a range slightly beyond epsilon',
+      seconds: 12.4989,
+      trimStart: '1.25',
+      clipDuration: '11.25',
+    },
+    {
+      scenario: 'a trim start equal to the audio duration',
+      seconds: 12.5,
+      trimStart: '12.5',
+      clipDuration: '12.5',
+    },
+    {
+      scenario: 'a trim start beyond the audio duration',
+      seconds: 12.5,
+      trimStart: '12.51',
+      clipDuration: '12.5',
+    },
+  ])('rejects $scenario', async ({ seconds, trimStart, clipDuration }) => {
+    await renderLoadedAudio('G:\\recordings\\rejected-trim.mp3', seconds);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '自然说话，轻微点头' },
+    });
+    fireEvent.change(screen.getByLabelText('起始截取（秒）'), { target: { value: trimStart } });
+    fireEvent.change(screen.getByLabelText('截取时长（秒）'), {
+      target: { value: clipDuration },
+    });
+    expect(screen.getByLabelText('起始截取（秒）')).toHaveValue(Number(trimStart));
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(Number(clipDuration));
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('截取范围不能超出实际音频时长');
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
   test('uses the remaining audio seconds when the clip duration is blank', async () => {
     const audioPath = 'G:\\recordings\\remaining.mp3';
     smo.files.selectAudio.mockResolvedValue(audioPath);
