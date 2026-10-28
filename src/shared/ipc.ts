@@ -84,6 +84,7 @@ const generationRequestSchema = z
     seed: z.number().int().nonnegative(),
     audioPath: nonEmptyString.optional(),
     trimStart: nonNegativeFiniteNumber.optional(),
+    subtitles: z.boolean().optional(),
     retryOf: z.string().optional(),
   })
   .strict()
@@ -132,6 +133,7 @@ const hardwareProfileSchema = z
     preset: z.enum(['conservative', 'balanced-16gb', 'high-memory-candidate']),
     modelPolicy: z.enum(['int8', 'bf16-if-present']),
     megapixels: positiveFiniteNumber,
+    aspectRatio: nonEmptyString.optional(),
     lowvram: z.boolean(),
     tiling: z.union([z.literal('auto'), z.number().int().positive()]),
     requiresConfirmation: z.boolean(),

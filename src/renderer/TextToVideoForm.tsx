@@ -1,6 +1,13 @@
 import { useState } from 'react';
 import { Sparkles, Video } from 'lucide-react';
 import { SKILL_NAMES, type SkillName } from '../shared/skills';
+import {
+  DEFAULT_GENERATION_OPTIONS,
+  DEFAULT_MODEL_DIRECTORY,
+  buildHardwareProfile,
+  type GenerationOptionsValue,
+} from '../shared/generation-options';
+import { GenerationOptions } from './GenerationOptions';
 import { JobStatus } from './JobStatus';
 import { errorMessage } from './ui';
 
@@ -19,6 +26,9 @@ export function TextToVideoForm({
   const [skill, setSkill] = useState<'auto' | SkillName>('auto');
   const [duration, setDuration] = useState(8);
   const [seed, setSeed] = useState(42);
+  const [options, setOptions] = useState<GenerationOptionsValue>(
+    DEFAULT_GENERATION_OPTIONS,
+  );
   const [polishing, setPolishing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,12 +84,19 @@ export function TextToVideoForm({
     setError(null);
     setJobId(null);
     try {
+      await window.smo.hardware.apply({
+        mode: 'text',
+        profile: buildHardwareProfile(options),
+        confirmed: true,
+        modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      });
       const result = await window.smo.jobs.start({
         mode: 'text',
         avatarId,
         prompt,
         duration,
         seed,
+        subtitles: options.subtitles,
       });
       setJobId(result.id);
     } catch (startError) {
@@ -108,6 +125,13 @@ export function TextToVideoForm({
           {SKILL_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}
         </select>
       </div>
+
+      <GenerationOptions
+        idPrefix="text"
+        value={options}
+        onChange={setOptions}
+        disabled={submitting}
+      />
 
       <div className="form-row">
         <div className="field">

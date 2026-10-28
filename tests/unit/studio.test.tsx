@@ -1,7 +1,8 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
+import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 import type { SmoApi } from '../../src/shared/ipc';
 import type { Avatar, Work } from '../../src/shared/types';
 
@@ -78,6 +79,10 @@ beforeEach(() => {
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
   smo.comfy.start.mockResolvedValue({ system: {}, devices: [] });
+  smo.hardware.apply.mockResolvedValue({
+    path: 'G:\\SMO-H3-Data\\workflow-profiles\\balanced-16gb-text.json',
+    profile: {},
+  });
 });
 
 afterEach(() => {
@@ -374,13 +379,16 @@ describe('text-to-video studio', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
 
-    expect(smo.jobs.start).toHaveBeenCalledWith({
-      mode: 'text',
-      avatarId: avatar.id,
-      prompt: '用户最终确认的镜头文本',
-      duration: 9,
-      seed: 42,
-    });
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith({
+        mode: 'text',
+        avatarId: avatar.id,
+        prompt: '用户最终确认的镜头文本',
+        duration: 9,
+        seed: 42,
+        subtitles: false,
+      }),
+    );
     expect(await screen.findByText('job-1')).toBeInTheDocument();
     expect(screen.getByText('等待中（pending）')).toBeInTheDocument();
   });
@@ -401,8 +409,10 @@ describe('text-to-video studio', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
-    expect(smo.jobs.start).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: '保留这段原文', mode: 'text' }),
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt: '保留这段原文', mode: 'text' }),
+      ),
     );
   });
 
@@ -466,19 +476,153 @@ describe('audio digital human studio', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
 
     expect(smo.files.mediaUrl).toHaveBeenCalledWith(audioPath);
-    expect(smo.jobs.start).toHaveBeenCalledWith({
-      mode: 'audio',
-      avatarId: avatar.id,
-      prompt: '自然说话，轻微点头',
-      audioPath,
-      trimStart: 1.25,
-      duration: 6,
-      seed: 7,
-    });
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith({
+        mode: 'audio',
+        avatarId: avatar.id,
+        prompt: '自然说话，轻微点头',
+        audioPath,
+        trimStart: 1.25,
+        duration: 6,
+        seed: 7,
+        subtitles: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(smo.hardware.apply).toHaveBeenCalledWith({
+        mode: 'audio',
+        profile: {
+          preset: 'balanced-16gb',
+          modelPolicy: 'int8',
+          megapixels: 0.7,
+          aspectRatio: '16:9 (Widescreen)',
+          lowvram: true,
+          tiling: 'auto',
+          requiresConfirmation: true,
+        },
+        confirmed: true,
+        modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      }),
+    );
+    const [applyOrder] = smo.hardware.apply.mock.invocationCallOrder;
+    const [startOrder] = smo.jobs.start.mock.invocationCallOrder;
+    expect(applyOrder).toBeLessThan(startOrder);
     expect(await screen.findByText('运行中（running）')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '取消当前任务' }));
     expect(smo.jobs.cancel).toHaveBeenCalledWith('audio-job');
     expect(smo.jobs.cancel).not.toHaveBeenCalledWith();
+  });
+});
+
+describe('generation options and hardware apply', () => {
+  function textPanel(): HTMLElement {
+    return screen.getByRole('tabpanel', { name: '文字生视频' });
+  }
+
+  test('renders H3 model, aspect ratio, resolution, and subtitle controls with INT8 defaults', async () => {
+    await renderStudio();
+    const panel = within(textPanel());
+
+    expect(panel.getByLabelText('H3 模型')).toHaveValue('int8');
+    expect(panel.getByText('BF16 大显存候选，未实测')).toBeInTheDocument();
+    expect(panel.getByLabelText('视频比例')).toHaveValue('16:9 (Widescreen)');
+    expect(panel.getByLabelText('分辨率')).toHaveValue('0.7');
+    expect(panel.getByLabelText('同步字幕')).not.toBeChecked();
+  });
+
+  test('applies the default INT8 profile before starting the text job', async () => {
+    await renderStudio();
+    const panel = within(textPanel());
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '默认选项直接生成' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalled());
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.hardware.apply).toHaveBeenCalledWith({
+      mode: 'text',
+      profile: {
+        preset: 'balanced-16gb',
+        modelPolicy: 'int8',
+        megapixels: 0.7,
+        aspectRatio: '16:9 (Widescreen)',
+        lowvram: true,
+        tiling: 'auto',
+        requiresConfirmation: true,
+      },
+      confirmed: true,
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+    });
+    const [applyOrder] = smo.hardware.apply.mock.invocationCallOrder;
+    const [startOrder] = smo.jobs.start.mock.invocationCallOrder;
+    expect(applyOrder).toBeLessThan(startOrder);
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: '默认选项直接生成', subtitles: false }),
+    );
+  });
+
+  test('maps BF16, aspect ratio, and resolution choices onto the hardware profile', async () => {
+    await renderStudio();
+    const panel = within(textPanel());
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '调整选项后再生成' },
+    });
+    fireEvent.change(panel.getByLabelText('H3 模型'), { target: { value: 'bf16' } });
+    fireEvent.change(panel.getByLabelText('视频比例'), {
+      target: { value: '9:16 (Portrait Widescreen)' },
+    });
+    fireEvent.change(panel.getByLabelText('分辨率'), { target: { value: '1' } });
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalled());
+    expect(smo.hardware.apply).toHaveBeenCalledWith({
+      mode: 'text',
+      profile: {
+        preset: 'high-memory-candidate',
+        modelPolicy: 'bf16-if-present',
+        megapixels: 1,
+        aspectRatio: '9:16 (Portrait Widescreen)',
+        lowvram: false,
+        tiling: 'auto',
+        requiresConfirmation: true,
+      },
+      confirmed: true,
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+    });
+  });
+
+  test('sends subtitles: true when the subtitle option is enabled', async () => {
+    await renderStudio();
+    const panel = within(textPanel());
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '需要同步字幕' },
+    });
+    fireEvent.click(panel.getByLabelText('同步字幕'));
+    expect(panel.getByLabelText('同步字幕')).toBeChecked();
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalled());
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: '需要同步字幕', subtitles: true }),
+    );
+  });
+
+  test('shows the apply error and skips jobs.start when hardware apply fails', async () => {
+    smo.hardware.apply.mockRejectedValue(new Error('模型目录不存在'));
+    await renderStudio();
+    const panel = within(textPanel());
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '应用失败的场景' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('模型目录不存在');
+    expect(smo.jobs.start).not.toHaveBeenCalled();
   });
 });
 

@@ -8,6 +8,7 @@ export interface GenerationRequest {
   seed: number;
   audioPath?: string;
   trimStart?: number;
+  subtitles?: boolean;
   retryOf?: string;
 }
 
@@ -90,6 +91,8 @@ export interface HardwareProfile {
   preset: HardwarePreset;
   modelPolicy: HardwareModelPolicy;
   megapixels: number;
+  /** Raw H3 ResolutionSelector aspect ratio; omitted to keep the frozen workflow value. */
+  aspectRatio?: string;
   lowvram: boolean;
   tiling: number | 'auto';
   requiresConfirmation: boolean;

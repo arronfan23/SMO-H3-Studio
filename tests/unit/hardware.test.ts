@@ -34,7 +34,7 @@ function makeGraph() {
   return {
     resolution: {
       class_type: 'ResolutionSelector',
-      inputs: { megapixels: 0.7, multiple: 32 },
+      inputs: { aspect_ratio: '16:9 (Widescreen)', megapixels: 0.7, multiple: 32 },
     },
     sampler: {
       class_type: 'SelfLiftAvatarH3Sampler',
@@ -269,6 +269,74 @@ describe('applyHardwareProfile', () => {
       expect(node.inputs).not.toHaveProperty('lowvram');
     }
     expect(copy.unet.inputs.unet_name).toBe(INT8_UNET);
+  });
+});
+
+describe('applyHardwareProfile aspect ratio', () => {
+  test('writes megapixels and aspect ratio only into the ResolutionSelector copy', () => {
+    const graph = makeGraph();
+    const original = structuredClone(graph);
+
+    const copy = hardware.applyHardwareProfile(
+      graph,
+      makeProfile({ megapixels: 1, aspectRatio: '9:16 (Portrait Widescreen)' }),
+      true,
+      makeInt8ModelDirectory(),
+    );
+
+    expect(copy).not.toBe(graph);
+    expect(copy.resolution.inputs).toMatchObject({
+      megapixels: 1,
+      aspect_ratio: '9:16 (Portrait Widescreen)',
+      multiple: 32,
+    });
+    expect(copy.sampler.inputs).not.toHaveProperty('aspect_ratio');
+    expect(copy.unrelated.inputs.nested).toEqual({ value: 1 });
+    expect(graph).toEqual(original);
+  });
+
+  test('keeps the frozen aspect ratio when the profile has none', () => {
+    const graph = makeGraph();
+    const original = structuredClone(graph);
+
+    const copy = hardware.applyHardwareProfile(
+      graph,
+      makeProfile(),
+      true,
+      makeInt8ModelDirectory(),
+    );
+
+    expect(copy.resolution.inputs.aspect_ratio).toBe('16:9 (Widescreen)');
+    expect(graph).toEqual(original);
+  });
+
+  test.each(['', '   '])('ignores an empty aspect ratio value %j', (aspectRatio) => {
+    const graph = makeGraph();
+
+    const copy = hardware.applyHardwareProfile(
+      graph,
+      makeProfile({ aspectRatio }),
+      true,
+      makeInt8ModelDirectory(),
+    );
+
+    expect(copy.resolution.inputs.aspect_ratio).toBe('16:9 (Widescreen)');
+  });
+
+  test('keeps the UNET selection unchanged when an aspect ratio is set', () => {
+    const modelDirectory = makeModelDirectory();
+    writeFileSync(join(modelDirectory, INT8_UNET), 'int8');
+    writeFileSync(join(modelDirectory, BF16_UNET), 'bf16');
+
+    const copy = hardware.applyHardwareProfile(
+      makeGraph(),
+      makeProfile({ modelPolicy: 'bf16-if-present', aspectRatio: '1:1 (Square)' }),
+      true,
+      modelDirectory,
+    );
+
+    expect(copy.unet.inputs.unet_name).toBe(BF16_UNET);
+    expect(copy.resolution.inputs.aspect_ratio).toBe('1:1 (Square)');
   });
 });
 

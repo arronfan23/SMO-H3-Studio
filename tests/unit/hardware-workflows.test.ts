@@ -346,4 +346,46 @@ describe('hardware workflow copies', () => {
       'high-memory-candidate-text.json',
     ]);
   });
+
+  test('writes the requested aspect ratio into the copy while leaving the frozen workflow untouched', async () => {
+    const harness = await makeHarness();
+    const profile = makeProfile({ aspectRatio: '21:9 (Ultrawide)' });
+
+    const result = await harness.store.apply({
+      mode: 'text',
+      profile,
+      confirmed: true,
+      modelDirectory: harness.modelDirectory,
+    });
+
+    const copy = JSON.parse(await readFile(result.path, 'utf8'));
+    expect(copy['115'].inputs).toMatchObject({
+      megapixels: 0.7,
+      aspect_ratio: '21:9 (Ultrawide)',
+    });
+    const frozen = JSON.parse(
+      await readFile(join(workflowsDirectory, WORKFLOW_FILENAMES.text), 'utf8'),
+    );
+    expect(frozen['115'].inputs.aspect_ratio).toBe('16:9 (Widescreen)');
+    expect(result.profile).toEqual(profile);
+  });
+
+  test.each(['text', 'audio'] as const)(
+    'keeps the frozen aspect ratio when the %s profile has none',
+    async (mode) => {
+      const harness = await makeHarness();
+
+      const result = await harness.store.apply({
+        mode,
+        profile: makeProfile(),
+        confirmed: true,
+        modelDirectory: harness.modelDirectory,
+      });
+
+      const copy = JSON.parse(await readFile(result.path, 'utf8'));
+      const resolutionNode = mode === 'text' ? copy['115'] : copy['61'];
+      expect(resolutionNode.inputs.aspect_ratio).toBe('16:9 (Widescreen)');
+      expect(resolutionNode.inputs.megapixels).toBe(0.7);
+    },
+  );
 });

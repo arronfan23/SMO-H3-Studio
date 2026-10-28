@@ -1,5 +1,12 @@
 import { useState } from 'react';
 import { FileAudio, Video } from 'lucide-react';
+import {
+  DEFAULT_GENERATION_OPTIONS,
+  DEFAULT_MODEL_DIRECTORY,
+  buildHardwareProfile,
+  type GenerationOptionsValue,
+} from '../shared/generation-options';
+import { GenerationOptions } from './GenerationOptions';
 import { JobStatus } from './JobStatus';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName } from './ui';
@@ -17,6 +24,9 @@ export function AudioDigitalHumanForm({
   const [trimStart, setTrimStart] = useState(0);
   const [duration, setDuration] = useState(0);
   const [seed, setSeed] = useState(42);
+  const [options, setOptions] = useState<GenerationOptionsValue>(
+    DEFAULT_GENERATION_OPTIONS,
+  );
   const [selecting, setSelecting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,6 +82,12 @@ export function AudioDigitalHumanForm({
     setError(null);
     setJobId(null);
     try {
+      await window.smo.hardware.apply({
+        mode: 'audio',
+        profile: buildHardwareProfile(options),
+        confirmed: true,
+        modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      });
       const result = await window.smo.jobs.start({
         mode: 'audio',
         avatarId,
@@ -80,6 +96,7 @@ export function AudioDigitalHumanForm({
         trimStart,
         duration,
         seed,
+        subtitles: options.subtitles,
       });
       setJobId(result.id);
     } catch (startError) {
@@ -126,6 +143,13 @@ export function AudioDigitalHumanForm({
         />
       )}
       {mediaError && <p className="form-error" role="alert">{mediaError}</p>}
+
+      <GenerationOptions
+        idPrefix="audio"
+        value={options}
+        onChange={setOptions}
+        disabled={submitting}
+      />
 
       <div className="field">
         <label htmlFor="audio-prompt">动作/画面提示词</label>

@@ -127,6 +127,12 @@ export function applyHardwareProfile<T extends Record<string, ComfyNode>>(
   for (const node of Object.values(copy)) {
     if (node.class_type === 'ResolutionSelector') {
       node.inputs.megapixels = profile.megapixels;
+      if (
+        typeof profile.aspectRatio === 'string' &&
+        profile.aspectRatio.trim().length > 0
+      ) {
+        node.inputs.aspect_ratio = profile.aspectRatio;
+      }
     }
 
     if (node.class_type === 'SelfLiftAvatarH3Sampler') {

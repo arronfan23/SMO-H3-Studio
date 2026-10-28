@@ -5,10 +5,122 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, test } from 'vitest';
+import {
+  ASPECT_RATIO_OPTIONS,
+  DEFAULT_GENERATION_OPTIONS,
+  DEFAULT_MODEL_DIRECTORY,
+  H3_MODEL_OPTIONS,
+  RESOLUTION_OPTIONS,
+  buildHardwareProfile,
+  withSubtitlePreference,
+} from '../../src/shared/generation-options';
 import { buildH3Frames, patchWorkflow } from '../../src/shared/workflow';
 import { WORKFLOW_NODES } from '../../src/shared/workflow-nodes';
 
 const projectRoot = fileURLToPath(new URL('../../', import.meta.url));
+
+describe('H3 generation options', () => {
+  test('ships the eight raw H3 aspect ratios with Chinese labels', () => {
+    expect(ASPECT_RATIO_OPTIONS.map((option) => option.value)).toEqual([
+      '1:1 (Square)',
+      '2:3 (Portrait Photo)',
+      '3:2 (Photo)',
+      '3:4 (Portrait Standard)',
+      '4:3 (Standard)',
+      '9:16 (Portrait Widescreen)',
+      '16:9 (Widescreen)',
+      '21:9 (Ultrawide)',
+    ]);
+    for (const option of ASPECT_RATIO_OPTIONS) {
+      expect(option.label).toMatch(/[一-龥]/);
+    }
+  });
+
+  test('offers 0.4/0.7/1.0 MP resolutions with INT8 as the default model', () => {
+    expect(RESOLUTION_OPTIONS.map((option) => option.value)).toEqual([0.4, 0.7, 1]);
+    expect(H3_MODEL_OPTIONS.map((option) => option.value)).toEqual(['int8', 'bf16']);
+    expect(H3_MODEL_OPTIONS.find((option) => option.value === 'bf16')?.label).toContain(
+      '大显存候选，未实测',
+    );
+    expect(DEFAULT_MODEL_DIRECTORY).toBe(
+      'G:\\H3Selflift整合包\\模型部分\\diffusion_models',
+    );
+    expect(DEFAULT_GENERATION_OPTIONS).toEqual({
+      model: 'int8',
+      aspectRatio: '16:9 (Widescreen)',
+      megapixels: 0.7,
+      subtitles: false,
+    });
+  });
+
+  test('maps INT8 to balanced-16gb and BF16 to high-memory-candidate profiles', () => {
+    expect(
+      buildHardwareProfile({ model: 'int8', aspectRatio: '3:2 (Photo)', megapixels: 0.4 }),
+    ).toEqual({
+      preset: 'balanced-16gb',
+      modelPolicy: 'int8',
+      megapixels: 0.4,
+      aspectRatio: '3:2 (Photo)',
+      lowvram: true,
+      tiling: 'auto',
+      requiresConfirmation: true,
+    });
+    expect(
+      buildHardwareProfile({
+        model: 'bf16',
+        aspectRatio: '21:9 (Ultrawide)',
+        megapixels: 1,
+      }),
+    ).toEqual({
+      preset: 'high-memory-candidate',
+      modelPolicy: 'bf16-if-present',
+      megapixels: 1,
+      aspectRatio: '21:9 (Ultrawide)',
+      lowvram: false,
+      tiling: 'auto',
+      requiresConfirmation: true,
+    });
+  });
+});
+
+describe('withSubtitlePreference', () => {
+  test('returns the prompt unchanged when subtitles are disabled', () => {
+    expect(withSubtitlePreference('任何提示词', false, 'text')).toBe('任何提示词');
+    expect(withSubtitlePreference('任何提示词', false, 'audio')).toBe('任何提示词');
+  });
+
+  test('appends narration-aware guidance for text mode', () => {
+    const result = withSubtitlePreference('主播微笑', true, 'text');
+
+    expect(result).toContain('主播微笑');
+    expect(result).toContain('旁白/对白');
+    expect(result).toContain('安全画面区');
+  });
+
+  test('appends voice-aware guidance for audio mode', () => {
+    const result = withSubtitlePreference('自然说话', true, 'audio');
+
+    expect(result).toContain('自然说话');
+    expect(result).toContain('上传语音');
+    expect(result).not.toContain('旁白/对白');
+  });
+
+  test.each(['请添加字幕', 'add subtitles please', 'include caption text'])(
+    'does not append guidance when the prompt already mentions subtitles: %s',
+    (prompt) => {
+      expect(withSubtitlePreference(prompt, true, 'text')).toBe(prompt);
+      expect(withSubtitlePreference(prompt, true, 'audio')).toBe(prompt);
+    },
+  );
+
+  test('appends the guidance exactly once even when applied repeatedly', () => {
+    const once = withSubtitlePreference('原始提示词', true, 'text');
+    const twice = withSubtitlePreference(once, true, 'text');
+
+    expect(twice).toBe(once);
+    expect(once.match(/同步显示/g)).toHaveLength(1);
+  });
+});
 
 type ApiNode = {
   class_type: string;
