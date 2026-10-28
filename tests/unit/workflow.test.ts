@@ -44,6 +44,10 @@ describe('H3 generation options', () => {
       '1.0MP（高清）',
     ]);
     expect(H3_MODEL_OPTIONS.map((option) => option.value)).toEqual(['int8', 'bf16']);
+    expect(H3_MODEL_OPTIONS.map((option) => option.label)).toEqual([
+      'INT8（16GB 推荐）',
+      'BF16 大显存候选，未实测',
+    ]);
     expect(H3_MODEL_OPTIONS.find((option) => option.value === 'bf16')?.label).toContain(
       '大显存候选，未实测',
     );

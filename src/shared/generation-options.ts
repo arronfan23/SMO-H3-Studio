@@ -54,7 +54,7 @@ export interface H3ModelChoice {
 }
 
 export const H3_MODEL_OPTIONS: readonly H3ModelChoice[] = [
-  { value: 'int8', label: 'INT8（默认）' },
+  { value: 'int8', label: 'INT8（16GB 推荐）' },
   { value: 'bf16', label: 'BF16 大显存候选，未实测' },
 ];
 
