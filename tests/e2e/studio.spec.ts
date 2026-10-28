@@ -2,7 +2,7 @@ import { test, expect, _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -593,6 +593,50 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     expect(retryWork!.status).toBe('done');
     await waitForStableStatus(page!, retryWork!.id, 'done');
     expect(comfyMock.submittedPromptIds.length).toBe(previousCount + 2);
+  });
+
+  test('deletes a completed work and removes the output video file', async () => {
+    const avatarName = 'E2E Delete Avatar';
+    await createAvatar(page!, avatarName);
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await openStudio(page!, avatarName);
+
+    await page!.fill('#original-text', 'Deletion removes the record and the video.');
+    await page!.click('button:has-text("AI 润色")');
+    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, jobId, 'done');
+
+    const workOutputDirectory = join(outputDirectory, 'SMO-H3', jobId);
+    const outputName = (await readdir(workOutputDirectory)).find((name) =>
+      name.endsWith('.mp4'),
+    );
+    expect(outputName).toBeDefined();
+    const videoPath = join(workOutputDirectory, outputName!);
+    expect(existsSync(videoPath)).toBe(true);
+
+    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page!.locator('.works-list article').filter({ hasText: jobId });
+    await expect(work).toBeVisible();
+    await expect(work).toContainText('已完成');
+
+    await work.getByRole('button', { name: '删除' }).click();
+    const dialog = page!.getByRole('dialog', { name: '删除作品' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(avatarName);
+    await expect(dialog).toContainText(outputName!);
+    await dialog.getByRole('button', { name: '确认删除' }).click();
+
+    await expect(work).toHaveCount(0);
+    await expect(dialog).toHaveCount(0);
+    expect(existsSync(videoPath)).toBe(false);
+
+    const avatarPhotos = await readdir(join(dataDirectory, 'avatars'));
+    expect(avatarPhotos.length).toBeGreaterThan(0);
+    for (const photo of avatarPhotos) {
+      expect(existsSync(join(dataDirectory, 'avatars', photo))).toBe(true);
+    }
   });
 
   test('restart preserves avatar, works and LLM config', async () => {

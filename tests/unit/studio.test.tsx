@@ -1306,3 +1306,164 @@ describe('works page actions', () => {
     expect(smo.works.list.mock.calls.length).toBe(listCallsBeforeRetry);
   });
 });
+
+describe('works deletion', () => {
+  const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
+
+  async function openWorksPage() {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByRole('heading', { name: '我的作品' });
+  }
+
+  test('asks for confirmation with model and file names and cancels without deleting', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+
+    const dialog = screen.getByRole('dialog', { name: '删除作品' });
+    expect(dialog).toHaveTextContent('薄荷主播');
+    expect(dialog).toHaveTextContent('finished.mp4');
+    expect(dialog).toHaveTextContent('作品记录和视频文件将一起删除，此操作不可撤销');
+    expect(smo.works.delete).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+
+    expect(smo.works.delete).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+  });
+
+  test('deletes a completed work after confirmation, closes the dialog, and refreshes', async () => {
+    smo.works.list
+      .mockResolvedValueOnce([createWork({ id: 'done-work', status: 'done', outputPath })])
+      .mockResolvedValue([]);
+    smo.works.delete.mockResolvedValue(undefined);
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => expect(smo.works.delete).toHaveBeenCalledWith('done-work'));
+    expect(await screen.findByText('还没有作品')).toBeInTheDocument();
+    expect(screen.queryByText('已完成（done）')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  test('shows the deletion error, keeps the dialog and work, and allows confirming again', async () => {
+    smo.works.list
+      .mockResolvedValueOnce([createWork({ id: 'done-work', status: 'done', outputPath })])
+      .mockResolvedValue([]);
+    smo.works.delete
+      .mockRejectedValueOnce(new Error('文件被占用'))
+      .mockResolvedValueOnce(undefined);
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('文件被占用');
+    expect(screen.getByRole('dialog', { name: '删除作品' })).toBeInTheDocument();
+    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => expect(smo.works.delete).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('还没有作品')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  test('only offers deletion for finished or failed works and describes failed records', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'pending-work', status: 'pending' }),
+      createWork({
+        id: 'running-work',
+        status: 'running',
+        metadata: { progress: { value: 1, max: 10 } },
+      }),
+      createWork({ id: 'failed-work', status: 'failed', error: 'ComfyUI 执行失败' }),
+    ]);
+    await openWorksPage();
+    await screen.findByText('失败（failed）');
+
+    const pendingCard = screen.getByText('pending-work').closest('article');
+    const runningCard = screen.getByText('running-work').closest('article');
+    expect(pendingCard).not.toBeNull();
+    expect(runningCard).not.toBeNull();
+    expect(
+      within(pendingCard as HTMLElement).queryByRole('button', { name: '删除' }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(runningCard as HTMLElement).queryByRole('button', { name: '删除' }),
+    ).not.toBeInTheDocument();
+
+    const failedCard = screen.getByText('failed-work').closest('article') as HTMLElement;
+    fireEvent.click(within(failedCard).getByRole('button', { name: '删除' }));
+
+    const dialog = screen.getByRole('dialog', { name: '删除作品' });
+    expect(dialog).toHaveTextContent('这条失败记录将被删除，此操作不可撤销');
+    expect(dialog).not.toHaveTextContent('视频文件');
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(smo.works.delete).not.toHaveBeenCalled();
+  });
+
+  test('disables the confirmation button while deleting', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+    let resolveDelete: (() => void) | undefined;
+    smo.works.delete.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDelete = resolve;
+        }),
+    );
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    expect(screen.getByRole('button', { name: '正在删除…' })).toBeDisabled();
+    expect(smo.works.delete).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveDelete?.();
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  test('does not refresh or update state after unmounting during a deletion', async () => {
+    let resolveDelete: (() => void) | undefined;
+    smo.works.delete.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDelete = resolve;
+        }),
+    );
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+    const view = render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByText('已完成（done）');
+    const listCallsBeforeDelete = smo.works.list.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(smo.works.delete).toHaveBeenCalledWith('done-work'));
+    view.unmount();
+    await act(async () => {
+      resolveDelete?.();
+    });
+
+    expect(smo.works.list.mock.calls.length).toBe(listCallsBeforeDelete);
+  });
+});

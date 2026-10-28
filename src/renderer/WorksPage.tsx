@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw } from 'lucide-react';
+import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react';
 import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { WorkProgressBar } from './WorkProgressBar';
 import { useMediaUrl } from './useMediaUrl';
-import { errorMessage, parentPath, readWorkProgress } from './ui';
+import { errorMessage, fileName, parentPath, readWorkProgress } from './ui';
 
 const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -34,6 +34,9 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [activeFilter, setActiveFilter] = useState<'all' | VideoMode | WorkStatus>('all');
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [retryError, setRetryError] = useState<Record<string, string>>({});
+  const [deleteTarget, setDeleteTarget] = useState<Work | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -128,6 +131,42 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     }
   };
 
+  const openDeleteDialog = (work: Work): void => {
+    setDeleteTarget(work);
+    setDeleteError(null);
+  };
+
+  const closeDeleteDialog = (): void => {
+    setDeleteTarget(null);
+    setDeleteError(null);
+  };
+
+  const confirmDelete = async (): Promise<void> => {
+    if (deleteTarget === null || deleting) {
+      return;
+    }
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await window.smo.works.delete(deleteTarget.id);
+      if (!mountedRef.current) {
+        return;
+      }
+      await refresh();
+      if (mountedRef.current) {
+        setDeleteTarget(null);
+      }
+    } catch (deletionError) {
+      if (mountedRef.current) {
+        setDeleteError(errorMessage(deletionError));
+      }
+    } finally {
+      if (mountedRef.current) {
+        setDeleting(false);
+      }
+    }
+  };
+
   return (
     <div className="standard-page">
       <header className="page-header">
@@ -207,13 +246,53 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                       onClick={() => void window.smo.comfy.open()}
                       aria-label="打开 ComfyUI"
                     >
-                      <ExternalLink size={16} aria-hidden="true" />
+                    <ExternalLink size={16} aria-hidden="true" />
                     </button>
                   </>
+                )}
+                {(work.status === 'done' || work.status === 'failed') && (
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    onClick={() => openDeleteDialog(work)}
+                  >
+                    <Trash2 size={16} aria-hidden="true" />
+                    删除
+                  </button>
                 )}
               </div>
             </article>
           ))}
+        </div>
+      )}
+      {deleteTarget !== null && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="删除作品">
+          <div className="modal-card">
+            <h3>删除作品</h3>
+            {deleteTarget.outputPath !== null && deleteTarget.outputPath.trim().length > 0 ? (
+              <p>
+                确定要删除模特“{avatarName(deleteTarget.avatarId)}”的作品“
+                {fileName(deleteTarget.outputPath)}”吗？
+                作品记录和视频文件将一起删除，此操作不可撤销。
+              </p>
+            ) : (
+              <p>这条失败记录将被删除，此操作不可撤销。</p>
+            )}
+            {deleteError && <p className="form-error" role="alert">{deleteError}</p>}
+            <div className="modal-actions">
+              <button className="button button-secondary" type="button" onClick={closeDeleteDialog}>
+                <X size={16} aria-hidden="true" /> 取消
+              </button>
+              <button
+                className="button button-danger"
+                type="button"
+                disabled={deleting}
+                onClick={() => void confirmDelete()}
+              >
+                {deleting ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
