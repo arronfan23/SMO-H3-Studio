@@ -640,6 +640,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   });
 
   test('no layout regressions on main views', async () => {
+    const testInfo = test.info();
     await expect(page!.locator('.app-shell')).toBeVisible();
     await createAvatar(page!, 'E2E Layout Avatar');
 
@@ -688,6 +689,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#llm-model',
         '.settings-actions .button-primary',
       ]);
+
+      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await expect(page!.locator('#text-mode-panel')).toBeVisible();
+      await page!.screenshot({
+        path: testInfo.outputPath(`studio-${viewport.width}x${viewport.height}.png`),
+      });
     }
   });
 

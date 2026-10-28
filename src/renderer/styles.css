@@ -1,4 +1,6 @@
 :root {
+  --radius-panel: 12px;
+  --radius-control: 8px;
   color: #202723;
   background: #f2f5f2;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -115,7 +117,7 @@ video:focus-visible {
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
 }
 
 .nav-item svg {
@@ -162,7 +164,7 @@ video:focus-visible {
   min-width: 0;
   background: #ffffff;
   border: 1px solid #dce3dd;
-  border-radius: 6px;
+  border-radius: var(--radius-panel);
 }
 
 .person-preview {
@@ -201,7 +203,7 @@ video:focus-visible {
   font-size: 13px;
   text-align: center;
   background: #e8ede8;
-  border-radius: 4px;
+  border-radius: var(--radius-panel);
 }
 
 .avatar-image img {
@@ -228,7 +230,7 @@ video:focus-visible {
   gap: 4px;
   padding: 4px;
   background: #edf1ed;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
 }
 
 .tab-list button {
@@ -238,7 +240,7 @@ video:focus-visible {
   color: #5c6760;
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .tab-list button[aria-selected="true"] {
@@ -287,7 +289,7 @@ video:focus-visible {
   line-height: 1.5;
   background: #ffffff;
   border: 1px solid #cbd5cd;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .field input,
@@ -352,7 +354,7 @@ video:focus-visible {
   white-space: normal;
   overflow-wrap: anywhere;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .button:not(:disabled):active {
@@ -396,7 +398,7 @@ video:focus-visible {
   font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .form-error {
@@ -453,7 +455,7 @@ video:focus-visible {
   padding: 4px 7px;
   font-size: 12px;
   font-weight: 650;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .status-pending {
@@ -489,7 +491,7 @@ video:focus-visible {
   height: 8px;
   overflow: hidden;
   background: #e3e9e4;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
 }
 
 .work-progress-fill {
@@ -573,7 +575,7 @@ video:focus-visible {
   padding: 9px 11px;
   font-size: 13px;
   background: #f3f6f3;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .audio-file strong,
@@ -656,7 +658,7 @@ video:focus-visible {
   object-fit: contain;
   box-sizing: border-box;
   border: 1px solid #dce3dd;
-  border-radius: 6px;
+  border-radius: var(--radius-panel);
   background: #f4f6f4;
 }
 
@@ -666,7 +668,7 @@ video:focus-visible {
   height: 160px;
   box-sizing: border-box;
   border: 1px dashed #c9d2cc;
-  border-radius: 6px;
+  border-radius: var(--radius-panel);
   color: #68746c;
   font-size: 13px;
   text-align: center;
@@ -698,7 +700,7 @@ video:focus-visible {
   padding: 14px;
   background: #ffffff;
   border: 1px solid #dce3dd;
-  border-radius: 6px;
+  border-radius: var(--radius-panel);
 }
 
 .avatar-item {
@@ -738,7 +740,7 @@ video:focus-visible {
   aspect-ratio: 16 / 9;
   max-height: 420px;
   background: #1d211e;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .video-placeholder {
@@ -910,7 +912,7 @@ video:focus-visible {
   color: #465149;
   background: #f7f9f7;
   border-color: #cbd5cd;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .button-icon:hover:not(:disabled) {
@@ -935,7 +937,7 @@ video:focus-visible {
   font-weight: 400;
   color: #202723;
   background: transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .button-text:hover:not(:disabled) {
@@ -957,7 +959,7 @@ video:focus-visible {
   max-width: 420px;
   padding: 22px;
   background: #ffffff;
-  border-radius: 8px;
+  border-radius: var(--radius-panel);
   box-shadow: 0 12px 40px rgb(23 37 29 / 20%);
 }
 
@@ -1011,7 +1013,7 @@ video:focus-visible {
   list-style: none;
   background: #f7f9f7;
   border: 1px solid #dce3dd;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 
 .model-options li {
