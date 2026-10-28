@@ -710,6 +710,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await setViewport(app!, page!, viewport.width, viewport.height);
 
       await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      // The studio preserves the previously selected mode, so switch back to
+      // text mode explicitly instead of relying on an implicit reset.
+      await page!.click('#text-mode-tab');
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
       await assertViewLayout(page!, 'studio-text', [
         '#original-text',
@@ -748,6 +751,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       ]);
 
       await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      // We left the studio in audio mode; the mode must be preserved.
+      await expect(page!.locator('#audio-mode-panel')).toBeVisible();
+      await page!.click('#text-mode-tab');
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
       await page!.screenshot({
         path: testInfo.outputPath(`studio-${viewport.width}x${viewport.height}.png`),
