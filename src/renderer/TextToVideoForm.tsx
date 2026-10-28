@@ -125,6 +125,7 @@ export function TextToVideoForm({
         <label htmlFor="text-skill">视频风格（Skill）</label>
         <select
           id="text-skill"
+          aria-describedby="text-skill-description"
           value={skill}
           onChange={(event) => setSkill(event.target.value as 'auto' | SkillName)}
         >
@@ -133,7 +134,7 @@ export function TextToVideoForm({
             <option key={name} value={name}>{SKILL_OPTIONS[name].title}</option>
           ))}
         </select>
-        <p className="skill-description">{skillDescription}</p>
+        <p id="text-skill-description" className="skill-description">{skillDescription}</p>
       </div>
 
       <GenerationOptions

@@ -264,6 +264,13 @@ video:focus-visible {
   gap: 6px;
 }
 
+.skill-description {
+  margin: -2px 0 0;
+  color: #68746c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .field label {
   color: #465149;
   font-size: 13px;

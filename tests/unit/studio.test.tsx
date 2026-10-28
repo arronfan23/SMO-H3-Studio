@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
+import { SKILL_NAMES } from '../../src/shared/skills';
 import {
   AUTO_SKILL_OPTION,
   SKILL_OPTIONS,
@@ -551,7 +552,7 @@ describe('generation options and hardware apply', () => {
     for (const option of options.slice(1)) {
       expect(option.textContent).not.toMatch(/[a-z]+-[a-z]+/);
     }
-    expect(options).toHaveLength(10);
+    expect(options).toHaveLength(SKILL_NAMES.length + 1);
 
     expect(panel.getByText(AUTO_SKILL_OPTION.description)).toBeInTheDocument();
 
