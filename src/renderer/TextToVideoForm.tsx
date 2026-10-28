@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Sparkles, Video } from 'lucide-react';
 import { SKILL_NAMES, type SkillName } from '../shared/skills';
+import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
 import {
   DEFAULT_GENERATION_OPTIONS,
   buildHardwareProfile,
@@ -34,6 +35,11 @@ export function TextToVideoForm({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
+
+  const skillDescription =
+    skill === 'auto'
+      ? AUTO_SKILL_OPTION.description
+      : SKILL_OPTIONS[skill].description;
 
   const polish = async (): Promise<void> => {
     const text = originalText.trim();
@@ -116,15 +122,18 @@ export function TextToVideoForm({
       }}
     >
       <div className="field">
-        <label htmlFor="text-skill">Skill</label>
+        <label htmlFor="text-skill">视频风格（Skill）</label>
         <select
           id="text-skill"
           value={skill}
           onChange={(event) => setSkill(event.target.value as 'auto' | SkillName)}
         >
-          <option value="auto">自动选择</option>
-          {SKILL_NAMES.map((name) => <option key={name} value={name}>{name}</option>)}
+          <option value="auto">{AUTO_SKILL_OPTION.title}</option>
+          {SKILL_NAMES.map((name) => (
+            <option key={name} value={name}>{SKILL_OPTIONS[name].title}</option>
+          ))}
         </select>
+        <p className="skill-description">{skillDescription}</p>
       </div>
 
       <GenerationOptions

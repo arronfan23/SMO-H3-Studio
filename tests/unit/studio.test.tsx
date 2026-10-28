@@ -2,6 +2,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
+import {
+  AUTO_SKILL_OPTION,
+  SKILL_OPTIONS,
+} from '../../src/renderer/skill-options';
 import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 import type { SmoApi } from '../../src/shared/ipc';
 import type { Avatar, Work } from '../../src/shared/types';
@@ -367,7 +371,7 @@ describe('text-to-video studio', () => {
     fireEvent.change(screen.getByLabelText('原始文字'), {
       target: { value: '主播转身并挥手' },
     });
-    fireEvent.change(screen.getByLabelText('Skill'), {
+    fireEvent.change(screen.getByLabelText('视频风格（Skill）'), {
       target: { value: 'h3-prompt-writing' },
     });
     fireEvent.change(screen.getByLabelText('视频时长（秒）'), { target: { value: '9' } });
@@ -535,6 +539,27 @@ describe('generation options and hardware apply', () => {
   function textPanel(): HTMLElement {
     return screen.getByRole('tabpanel', { name: '文字生视频' });
   }
+
+  test('shows Chinese skill titles without raw English ids and explains the selection', async () => {
+    await renderStudio();
+    const panel = within(textPanel());
+    const select = panel.getByLabelText('视频风格（Skill）');
+
+    const options = within(select).getAllByRole('option');
+    expect(options[0]).toHaveValue('auto');
+    expect(options[0]).toHaveTextContent('自动选择（推荐）');
+    for (const option of options.slice(1)) {
+      expect(option.textContent).not.toMatch(/[a-z]+-[a-z]+/);
+    }
+    expect(options).toHaveLength(10);
+
+    expect(panel.getByText(AUTO_SKILL_OPTION.description)).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: 'h3-prompt-writing' } });
+    expect(
+      panel.getByText(SKILL_OPTIONS['h3-prompt-writing'].description),
+    ).toBeInTheDocument();
+  });
 
   test('renders H3 model, aspect ratio, resolution, and subtitle controls with INT8 defaults', async () => {
     await renderStudio();
