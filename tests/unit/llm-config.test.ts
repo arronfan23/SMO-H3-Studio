@@ -127,6 +127,12 @@ const brokenCipher: SecretCipher = {
   },
 };
 
+const unavailableCipher: SecretCipher = {
+  isEncryptionAvailable: () => false,
+  encryptString: (value: string) => Buffer.from(value, 'utf8'),
+  decryptString: (value: Buffer) => value.toString('utf8'),
+};
+
 describe('FileLlmConfigStore credential recovery', () => {
   test('keeps baseUrl/model with reenter-required when the cipher cannot decrypt', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-llm-config-'));
@@ -179,5 +185,47 @@ describe('FileLlmConfigStore credential recovery', () => {
       model: 'saved-model',
       apiKey: 'sk-fresh-secret',
     });
+  });
+});
+
+describe('FileLlmConfigStore secure storage outages', () => {
+  async function useSavedConfig(): Promise<{
+    path: string;
+    working: FileLlmConfigStore;
+  }> {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-llm-config-'));
+    directories.push(directory);
+    const path = join(directory, 'llm-config.json');
+    const working = new FileLlmConfigStore(path, cipher);
+    await working.save({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey: 'sk-saved-secret',
+    });
+    return { path, working };
+  }
+
+  test('propagates a secure storage outage from getProfile and getCredentials', async () => {
+    const { path } = await useSavedConfig();
+    const unavailable = new FileLlmConfigStore(path, unavailableCipher);
+
+    await expect(unavailable.getProfile()).rejects.toThrow(
+      /Secure storage is unavailable/,
+    );
+    await expect(unavailable.getCredentials()).rejects.toThrow(
+      /Secure storage is unavailable/,
+    );
+  });
+
+  test('rejects saving without a key when secure storage is unavailable', async () => {
+    const { path } = await useSavedConfig();
+    const unavailable = new FileLlmConfigStore(path, unavailableCipher);
+
+    await expect(
+      unavailable.saveProfile({
+        baseUrl: 'https://saved.example.com/v1',
+        model: 'saved-model',
+      }),
+    ).rejects.toThrow(/Secure storage is unavailable/);
   });
 });

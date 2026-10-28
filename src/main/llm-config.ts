@@ -9,6 +9,7 @@ import type {
   LlmProfileView,
 } from '../shared/types';
 import {
+  SecureStorageUnavailableError,
   decryptSecret,
   encryptSecret,
   type SecretCipher,
@@ -136,7 +137,10 @@ export class FileLlmConfigStore implements LlmConfigStore {
     let keyStatus: LlmProfileView['keyStatus'] = 'valid';
     try {
       this.decryptApiKey(stored.encryptedApiKey);
-    } catch {
+    } catch (error) {
+      if (this.isStorageOutage(error)) {
+        throw error;
+      }
       keyStatus = 'reenter-required';
     }
     return { baseUrl: stored.baseUrl, model: stored.model, keyStatus };
@@ -151,10 +155,18 @@ export class FileLlmConfigStore implements LlmConfigStore {
     let apiKey: string;
     try {
       apiKey = this.decryptApiKey(stored.encryptedApiKey);
-    } catch {
+    } catch (error) {
+      if (this.isStorageOutage(error)) {
+        throw error;
+      }
       throw new Error(LLM_REENTER_REQUIRED_MESSAGE);
     }
     return { baseUrl: stored.baseUrl, model: stored.model, apiKey };
+  }
+
+  private isStorageOutage(error: unknown): boolean {
+    // A backend outage must surface as-is: re-entering the key cannot fix it.
+    return error instanceof SecureStorageUnavailableError;
   }
 
   private decryptApiKey(encryptedApiKey: string): string {

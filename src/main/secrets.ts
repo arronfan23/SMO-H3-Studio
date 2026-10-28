@@ -6,16 +6,25 @@ export interface SecretCipher {
   decryptString: (value: Buffer) => string;
 }
 
+export class SecureStorageUnavailableError extends Error {
+  readonly code = 'SECURE_STORAGE_UNAVAILABLE';
+
+  constructor() {
+    super('Secure storage is unavailable');
+    this.name = 'SecureStorageUnavailableError';
+  }
+}
+
 function assertEncryptionAvailable(cipher: SecretCipher): void {
   let available = false;
   try {
     available = cipher.isEncryptionAvailable();
   } catch {
-    throw new Error('Secure storage is unavailable');
+    throw new SecureStorageUnavailableError();
   }
 
   if (!available) {
-    throw new Error('Secure storage is unavailable');
+    throw new SecureStorageUnavailableError();
   }
 }
 
