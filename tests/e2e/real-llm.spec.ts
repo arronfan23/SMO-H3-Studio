@@ -16,8 +16,12 @@ const REAL_CONFIG_SOURCE =
   process.env.SMO_REAL_LLM_CONFIG ?? 'G:\\SMO-H3-Data\\llm-config.json';
 const REAL_AVATARS_DIRECTORY =
   process.env.SMO_REAL_AVATARS_DIRECTORY ?? 'G:\\SMO-H3-Data\\avatars';
-// The polish budget inside the app is 120s; allow 10s of UI slack on top.
-const POLISHED_TAB_TIMEOUT_MS = 130_000;
+// Windows safeStorage ciphertext is tied to the packaged app's encryption
+// context. Point real acceptance at the same packaged build the user runs.
+const REAL_ELECTRON_EXECUTABLE = process.env.SMO_REAL_ELECTRON_EXECUTABLE;
+// Auto routing, generation, and one repair each have a 120s budget inside the
+// app. Allow the complete flow plus 10s of UI slack, but surface errors early.
+const POLISHED_TAB_TIMEOUT_MS = 370_000;
 
 const AVATAR_NAME = 'REAL Test Avatar';
 const ORIGINAL_TEXT = 'A woman waves and says hello.';
@@ -130,8 +134,11 @@ test.describe('real LLM acceptance', () => {
     let app: ElectronApplication | undefined;
     try {
       app = await electron.launch({
+        ...(REAL_ELECTRON_EXECUTABLE
+          ? { executablePath: REAL_ELECTRON_EXECUTABLE }
+          : {}),
         args: [
-          appPath,
+          ...(REAL_ELECTRON_EXECUTABLE ? [] : [appPath]),
           '--disable-gpu',
           '--disable-software-rasterizer',
           '--no-sandbox',
@@ -195,9 +202,16 @@ test.describe('real LLM acceptance', () => {
       ).toBeVisible();
       await page.fill('#original-text', ORIGINAL_TEXT);
       await page.click('button:has-text("AI 润色")');
-      await expect(page.locator('#polished-tab')).toBeEnabled({
+      const polishError = page.locator('#text-mode-panel .form-error');
+      await expect(
+        page.locator('#polished-tab:not([disabled]), #text-mode-panel .form-error').first(),
+      ).toBeVisible({
         timeout: POLISHED_TAB_TIMEOUT_MS,
       });
+      if (await polishError.isVisible()) {
+        throw new Error(`Real polish failed: ${await polishError.textContent()}`);
+      }
+      await expect(page.locator('#polished-tab')).toBeEnabled();
       await expect(page.locator('#polished-tab')).toHaveAttribute('aria-selected', 'true');
       const polishedText = await page.inputValue('#polished-text');
       expect(polishedText).toContain('subject_definitions:');
