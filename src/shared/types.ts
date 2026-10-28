@@ -32,6 +32,25 @@ export interface WorkProgress {
   max: number;
 }
 
+/** Coarse execution stage of a work item, from local queue to finalizing. */
+export type WorkStage =
+  | 'local-queued'
+  | 'uploading'
+  | 'backend-queued'
+  | 'executing'
+  | 'sampling'
+  | 'finalizing';
+
+export interface WorkExecutionState {
+  stage: WorkStage;
+  /** ISO timestamp of the last state write. */
+  updatedAt: string;
+  /** ISO timestamp of the last real stage, queue, or frame change. */
+  lastProgressAt: string;
+  /** Number of tasks ahead of this work in the ComfyUI queue, when known. */
+  queuePosition?: number;
+}
+
 export interface WorkMetadata {
   [key: string]: unknown;
   /** Sanitized request snapshot kept for retry; written when the work is queued. */
@@ -42,6 +61,8 @@ export interface WorkMetadata {
   retryOf?: string;
   /** Last frame progress reported by ComfyUI while running. */
   progress?: WorkProgress;
+  /** Latest execution stage snapshot for the work. */
+  execution?: WorkExecutionState;
 }
 
 export interface Work {

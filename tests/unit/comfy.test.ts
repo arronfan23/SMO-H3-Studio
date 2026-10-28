@@ -11,9 +11,10 @@ import {
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
+import { setTimeout as delay } from 'node:timers/promises';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { ComfyClient } from '../../src/main/comfy';
+import { ComfyClient, type ComfyExecutionUpdate } from '../../src/main/comfy';
 import { JobCoordinator } from '../../src/main/jobs';
 
 interface RecordedRequest {
@@ -168,6 +169,14 @@ describe('ComfyClient base URL and REST requests', () => {
     { completionTimeoutMs: 0 },
     { completionTimeoutMs: -1 },
     { completionTimeoutMs: Number.POSITIVE_INFINITY },
+    { inactivityTimeoutMs: Number.NaN },
+    { inactivityTimeoutMs: 0 },
+    { inactivityTimeoutMs: -1 },
+    { inactivityTimeoutMs: Number.POSITIVE_INFINITY },
+    { reconcileIntervalMs: Number.NaN },
+    { reconcileIntervalMs: 0 },
+    { reconcileIntervalMs: -1 },
+    { reconcileIntervalMs: Number.POSITIVE_INFINITY },
   ])('rejects a non-finite or non-positive timeout: %j', (options) => {
     expect(() => new ComfyClient('http://127.0.0.1:8188', options)).toThrow(
       /must be a finite positive number/i,
@@ -684,5 +693,373 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
     expect(calls).toEqual(['cancel started', 'cancel finished', 'second started']);
     expect(coordinator.completedIds).toEqual(['second']);
     expect(coordinator.activeCount).toBe(0);
+  });
+});
+
+describe('ComfyClient targeted cancellation', () => {
+  test('deletes only the requested pending prompt without interrupting', async () => {
+    const upstream = await startComfy((request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        json(response, {
+          queue_running: [[11, 'running-other']],
+          queue_pending: [
+            [12, 'pending-id'],
+            [13, 'pending-other'],
+          ],
+        });
+        return;
+      }
+      if (request.url === '/queue' && request.method === 'POST') {
+        json(response, {});
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+
+    await new ComfyClient(upstream.baseUrl).cancel('pending-id');
+
+    const posts = upstream.requests.filter((request) => request.method === 'POST');
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe('/queue');
+    expect(JSON.parse(posts[0].body.toString('utf8'))).toEqual({
+      delete: ['pending-id'],
+    });
+    expect(upstream.requests.some((request) => request.url === '/interrupt')).toBe(false);
+  });
+
+  test('interrupts only when the requested prompt is running', async () => {
+    const upstream = await startComfy((request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        json(response, {
+          queue_running: [[11, 'running-id']],
+          queue_pending: [[12, 'pending-other']],
+        });
+        return;
+      }
+      if (request.url === '/interrupt') {
+        response.end();
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+
+    await new ComfyClient(upstream.baseUrl).cancel('running-id');
+
+    expect(
+      upstream.requests.map((request) => `${request.method} ${request.url}`),
+    ).toEqual(['GET /queue', 'POST /interrupt']);
+  });
+
+  test('does not send any cancellation request for a prompt that is gone', async () => {
+    const upstream = await startComfy((request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        json(response, {
+          queue_running: [[11, 'unrelated-running']],
+          queue_pending: [[12, 'unrelated-pending']],
+        });
+        return;
+      }
+      if (request.url === '/interrupt' || request.url === '/queue') {
+        json(response, {});
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+
+    await new ComfyClient(upstream.baseUrl).cancel('missing-id');
+
+    // A later unrelated task must not be killed by a stale prompt id.
+    expect(
+      upstream.requests.map((request) => `${request.method} ${request.url}`),
+    ).toEqual(['GET /queue']);
+  });
+});
+
+describe('ComfyClient queue reconciliation', () => {
+  function startQueuedComfy(options: {
+    queue: () => { running: string[]; pending: string[] };
+    history?: (promptId: string, calls: number) => unknown;
+  }): Promise<LocalComfy> {
+    let historyCalls = 0;
+    return startComfy((request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        const snapshot = options.queue();
+        json(response, {
+          queue_running: snapshot.running.map((id, index) => [index + 1, id]),
+          queue_pending: snapshot.pending.map((id, index) => [index + 100, id]),
+        });
+        return;
+      }
+      if (request.url === '/queue' && request.method === 'POST') {
+        json(response, {});
+        return;
+      }
+      if (request.url === '/interrupt') {
+        response.end();
+        return;
+      }
+      const historyMatch = /^\/history\/(.+)$/.exec(request.url ?? '');
+      if (historyMatch) {
+        historyCalls += 1;
+        const promptId = decodeURIComponent(historyMatch[1]);
+        json(response, options.history?.(promptId, historyCalls) ?? {});
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+  }
+
+  function historySuccess(promptId: string): unknown {
+    return {
+      [promptId]: {
+        outputs: {},
+        status: { status_str: 'success', completed: true, messages: [] },
+      },
+    };
+  }
+
+  test('reports backend-queued, executing, and finalizing with queue positions', async () => {
+    let phase: 'pending' | 'running' | 'done' = 'pending';
+    const upstream = await startQueuedComfy({
+      queue: () =>
+        phase === 'pending'
+          ? { running: ['other'], pending: ['prompt-1'] }
+          : phase === 'running'
+            ? { running: ['prompt-1'], pending: [] }
+            : { running: [], pending: [] },
+      history: (promptId) => (phase === 'done' ? historySuccess(promptId) : {}),
+    });
+    const updates: ComfyExecutionUpdate[] = [];
+    const client = new ComfyClient(upstream.baseUrl, {
+      clientId: 'client-1',
+      inactivityTimeoutMs: 5_000,
+      reconcileIntervalMs: 20,
+      completionTimeoutMs: 5_000,
+    });
+
+    const completion = client.waitForCompletion('prompt-1', undefined, (update) =>
+      updates.push(update),
+    );
+    await vi.waitFor(() =>
+      expect(updates.some((update) => update.stage === 'backend-queued')).toBe(true),
+    );
+    phase = 'running';
+    await vi.waitFor(() =>
+      expect(updates.some((update) => update.stage === 'executing')).toBe(true),
+    );
+    phase = 'done';
+    await completion;
+
+    expect(updates.map((update) => update.stage)).toEqual([
+      'backend-queued',
+      'executing',
+      'finalizing',
+    ]);
+    expect(updates[0]).toMatchObject({ stage: 'backend-queued', queuePosition: 1 });
+    expect(updates[1]).toMatchObject({ stage: 'executing', queuePosition: 0 });
+  });
+
+  test('treats WebSocket executing signals as executing updates', async () => {
+    const upstream = await startQueuedComfy({
+      queue: () => ({ running: ['prompt-1'], pending: [] }),
+    });
+    upstream.webSockets.on('connection', (socket) => {
+      send(socket, 'execution_start', { prompt_id: 'other' });
+      send(socket, 'executing', { prompt_id: 'prompt-1', node_id: '5' });
+      send(socket, 'execution_success', { prompt_id: 'prompt-1' });
+    });
+    const updates: ComfyExecutionUpdate[] = [];
+
+    await new ComfyClient(upstream.baseUrl, {
+      clientId: 'client-1',
+      inactivityTimeoutMs: 5_000,
+      reconcileIntervalMs: 1_000,
+      completionTimeoutMs: 2_000,
+    }).waitForCompletion('prompt-1', undefined, (update) => updates.push(update));
+
+    expect(updates.map((update) => update.stage)).toEqual(['executing', 'finalizing']);
+  });
+
+  test('completes through periodic history reconciliation when the socket stays silent', async () => {
+    const upstream = await startQueuedComfy({
+      queue: () => ({ running: ['prompt-1'], pending: [] }),
+      history: (promptId, calls) => (calls >= 3 ? historySuccess(promptId) : {}),
+    });
+
+    await expect(
+      new ComfyClient(upstream.baseUrl, {
+        clientId: 'client-1',
+        inactivityTimeoutMs: 5_000,
+        reconcileIntervalMs: 20,
+        completionTimeoutMs: 3_000,
+      }).waitForCompletion('prompt-1'),
+    ).resolves.toBeUndefined();
+
+    const historyRequests = upstream.requests.filter((request) =>
+      request.url?.startsWith('/history/'),
+    );
+    expect(historyRequests.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('tolerates a single reconciliation gap before the prompt reappears', async () => {
+    let queueCalls = 0;
+    const upstream = await startQueuedComfy({
+      queue: () => {
+        queueCalls += 1;
+        // The first poll races the backend enqueue; afterwards the prompt is running.
+        return queueCalls === 1
+          ? { running: [], pending: [] }
+          : { running: ['prompt-1'], pending: [] };
+      },
+      history: (promptId, calls) => (calls >= 4 ? historySuccess(promptId) : {}),
+    });
+
+    await expect(
+      new ComfyClient(upstream.baseUrl, {
+        clientId: 'client-1',
+        inactivityTimeoutMs: 5_000,
+        reconcileIntervalMs: 20,
+        completionTimeoutMs: 3_000,
+      }).waitForCompletion('prompt-1'),
+    ).resolves.toBeUndefined();
+  });
+
+  test('fails clearly when the prompt vanishes from the queue without a history result', async () => {
+    let queueCalls = 0;
+    const upstream = await startQueuedComfy({
+      queue: () => {
+        queueCalls += 1;
+        return { running: [], pending: [] };
+      },
+    });
+
+    await expectRejection(
+      new ComfyClient(upstream.baseUrl, {
+        clientId: 'client-1',
+        inactivityTimeoutMs: 5_000,
+        reconcileIntervalMs: 20,
+        completionTimeoutMs: 5_000,
+      }).waitForCompletion('prompt-1'),
+      /no longer queued/i,
+    );
+    // One race grace poll, then the second consecutive miss fails.
+    expect(queueCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  test('deletes the stale pending prompt precisely when execution makes no progress', async () => {
+    const upstream = await startQueuedComfy({
+      queue: () => ({ running: [], pending: ['stale-id', 'other'] }),
+    });
+
+    await expectRejection(
+      new ComfyClient(upstream.baseUrl, {
+        clientId: 'client-1',
+        inactivityTimeoutMs: 60,
+        reconcileIntervalMs: 20,
+        completionTimeoutMs: 5_000,
+      }).waitForCompletion('stale-id'),
+      /no progress/i,
+    );
+
+    const deletes = upstream.requests.filter(
+      (request) => request.method === 'POST' && request.url === '/queue',
+    );
+    expect(deletes).toHaveLength(1);
+    expect(JSON.parse(deletes[0].body.toString('utf8'))).toEqual({ delete: ['stale-id'] });
+    expect(upstream.requests.some((request) => request.url === '/interrupt')).toBe(false);
+  });
+
+  test('interrupts the timed-out running prompt and keeps the total timeout message', async () => {
+    const upstream = await startQueuedComfy({
+      queue: () => ({ running: ['running-id'], pending: [] }),
+    });
+
+    await expectRejection(
+      new ComfyClient(upstream.baseUrl, {
+        clientId: 'client-1',
+        inactivityTimeoutMs: 5_000,
+        reconcileIntervalMs: 1_000,
+        completionTimeoutMs: 60,
+      }).waitForCompletion('running-id'),
+      /timed out after 60 ms/i,
+    );
+
+    const posts = upstream.requests.filter((request) => request.method === 'POST');
+    expect(posts.map((request) => request.url)).toEqual(['/interrupt']);
+  });
+
+  test('unchanged polls do not extend the inactivity budget but frame progress does', async () => {
+    const upstream = await startQueuedComfy({
+      queue: () => ({ running: ['prompt-1'], pending: [] }),
+    });
+    let frame = 0;
+    let frameTimer: NodeJS.Timeout | undefined;
+    upstream.webSockets.on('connection', (socket) => {
+      frameTimer = setInterval(() => {
+        frame += 1;
+        send(socket, 'progress', { prompt_id: 'prompt-1', value: frame, max: 1000 });
+      }, 40);
+    });
+    const client = new ComfyClient(upstream.baseUrl, {
+      clientId: 'client-1',
+      inactivityTimeoutMs: 120,
+      reconcileIntervalMs: 25,
+      completionTimeoutMs: 5_000,
+    });
+
+    const completion = client.waitForCompletion('prompt-1');
+    const early = await Promise.race([
+      completion.then(
+        () => 'settled',
+        () => 'settled',
+      ),
+      delay(300).then(() => 'pending'),
+    ]);
+    // Distinct frames kept the execution alive past the 120ms inactivity budget.
+    expect(early).toBe('pending');
+
+    clearInterval(frameTimer);
+    await expectRejection(completion, /no progress/i);
+  });
+
+  test('queue movement refreshes the inactivity budget', async () => {
+    let queueCalls = 0;
+    const movable = await startComfy((request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        queueCalls += 1;
+        const ahead = Math.max(0, 5 - Math.floor((queueCalls - 1) / 2));
+        json(response, {
+          queue_running: [],
+          queue_pending: [
+            ...Array.from({ length: ahead }, (_, index) => [index + 1, `other-${index}`]),
+            [99, 'prompt-1'],
+          ],
+        });
+        return;
+      }
+      if (request.url?.startsWith('/history/')) {
+        json(response, {});
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+
+    const completion = new ComfyClient(movable.baseUrl, {
+      clientId: 'client-1',
+      inactivityTimeoutMs: 120,
+      reconcileIntervalMs: 20,
+      completionTimeoutMs: 5_000,
+    }).waitForCompletion('prompt-1');
+    const early = await Promise.race([
+      completion.then(
+        () => 'settled',
+        () => 'settled',
+      ),
+      delay(240).then(() => 'pending'),
+    ]);
+    // Shrinking queue positions kept refreshing the 120ms inactivity budget.
+    expect(early).toBe('pending');
+
+    await expectRejection(completion, /no progress/i);
   });
 });

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type {
   ComfyClient,
+  ComfyExecutionUpdate,
   ComfyOutputFile,
   ComfyProgress,
   ComfySubmitResult,
@@ -20,6 +21,7 @@ import { Store } from '../../src/main/store';
 import type {
   GenerationRequest,
   Work,
+  WorkExecutionState,
   WorkStatus,
 } from '../../src/shared/types';
 
@@ -66,7 +68,13 @@ class FakeComfyClient {
   submitGate?: Deferred<ComfySubmitResult>;
   historyGate?: Deferred<void>;
   cancellations = 0;
+  readonly cancelRequests: Array<string | undefined> = [];
   progressEvents: ComfyProgress[] = [];
+  executionUpdates: ComfyExecutionUpdate[] = [];
+  waitScript?: Array<
+    | { kind: 'progress'; progress: ComfyProgress }
+    | { kind: 'update'; update: ComfyExecutionUpdate }
+  >;
   outputs: ComfyOutputFile[] = [
     outputFile({ nodeId: 'preview', kind: 'images', filename: 'cover.png' }),
     outputFile({ filename: 'result.webm' }),
@@ -102,10 +110,24 @@ class FakeComfyClient {
   async waitForCompletion(
     promptId: string,
     onProgress?: (progress: ComfyProgress) => void,
+    onUpdate?: (update: ComfyExecutionUpdate) => void,
   ): Promise<void> {
     this.waits.push(promptId);
-    for (const progress of this.progressEvents) {
-      onProgress?.(progress);
+    const script =
+      this.waitScript ?? [
+        ...this.executionUpdates.map(
+          (update) => ({ kind: 'update', update }) as const,
+        ),
+        ...this.progressEvents.map(
+          (progress) => ({ kind: 'progress', progress }) as const,
+        ),
+      ];
+    for (const event of script) {
+      if (event.kind === 'update') {
+        onUpdate?.(event.update);
+      } else {
+        onProgress?.(event.progress);
+      }
     }
     if (this.completionGate) {
       await this.completionGate.promise;
@@ -126,8 +148,9 @@ class FakeComfyClient {
     return this.outputs;
   }
 
-  async cancel(): Promise<void> {
+  async cancel(promptId?: string): Promise<void> {
     this.cancellations += 1;
+    this.cancelRequests.push(promptId);
     this.completionGate?.reject(new Error('ComfyUI execution interrupted'));
   }
 }
@@ -453,6 +476,92 @@ describe('GenerationHandler progress resilience and throttling', () => {
   });
 });
 
+describe('GenerationHandler execution state metadata', () => {
+  test('merges execution and progress without dropping request, workflowVersion, or retryOf', async () => {
+    const harness = await createHarness();
+    harness.comfy.waitScript = [
+      { kind: 'update', update: { stage: 'backend-queued', queuePosition: 2 } },
+      { kind: 'update', update: { stage: 'executing', queuePosition: 0 } },
+      { kind: 'progress', progress: { value: 5, max: 24 } },
+      { kind: 'progress', progress: { value: 11, max: 24 } },
+      { kind: 'update', update: { stage: 'finalizing' } },
+    ];
+    const updateWorkSpy = vi.spyOn(harness.store, 'updateWork');
+
+    const result = await harness.startGeneration({
+      ...harness.textRequest,
+      retryOf: 'previous-work',
+    });
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(work?.metadata).toMatchObject({
+      request: harness.textRequest,
+      workflowVersion: 'text-ref2va.json',
+      retryOf: 'previous-work',
+      progress: { value: 11, max: 24 },
+      execution: { stage: 'finalizing' },
+    });
+    const execution = work?.metadata?.execution as WorkExecutionState | undefined;
+    expect(execution).toBeDefined();
+    expect(Number.isNaN(Date.parse(execution!.updatedAt))).toBe(false);
+    expect(Number.isNaN(Date.parse(execution!.lastProgressAt))).toBe(false);
+
+    const recordedStates = updateWorkSpy.mock.calls
+      .map(
+        ([, update]) =>
+          (update as { metadata?: { execution?: WorkExecutionState } }).metadata
+            ?.execution,
+      )
+      .filter((state): state is WorkExecutionState => state !== undefined);
+    expect(recordedStates.map((state) => state.stage)).toEqual(
+      expect.arrayContaining(['uploading', 'backend-queued', 'executing', 'sampling']),
+    );
+    expect(
+      recordedStates.some(
+        (state) => state.stage === 'backend-queued' && state.queuePosition === 2,
+      ),
+    ).toBe(true);
+
+    const metadataWrites = updateWorkSpy.mock.calls
+      .map(([, update]) => (update as { metadata?: Record<string, unknown> }).metadata)
+      .filter((metadata): metadata is Record<string, unknown> => metadata !== undefined);
+    for (const metadata of metadataWrites) {
+      expect(metadata).toMatchObject({
+        request: harness.textRequest,
+        workflowVersion: 'text-ref2va.json',
+        retryOf: 'previous-work',
+      });
+    }
+  });
+
+  test('cancels the submitted prompt by id instead of interrupting blindly', async () => {
+    const harness = await createHarness();
+    harness.comfy.completionGate = deferred();
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await vi.waitFor(() => expect(harness.comfy.waits).toEqual(['prompt-1']));
+    await harness.jobCoordinator.cancelActive();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toMatch(/interrupt|cancel/i);
+    expect(harness.comfy.cancelRequests).toEqual(['prompt-1']);
+  });
+
+  test('cleans up the submitted prompt id when ComfyUI reports a timeout', async () => {
+    const harness = await createHarness();
+    harness.comfy.completionError = new Error(
+      'ComfyUI execution timed out after 7200000 ms',
+    );
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toMatch(/timed out/i);
+    expect(work.promptId).toBe('prompt-1');
+    expect(harness.comfy.cancelRequests).toEqual(['prompt-1']);
+  });
+});
+
 describe('GenerationHandler workflows', () => {
   test('runs the complete text workflow and records the real mp4 output', async () => {
     const harness = await createHarness();
@@ -720,6 +829,7 @@ describe('GenerationHandler workflows', () => {
     expect(work.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     expect(JSON.stringify(work.metadata)).not.toContain(apiKey);
   });
@@ -747,6 +857,7 @@ describe("GenerationHandler workflow selection", () => {
     expect(work.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: activePath,
+      execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     expect(harness.comfy.submissions[0]).toMatchObject({
       "115": { inputs: { megapixels: 0.4 } },
@@ -773,6 +884,7 @@ describe("GenerationHandler workflow selection", () => {
       request: harness.textRequest,
       workflowVersion: originalCopy,
       retryOf: original.id,
+      execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     expect(harness.comfy.submissions).toHaveLength(2);
     for (const submission of harness.comfy.submissions) {
@@ -1283,12 +1395,14 @@ describe('GenerationHandler retry', () => {
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
       retryOf: original.id,
+      execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     const originalAfterRetry = harness.store.listWorks().find((work) => work.id === original.id);
     expect(originalAfterRetry?.status).toBe('failed');
     expect(originalAfterRetry?.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      execution: expect.objectContaining({ stage: 'finalizing' }),
     });
   });
 

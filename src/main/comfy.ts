@@ -5,7 +5,9 @@ import WebSocket, { type RawData } from 'ws';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8188';
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-const DEFAULT_COMPLETION_TIMEOUT_MS = 30 * 60_000;
+const DEFAULT_COMPLETION_TIMEOUT_MS = 7_200_000;
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 1_800_000;
+const DEFAULT_RECONCILE_INTERVAL_MS = 5_000;
 const MAX_ERROR_BODY_LENGTH = 800;
 
 const UPLOAD_EXTENSIONS = {
@@ -20,7 +22,16 @@ export type ComfyUploadKind = keyof typeof UPLOAD_EXTENSIONS;
 export interface ComfyClientOptions {
   requestTimeoutMs?: number;
   completionTimeoutMs?: number;
+  /** Fails the wait when no real stage, queue, or frame change is seen for this long. */
+  inactivityTimeoutMs?: number;
+  /** Interval between /queue and /history reconciliation polls. */
+  reconcileIntervalMs?: number;
   clientId?: string;
+}
+
+export interface ComfyExecutionUpdate {
+  stage: 'backend-queued' | 'executing' | 'finalizing';
+  queuePosition?: number;
 }
 
 export interface ComfySystemStats {
@@ -144,6 +155,45 @@ function parseUploadFilename(value: unknown): string {
 
 function invalidHistoryResponse(): Error {
   return new Error('ComfyUI returned an invalid history response');
+}
+
+interface ComfyQueueSnapshot {
+  running: string[];
+  pending: string[];
+}
+
+function invalidQueueResponse(): Error {
+  return new Error('ComfyUI returned an invalid queue response');
+}
+
+function queueEntryPromptId(value: unknown): string | null {
+  // ComfyUI queue entries are [number, prompt_id, prompt, extra_data, outputs].
+  // Only the prompt id is read; prompt contents never enter logs or errors.
+  if (Array.isArray(value) && typeof value[1] === 'string') {
+    return value[1];
+  }
+  return null;
+}
+
+function parseQueueIds(value: unknown): ComfyQueueSnapshot {
+  if (!isRecord(value)) {
+    throw invalidQueueResponse();
+  }
+  const extract = (key: 'queue_running' | 'queue_pending'): string[] => {
+    const entries = value[key];
+    if (!Array.isArray(entries)) {
+      throw invalidQueueResponse();
+    }
+    const ids: string[] = [];
+    for (const entry of entries) {
+      const promptId = queueEntryPromptId(entry);
+      if (promptId !== null) {
+        ids.push(promptId);
+      }
+    }
+    return ids;
+  };
+  return { running: extract('queue_running'), pending: extract('queue_pending') };
 }
 
 function rawDataToString(data: RawData): string {
@@ -298,6 +348,8 @@ export class ComfyClient {
   private readonly baseUrl: URL;
   private readonly requestTimeoutMs: number;
   private readonly completionTimeoutMs: number;
+  private readonly inactivityTimeoutMs: number;
+  private readonly reconcileIntervalMs: number;
   private readonly clientId: string;
   private readonly abortController: AbortController;
   private activeSocket?: WebSocket;
@@ -312,6 +364,14 @@ export class ComfyClient {
     this.completionTimeoutMs = validateTimeout(
       options.completionTimeoutMs ?? DEFAULT_COMPLETION_TIMEOUT_MS,
       'completionTimeoutMs',
+    );
+    this.inactivityTimeoutMs = validateTimeout(
+      options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS,
+      'inactivityTimeoutMs',
+    );
+    this.reconcileIntervalMs = validateTimeout(
+      options.reconcileIntervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS,
+      'reconcileIntervalMs',
     );
     const clientId = options.clientId ?? randomUUID();
     if (clientId.trim().length === 0) {
@@ -407,8 +467,25 @@ export class ComfyClient {
     return collectHistoryFiles(value, promptId);
   }
 
-  async cancel(): Promise<void> {
-    await this.request('interrupt', { method: 'POST' });
+  async cancel(promptId?: string): Promise<void> {
+    if (promptId === undefined) {
+      await this.request('interrupt', { method: 'POST' });
+      return;
+    }
+    // Targeted cleanup: only touch the requested prompt, never whatever
+    // unrelated task happens to be running when a stale id arrives.
+    const snapshot = parseQueueIds(await this.requestJson('queue'));
+    if (snapshot.pending.includes(promptId)) {
+      await this.request('queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delete: [promptId] }),
+      });
+      return;
+    }
+    if (snapshot.running.includes(promptId)) {
+      await this.request('interrupt', { method: 'POST' });
+    }
   }
 
   close(): Promise<void> {
@@ -432,6 +509,7 @@ export class ComfyClient {
   waitForCompletion(
     promptId: string,
     onProgress?: (progress: ComfyProgress) => void,
+    onUpdate?: (update: ComfyExecutionUpdate) => void,
   ): Promise<void> {
     if (this.closed) {
       return Promise.reject(new Error('ComfyClient is closed'));
@@ -443,6 +521,13 @@ export class ComfyClient {
       this.activeSocket = socket;
       let settled = false;
       let timeout: NodeJS.Timeout | undefined;
+      let reconcileTimer: NodeJS.Timeout | undefined;
+      let stopped = false;
+      let lastActivityAt = Date.now();
+      let lastUpdate: ComfyExecutionUpdate | undefined;
+      let lastFrame: ComfyProgress | undefined;
+      let missingReconciliations = 0;
+      let cleanupPromise: Promise<void> | undefined;
 
       const onAbort = () => {
         queueMicrotask(() => finish(new Error('ComfyClient is closed')));
@@ -454,8 +539,12 @@ export class ComfyClient {
           return;
         }
         settled = true;
+        stopped = true;
         if (timeout !== undefined) {
           clearTimeout(timeout);
+        }
+        if (reconcileTimer !== undefined) {
+          clearTimeout(reconcileTimer);
         }
         if (socket.readyState === WebSocket.OPEN) {
           socket.close();
@@ -472,6 +561,129 @@ export class ComfyClient {
           reject(error);
         }
       };
+
+      // Only a real stage, queue position, or frame change counts as progress;
+      // unchanged polls never extend the inactivity budget.
+      const emitUpdate = (update: ComfyExecutionUpdate): void => {
+        if (settled) {
+          return;
+        }
+        const changed =
+          lastUpdate === undefined ||
+          lastUpdate.stage !== update.stage ||
+          lastUpdate.queuePosition !== update.queuePosition;
+        if (!changed) {
+          return;
+        }
+        lastUpdate = { ...update };
+        lastActivityAt = Date.now();
+        try {
+          onUpdate?.(update);
+        } catch (callbackError) {
+          finish(
+            callbackError instanceof Error
+              ? callbackError
+              : new Error('ComfyUI execution update callback failed'),
+          );
+        }
+      };
+
+      const noteFrame = (progress: ComfyProgress): void => {
+        if (
+          lastFrame === undefined ||
+          lastFrame.value !== progress.value ||
+          lastFrame.max !== progress.max
+        ) {
+          lastFrame = progress;
+          lastActivityAt = Date.now();
+        }
+      };
+
+      // Best-effort targeted cleanup, memoized so the inactivity and total
+      // timeout paths never cancel the same prompt twice.
+      const preciseCleanup = (): Promise<void> => {
+        cleanupPromise ??= this.cancel(promptId).catch(() => undefined);
+        return cleanupPromise;
+      };
+
+      const reconcile = async (): Promise<void> => {
+        if (settled || stopped) {
+          return;
+        }
+        try {
+          const snapshot = parseQueueIds(await this.requestJson('queue'));
+          if (settled) {
+            return;
+          }
+          const completion = parseHistoryCompletion(
+            await this.historyValue(promptId),
+            promptId,
+          );
+          if (settled) {
+            return;
+          }
+          if (completion?.kind === 'success') {
+            emitUpdate({ stage: 'finalizing' });
+            finish();
+            return;
+          }
+          if (completion?.kind === 'failure') {
+            finish(completion.error);
+            return;
+          }
+          if (snapshot.running.includes(promptId)) {
+            missingReconciliations = 0;
+            emitUpdate({ stage: 'executing', queuePosition: 0 });
+          } else {
+            const pendingIndex = snapshot.pending.indexOf(promptId);
+            if (pendingIndex >= 0) {
+              missingReconciliations = 0;
+              emitUpdate({
+                stage: 'backend-queued',
+                queuePosition: snapshot.running.length + pendingIndex,
+              });
+            } else {
+              // One race grace: the prompt may sit between enqueue and the
+              // first queue snapshot. Only a second consecutive miss fails.
+              missingReconciliations += 1;
+              if (missingReconciliations >= 2) {
+                finish(
+                  new Error(
+                    'ComfyUI prompt is no longer queued and has no recorded result',
+                  ),
+                );
+                return;
+              }
+            }
+          }
+          if (Date.now() - lastActivityAt >= this.inactivityTimeoutMs) {
+            stopped = true;
+            await preciseCleanup();
+            finish(
+              new Error(
+                `ComfyUI execution made no progress for ${this.inactivityTimeoutMs} ms`,
+              ),
+            );
+            return;
+          }
+        } catch (error) {
+          finish(
+            error instanceof Error
+              ? error
+              : new Error('Could not reconcile ComfyUI execution state'),
+          );
+          return;
+        }
+        if (!stopped && !settled) {
+          reconcileTimer = setTimeout(() => {
+            void reconcile();
+          }, this.reconcileIntervalMs);
+        }
+      };
+      // Chained timeouts keep reconciliation requests non-overlapping.
+      reconcileTimer = setTimeout(() => {
+        void reconcile();
+      }, this.reconcileIntervalMs);
 
       socket.on('message', (data, isBinary) => {
         if (settled || isBinary) {
@@ -515,6 +727,7 @@ export class ComfyClient {
               return;
             }
             try {
+              noteFrame({ value: payload.value, max: payload.max });
               onProgress?.({ value: payload.value, max: payload.max });
             } catch (error) {
               finish(
@@ -529,7 +742,14 @@ export class ComfyClient {
             if (!isRecord(payload)) {
               finish(new Error('ComfyUI WebSocket returned an invalid execution result'));
             } else if (payload.prompt_id === promptId) {
+              emitUpdate({ stage: 'finalizing' });
               finish();
+            }
+            return;
+          case 'execution_start':
+          case 'executing':
+            if (isRecord(payload) && payload.prompt_id === promptId) {
+              emitUpdate({ stage: 'executing', queuePosition: 0 });
             }
             return;
           case 'execution_error':
@@ -579,9 +799,17 @@ export class ComfyClient {
       });
 
       timeout = setTimeout(() => {
-        finish(
-          new Error(`ComfyUI execution timed out after ${this.completionTimeoutMs} ms`),
-        );
+        stopped = true;
+        if (reconcileTimer !== undefined) {
+          clearTimeout(reconcileTimer);
+        }
+        // Never leave a timed-out prompt running on the backend; the overall
+        // timeout error keeps its existing message shape.
+        void preciseCleanup().then(() => {
+          finish(
+            new Error(`ComfyUI execution timed out after ${this.completionTimeoutMs} ms`),
+          );
+        });
       }, this.completionTimeoutMs);
     });
   }

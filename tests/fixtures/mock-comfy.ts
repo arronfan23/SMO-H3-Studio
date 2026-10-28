@@ -30,7 +30,7 @@ interface PromptRecord {
   promptId: string;
   outputNode: string;
   outputPrefix: string;
-  status: 'pending' | 'running' | 'completed' | 'error' | 'interrupted';
+  status: 'pending' | 'running' | 'completed' | 'error' | 'interrupted' | 'deleted';
   errorMessage?: string;
   outputFilename?: string;
   shouldFail: boolean;
@@ -296,6 +296,42 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
           return;
         }
 
+        if (method === 'GET' && url === '/queue') {
+          const toEntry = (record: PromptRecord, index: number) => [
+            index,
+            record.promptId,
+            {},
+            {},
+            [],
+          ];
+          const queued = [...records.values()];
+          sendJson(response, 200, {
+            queue_running: queued
+              .filter((record) => record.status === 'running')
+              .map(toEntry),
+            queue_pending: queued
+              .filter((record) => record.status === 'pending')
+              .map(toEntry),
+          });
+          return;
+        }
+
+        if (method === 'POST' && url === '/queue') {
+          const parsed = JSON.parse(body.toString('utf8') || '{}') as {
+            delete?: unknown;
+          };
+          if (Array.isArray(parsed.delete)) {
+            for (const id of parsed.delete) {
+              const record = typeof id === 'string' ? records.get(id) : undefined;
+              if (record && record.status === 'pending') {
+                record.status = 'deleted';
+              }
+            }
+          }
+          sendJson(response, 200, {});
+          return;
+        }
+
         sendJson(response, 404, { error: 'Not found' });
       } catch {
         sendJson(response, 500, { error: 'Mock server error' });
@@ -343,6 +379,9 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
   }
 
   async function runExecution(record: PromptRecord): Promise<void> {
+    if (record.status !== 'pending') {
+      return;
+    }
     record.status = 'running';
     activePromptId = record.promptId;
     broadcast({ type: 'status', data: { status: { exec_info: { queue_remaining: 0 } } } });

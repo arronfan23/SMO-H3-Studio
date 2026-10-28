@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type { ComfyClient, ComfyOutputFile } from './comfy';
+import type { ComfyClient, ComfyExecutionUpdate, ComfyOutputFile } from './comfy';
 import {
   createFfprobeDurationReader,
   type AudioDurationReader,
@@ -16,7 +16,9 @@ import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
 import type {
   GenerationRequest,
   GenerationStartResult,
+  WorkExecutionState,
   WorkProgress,
+  WorkStage,
   WorkMetadata,
 } from '../shared/types';
 
@@ -338,6 +340,50 @@ export function createGenerationHandler(
       workflowVersion,
       ...(originalRetryOf ? { retryOf: originalRetryOf } : {}),
     };
+
+    // Execution and progress state are merged into every metadata write so a
+    // stage update can never clobber request, workflowVersion, or retryOf.
+    const nowIso = (): string => new Date().toISOString();
+    let currentExecution: WorkExecutionState = {
+      stage: 'local-queued',
+      updatedAt: nowIso(),
+      lastProgressAt: nowIso(),
+    };
+    let latestProgress: WorkProgress | null = null;
+
+    const writeState = (): void => {
+      const progressChanged =
+        latestProgress !== null && !sameProgress(lastWrittenProgress, latestProgress);
+      try {
+        store.updateWork(workId, {
+          metadata: {
+            ...baseMetadata,
+            execution: currentExecution,
+            ...(progressChanged ? { progress: latestProgress! } : {}),
+          },
+        });
+        if (progressChanged) {
+          lastWrittenProgress = latestProgress;
+        }
+      } catch (error) {
+        progressErrorReporter(error);
+      }
+    };
+
+    const setExecution = (stage: WorkStage, queuePosition?: number): void => {
+      const now = nowIso();
+      const progressed =
+        currentExecution.stage !== stage ||
+        currentExecution.queuePosition !== queuePosition;
+      currentExecution = {
+        stage,
+        updatedAt: now,
+        lastProgressAt: progressed ? now : currentExecution.lastProgressAt,
+        ...(queuePosition !== undefined ? { queuePosition } : {}),
+      };
+      writeState();
+    };
+
     store.addWork({
       id: workId,
       avatarId: request.avatarId,
@@ -345,30 +391,39 @@ export function createGenerationHandler(
       outputPath: null,
       status: 'pending',
       promptId: null,
-      metadata: baseMetadata,
+      metadata: { ...baseMetadata, execution: currentExecution },
       error: null,
     });
 
     const execution = {
       cancelRequested: false,
-      interruptible: false,
-      cancelSent: false,
+      completed: false,
+      cleanupSent: false,
     };
+    let submittedPromptId: string | undefined;
     const throwIfCancelled = (): void => {
       if (execution.cancelRequested) {
         throw new Error('Generation cancelled');
       }
     };
-    const interruptIfRequested = async (): Promise<void> => {
+    // Targeted cleanup: only the submitted prompt id is ever cancelled, so a
+    // stale or unrelated backend task is never interrupted by mistake.
+    const cleanupSubmittedPrompt = async (): Promise<void> => {
       if (
-        !execution.cancelRequested ||
-        !execution.interruptible ||
-        execution.cancelSent
+        submittedPromptId === undefined ||
+        execution.completed ||
+        execution.cleanupSent
       ) {
         return;
       }
-      execution.cancelSent = true;
-      await comfy.cancel();
+      execution.cleanupSent = true;
+      await comfy.cancel(submittedPromptId);
+    };
+    const interruptIfRequested = async (): Promise<void> => {
+      if (!execution.cancelRequested) {
+        return;
+      }
+      await cleanupSubmittedPrompt();
     };
 
     // Progress persistence is best-effort: a transient store failure must not
@@ -381,9 +436,21 @@ export function createGenerationHandler(
       a !== null && a.value === b.value && a.max === b.max;
 
     const writeProgress = (progress: WorkProgress): void => {
+      const now = nowIso();
+      const stage: WorkStage =
+        currentExecution.stage === 'executing' || currentExecution.stage === 'sampling'
+          ? 'sampling'
+          : currentExecution.stage;
+      currentExecution = {
+        ...currentExecution,
+        stage,
+        updatedAt: now,
+        lastProgressAt: now,
+      };
+      latestProgress = progress;
       try {
         store.updateWork(workId, {
-          metadata: { ...baseMetadata, progress },
+          metadata: { ...baseMetadata, execution: currentExecution, progress },
         });
         lastWrittenProgress = progress;
       } catch (error) {
@@ -424,11 +491,16 @@ export function createGenerationHandler(
       }
     };
 
+    const handleExecutionUpdate = (update: ComfyExecutionUpdate): void => {
+      setExecution(update.stage, update.queuePosition);
+    };
+
     const run = async (): Promise<void> => {
       try {
         throwIfCancelled();
         await options.ensureReady?.();
         throwIfCancelled();
+        setExecution('uploading');
         const image = await comfy.uploadFile({
           filePath: avatar.photoPath,
           kind: 'image',
@@ -469,15 +541,18 @@ export function createGenerationHandler(
         const workflow = patchWorkflow(frozen, changes);
         throwIfCancelled();
         const submitted = await comfy.submit(workflow);
-        execution.interruptible = true;
+        submittedPromptId = submitted.prompt_id;
+        setExecution('backend-queued');
         store.updateWork(workId, { promptId: submitted.prompt_id });
         await interruptIfRequested();
         throwIfCancelled();
-        try {
-          await comfy.waitForCompletion(submitted.prompt_id, flushProgress);
-        } finally {
-          execution.interruptible = false;
-        }
+        await comfy.waitForCompletion(
+          submitted.prompt_id,
+          flushProgress,
+          handleExecutionUpdate,
+        );
+        execution.completed = true;
+        setExecution('finalizing');
         throwIfCancelled();
         const files = await comfy.history(submitted.prompt_id);
         throwIfCancelled();
@@ -496,13 +571,21 @@ export function createGenerationHandler(
         } catch (cancellationError) {
           failure = cancellationError;
         }
+        if (!execution.cancelRequested) {
+          // Timeout or unexpected failure: never leave the submitted prompt
+          // running on the backend while the work is marked failed.
+          try {
+            await cleanupSubmittedPrompt();
+          } catch {
+            // Precise cleanup is best-effort; the original failure stands.
+          }
+        }
         store.updateWork(workId, {
           status: 'failed',
           error: errorMessage(failure),
         });
         throw failure;
       } finally {
-        execution.interruptible = false;
         flushPendingProgress();
         await cleanupStagedAudio(stagedAudioPath, remove, cleanupErrorReporter);
       }
