@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FileAudio, Video } from 'lucide-react';
 import {
   DEFAULT_GENERATION_OPTIONS,
@@ -14,10 +14,12 @@ export function AudioDigitalHumanForm({
   avatarId,
   modelDirectory,
   active = true,
+  pageActive = true,
 }: {
   avatarId: string;
   modelDirectory: string;
   active?: boolean;
+  pageActive?: boolean;
 }) {
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioSeconds, setAudioSeconds] = useState<number | null>(null);
@@ -33,6 +35,15 @@ export function AudioDigitalHumanForm({
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const { url: audioUrl, error: mediaError } = useMediaUrl(audioPath);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Pause any playing preview when the panel or the whole studio page is hidden.
+  useEffect(() => {
+    if (!active || !pageActive) {
+      audioRef.current?.pause();
+    }
+  }, [active, pageActive]);
+
   const remainingSeconds =
     audioSeconds !== null && Number.isFinite(trimStart) && trimStart >= 0
       ? audioSeconds - trimStart
@@ -136,6 +147,7 @@ export function AudioDigitalHumanForm({
       )}
       {audioUrl && (
         <audio
+          ref={audioRef}
           className="audio-preview"
           aria-label="所选音频"
           controls

@@ -11,12 +11,14 @@ export function StudioPage({
   error,
   modelDirectory,
   onCreateAvatar,
+  pageActive = true,
 }: {
   avatar: Avatar | null;
   loading: boolean;
   error: string | null;
   modelDirectory: string;
   onCreateAvatar: () => void;
+  pageActive?: boolean;
 }) {
   const [mode, setMode] = useState<'text' | 'audio'>('text');
 
@@ -91,6 +93,7 @@ export function StudioPage({
                 avatarId={avatar.id}
                 modelDirectory={modelDirectory}
                 active={mode === 'audio'}
+                pageActive={pageActive}
               />
             </div>
           </section>

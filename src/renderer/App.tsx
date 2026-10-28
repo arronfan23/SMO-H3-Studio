@@ -103,6 +103,7 @@ export function App() {
             error={avatarsError}
             modelDirectory={modelDirectory}
             onCreateAvatar={() => setPage('avatars')}
+            pageActive={page === 'studio'}
           />
         </div>
         {page === 'avatars' && (

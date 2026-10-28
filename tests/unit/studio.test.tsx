@@ -745,6 +745,50 @@ describe('audio digital human studio', () => {
     expect(smo.jobs.cancel).toHaveBeenCalledWith('audio-job');
     expect(smo.jobs.cancel).not.toHaveBeenCalledWith();
   });
+
+  test('pauses the audio preview when leaving the studio page', async () => {
+    await renderLoadedAudio('G:\\recordings\\nav-pause.mp3', 12.5);
+    const audio = screen.getByLabelText('所选音频');
+    const pauseSpy = vi.spyOn(HTMLMediaElement.prototype, 'pause');
+    try {
+      expect(pauseSpy).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+
+      expect(pauseSpy).toHaveBeenCalled();
+      // Studio stays mounted (kept alive) while hidden, so the audio element persists.
+      expect(screen.getByLabelText('所选音频')).toBe(audio);
+      expect(pauseSpy.mock.instances).toContain(audio);
+    } finally {
+      pauseSpy.mockRestore();
+    }
+  });
+
+  test('pauses the audio preview when opening the settings page', async () => {
+    await renderLoadedAudio('G:\\recordings\\settings-pause.mp3', 12.5);
+    const pauseSpy = vi.spyOn(HTMLMediaElement.prototype, 'pause');
+    try {
+      fireEvent.click(screen.getByRole('button', { name: '设置' }));
+
+      expect(pauseSpy).toHaveBeenCalled();
+    } finally {
+      pauseSpy.mockRestore();
+    }
+  });
+
+  test('pauses the audio preview when switching back to text mode', async () => {
+    await renderLoadedAudio('G:\\recordings\\mode-pause.mp3', 12.5);
+    const pauseSpy = vi.spyOn(HTMLMediaElement.prototype, 'pause');
+    try {
+      expect(pauseSpy).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+
+      expect(pauseSpy).toHaveBeenCalled();
+    } finally {
+      pauseSpy.mockRestore();
+    }
+  });
 });
 
 describe('generation options and hardware apply', () => {
