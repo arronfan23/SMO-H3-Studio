@@ -97,7 +97,11 @@ export function JobStatus({
         </div>
         <StatusBadge status={status} />
       </div>
-      <WorkProgressBar status={status} progress={readWorkProgress(current?.work)} />
+      <WorkProgressBar
+        status={status}
+        progress={readWorkProgress(current?.work)}
+        label={`生成进度 ${jobId}`}
+      />
       {current?.work?.error && <p className="form-error" role="alert">{current.work.error}</p>}
       {current?.refreshError && (
         <p className="form-error" role="alert">状态更新失败：{current.refreshError}</p>

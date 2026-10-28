@@ -104,14 +104,14 @@ class FakeComfyClient {
     onProgress?: (progress: ComfyProgress) => void,
   ): Promise<void> {
     this.waits.push(promptId);
+    for (const progress of this.progressEvents) {
+      onProgress?.(progress);
+    }
     if (this.completionGate) {
       await this.completionGate.promise;
     }
     if (this.completionError) {
       throw this.completionError;
-    }
-    for (const progress of this.progressEvents) {
-      onProgress?.(progress);
     }
   }
 
@@ -144,6 +144,7 @@ async function createHarness(
     workflowsDirectory?: string;
     removeFile?: typeof rm;
     cleanupErrorReporter?: (error: unknown) => void;
+    progressErrorReporter?: (error: unknown) => void;
     workflowResolver?: (mode: GenerationRequest["mode"]) => string;
     ensureReady?: () => Promise<unknown>;
   } = {},
@@ -204,6 +205,7 @@ async function createHarness(
     durationReader: options.durationReader ?? (async () => 60),
     removeFile: options.removeFile,
     cleanupErrorReporter: options.cleanupErrorReporter,
+    progressErrorReporter: options.progressErrorReporter,
   });
   const textRequest: GenerationRequest = {
     mode: 'text',
@@ -351,6 +353,103 @@ describe('GenerationHandler progress metadata', () => {
       workflowVersion: 'text-ref2va.json',
       progress: { value: 12, max: 24 },
     });
+  });
+});
+
+describe('GenerationHandler progress resilience and throttling', () => {
+  test('a transient progress persistence error does not fail the generation', async () => {
+    const progressErrorReporter = vi.fn();
+    const harness = await createHarness({ progressErrorReporter });
+    const busyError = new Error('SQLITE_BUSY: database is locked');
+    const originalUpdateWork = harness.store.updateWork.bind(harness.store);
+    vi.spyOn(harness.store, 'updateWork').mockImplementation((id, update) => {
+      if (
+        update.metadata !== undefined &&
+        (update.metadata as { progress?: unknown }).progress !== undefined
+      ) {
+        throw busyError;
+      }
+      return originalUpdateWork(id, update);
+    });
+    harness.comfy.progressEvents = [{ value: 4, max: 24 }];
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, result.id, 'done');
+
+    expect(progressErrorReporter).toHaveBeenCalledWith(busyError);
+    const work = harness.store.getWork(result.id);
+    expect(work?.status).toBe('done');
+    expect(work?.error).toBeNull();
+    expect(work?.metadata).toMatchObject({
+      request: harness.textRequest,
+      workflowVersion: 'text-ref2va.json',
+    });
+    expect(harness.comfy.submissions).toHaveLength(1);
+    expect(harness.comfy.waits).toEqual(['prompt-1']);
+  });
+
+  test('throttles a synchronous burst of progress events to at most two writes', async () => {
+    const harness = await createHarness();
+    const updateWorkSpy = vi.spyOn(harness.store, 'updateWork');
+    harness.comfy.progressEvents = Array.from({ length: 10 }, (_, index) => ({
+      value: index + 1,
+      max: 24,
+    }));
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, result.id, 'done');
+
+    const progressWrites = updateWorkSpy.mock.calls.filter(
+      ([, update]) =>
+        (update as { metadata?: { progress?: unknown } }).metadata?.progress !== undefined,
+    );
+    expect(progressWrites.length).toBeLessThanOrEqual(2);
+    expect(harness.store.getWork(result.id)?.metadata).toMatchObject({
+      request: harness.textRequest,
+      workflowVersion: 'text-ref2va.json',
+      progress: { value: 10, max: 24 },
+    });
+  });
+
+  test('persists early progress while running and flushes the latest value on completion', async () => {
+    vi.useFakeTimers();
+    const harness = await createHarness();
+    try {
+      harness.comfy.completionGate = deferred();
+      harness.comfy.progressEvents = [
+        { value: 3, max: 24 },
+        { value: 9, max: 24 },
+      ];
+
+      const result = await harness.startGeneration(harness.textRequest);
+      const readStoredProgress = (): unknown =>
+        harness.store.getWork(result.id)?.metadata?.progress;
+
+      // Advance virtual time in small steps until the run reaches the
+      // completion gate; the fake 200ms throttle timer must not fire yet, so
+      // only the first progress event may be persisted.
+      for (let step = 0; step < 100 && readStoredProgress() === undefined; step += 1) {
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(readStoredProgress()).toEqual({ value: 3, max: 24 });
+
+      harness.comfy.completionGate.resolve();
+      for (
+        let step = 0;
+        step < 500 && harness.store.getWork(result.id)?.status !== 'done';
+        step += 1
+      ) {
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(harness.store.getWork(result.id)?.status).toBe('done');
+      expect(harness.store.getWork(result.id)?.metadata).toMatchObject({
+        request: harness.textRequest,
+        workflowVersion: 'text-ref2va.json',
+        progress: { value: 9, max: 24 },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

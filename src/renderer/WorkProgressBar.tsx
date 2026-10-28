@@ -16,9 +16,12 @@ const INDETERMINATE_TEXT: Record<WorkStatus, string> = {
 export function WorkProgressBar({
   status,
   progress,
+  label,
 }: {
   status: WorkStatus;
   progress?: WorkProgress | null;
+  /** Accessible name; defaults to a generic label when the work id is unknown. */
+  label?: string;
 }) {
   const ratio =
     progress !== null && progress !== undefined && progress.max > 0
@@ -53,7 +56,7 @@ export function WorkProgressBar({
     <div
       className={`work-progress work-progress-${status}${indeterminate ? ' work-progress-indeterminate' : ''}`}
       role="progressbar"
-      aria-label="生成进度"
+      aria-label={label ?? '生成进度'}
       aria-valuemin={0}
       aria-valuemax={100}
       {...(valueNow === null ? {} : { 'aria-valuenow': valueNow })}

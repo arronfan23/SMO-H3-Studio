@@ -726,7 +726,7 @@ describe('works and settings', () => {
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
 
-    const bar = await screen.findByRole('progressbar', { name: '生成进度' });
+    const bar = await screen.findByRole('progressbar', { name: '生成进度 running-work' });
     expect(bar).toHaveAttribute('aria-valuenow', '50');
     expect(screen.getByText('50%')).toBeInTheDocument();
   });

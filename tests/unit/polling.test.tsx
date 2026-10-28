@@ -175,7 +175,7 @@ describe('WorkProgressBar accessibility', () => {
     ]);
     await flushPromises();
 
-    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    const bar = screen.getByRole('progressbar', { name: '生成进度 job-1' });
     expect(bar).toHaveAttribute('aria-valuenow', '50');
     expect(screen.getByText('50%')).toBeInTheDocument();
     view.unmount();
@@ -189,7 +189,7 @@ describe('WorkProgressBar accessibility', () => {
     requests[0].resolve([makeWork('done')]);
     await flushPromises();
 
-    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    const bar = screen.getByRole('progressbar', { name: '生成进度 job-1' });
     expect(bar).toHaveAttribute('aria-valuenow', '100');
     expect(screen.getByText('100%')).toBeInTheDocument();
     view.unmount();
@@ -203,7 +203,7 @@ describe('WorkProgressBar accessibility', () => {
     requests[0].resolve([makeWork('pending')]);
     await flushPromises();
 
-    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    const bar = screen.getByRole('progressbar', { name: '生成进度 job-1' });
     expect(bar).not.toHaveAttribute('aria-valuenow');
     expect(screen.getByText('准备中…')).toBeInTheDocument();
     view.unmount();
@@ -219,7 +219,7 @@ describe('WorkProgressBar accessibility', () => {
     ]);
     await flushPromises();
 
-    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    const bar = screen.getByRole('progressbar', { name: '生成进度 job-1' });
     expect(bar).toHaveAttribute('aria-valuenow', '50');
     expect(within(bar).getByText(/失败/)).toBeInTheDocument();
     view.unmount();
@@ -233,7 +233,7 @@ describe('WorkProgressBar accessibility', () => {
     requests[0].resolve([makeWork('failed')]);
     await flushPromises();
 
-    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    const bar = screen.getByRole('progressbar', { name: '生成进度 job-1' });
     expect(bar).not.toHaveAttribute('aria-valuenow');
     expect(screen.getByText('生成失败')).toBeInTheDocument();
     view.unmount();
@@ -249,7 +249,7 @@ describe('WorkProgressBar accessibility', () => {
     ]);
     await flushPromises();
 
-    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    const bar = screen.getByRole('progressbar', { name: '生成进度 job-1' });
     expect(bar).toHaveAttribute('aria-valuenow', '50');
     expect(screen.getByText('50%')).toBeInTheDocument();
     view.unmount();

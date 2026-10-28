@@ -16,6 +16,7 @@ import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
 import type {
   GenerationRequest,
   GenerationStartResult,
+  WorkProgress,
   WorkMetadata,
 } from '../shared/types';
 
@@ -32,6 +33,8 @@ const WORKFLOW_FILENAMES = {
   text: 'text-ref2va.json',
   audio: 'audio-digital-human.json',
 } as const;
+
+const PROGRESS_FLUSH_INTERVAL_MS = 200;
 
 type WorkflowGraph = Record<string, { inputs: Record<string, unknown> }>;
 
@@ -52,6 +55,7 @@ export interface GenerationHandlerOptions {
   durationReader?: AudioDurationReader;
   removeFile?: typeof rm;
   cleanupErrorReporter?: (error: unknown) => void;
+  progressErrorReporter?: (error: unknown) => void;
 }
 
 function resolveWorkflowPath(
@@ -223,6 +227,10 @@ function reportCleanupError(error: unknown): void {
   console.error('[SMO.H3 Studio] Failed to clean staged audio', error);
 }
 
+function reportProgressError(error: unknown): void {
+  console.warn('[SMO.H3 Studio] Failed to persist generation progress', error);
+}
+
 async function cleanupStagedAudio(
   stagedPath: string | undefined,
   remove: typeof rm,
@@ -282,6 +290,7 @@ export function createGenerationHandler(
   const readDuration = options.durationReader ?? createFfprobeDurationReader();
   const remove = options.removeFile ?? rm;
   const cleanupErrorReporter = options.cleanupErrorReporter ?? reportCleanupError;
+  const progressErrorReporter = options.progressErrorReporter ?? reportProgressError;
 
   return async (input, executionOptions = {}) => {
     validateRequest(input);
@@ -362,6 +371,59 @@ export function createGenerationHandler(
       await comfy.cancel();
     };
 
+    // Progress persistence is best-effort: a transient store failure must not
+    // fail the run, and frame events are coalesced into a 200ms write window.
+    let lastWrittenProgress: WorkProgress | null = null;
+    let pendingProgress: WorkProgress | null = null;
+    let progressTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const sameProgress = (a: WorkProgress | null, b: WorkProgress): boolean =>
+      a !== null && a.value === b.value && a.max === b.max;
+
+    const writeProgress = (progress: WorkProgress): void => {
+      try {
+        store.updateWork(workId, {
+          metadata: { ...baseMetadata, progress },
+        });
+        lastWrittenProgress = progress;
+      } catch (error) {
+        progressErrorReporter(error);
+      }
+    };
+
+    const flushProgress = (progress: WorkProgress): void => {
+      if (progressTimer !== null) {
+        if (!sameProgress(lastWrittenProgress, progress)) {
+          pendingProgress = progress;
+        }
+        return;
+      }
+      if (sameProgress(lastWrittenProgress, progress)) {
+        return;
+      }
+      writeProgress(progress);
+      progressTimer = setTimeout(() => {
+        progressTimer = null;
+        const latest = pendingProgress;
+        pendingProgress = null;
+        if (latest !== null && !sameProgress(lastWrittenProgress, latest)) {
+          writeProgress(latest);
+        }
+      }, PROGRESS_FLUSH_INTERVAL_MS);
+    };
+
+    const flushPendingProgress = (): void => {
+      if (progressTimer !== null) {
+        clearTimeout(progressTimer);
+        progressTimer = null;
+      }
+      const latest = pendingProgress;
+      pendingProgress = null;
+      if (latest !== null && !sameProgress(lastWrittenProgress, latest)) {
+        writeProgress(latest);
+      }
+    };
+
     const run = async (): Promise<void> => {
       try {
         throwIfCancelled();
@@ -412,11 +474,7 @@ export function createGenerationHandler(
         await interruptIfRequested();
         throwIfCancelled();
         try {
-          await comfy.waitForCompletion(submitted.prompt_id, (progress) => {
-            store.updateWork(workId, {
-              metadata: { ...baseMetadata, progress },
-            });
-          });
+          await comfy.waitForCompletion(submitted.prompt_id, flushProgress);
         } finally {
           execution.interruptible = false;
         }
@@ -445,6 +503,7 @@ export function createGenerationHandler(
         throw failure;
       } finally {
         execution.interruptible = false;
+        flushPendingProgress();
         await cleanupStagedAudio(stagedAudioPath, remove, cleanupErrorReporter);
       }
     };

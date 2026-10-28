@@ -169,7 +169,11 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 <StatusBadge status={work.status} />
               </header>
               <code className="work-id">{work.id}</code>
-              <WorkProgressBar status={work.status} progress={readWorkProgress(work)} />
+              <WorkProgressBar
+                status={work.status}
+                progress={readWorkProgress(work)}
+                label={`生成进度 ${work.id}`}
+              />
               {work.status === 'failed' && work.error && (
                 <p className="form-error" role="alert">{work.error}</p>
               )}
