@@ -227,6 +227,9 @@ async function assertViewLayout(
   viewName: string,
   selectors: string[],
 ): Promise<void> {
+  for (const selector of selectors) {
+    await page.locator(selector).scrollIntoViewIfNeeded();
+  }
   const violations = await page.evaluate(
     ({ view, selectors }) => {
       const viewport = { width: window.innerWidth, height: window.innerHeight };
@@ -244,13 +247,12 @@ async function assertViewLayout(
           message: `scrollWidth ${document.documentElement.scrollWidth} > innerWidth ${viewport.width}`,
         });
       }
-     for (const selector of selectors) {
-       const element = document.querySelector(selector);
-       if (!element) {
-         results.push({ view, type: 'missing', selector, message: 'element not found' });
-         continue;
-       }
-        element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      for (const selector of selectors) {
+        const element = document.querySelector(selector);
+        if (!element) {
+          results.push({ view, type: 'missing', selector, message: 'element not found' });
+          continue;
+        }
         const rect = element.getBoundingClientRect();
         if (rect.left < 0 || rect.right > viewport.width || rect.top < 0 || rect.bottom > viewport.height) {
           results.push({
