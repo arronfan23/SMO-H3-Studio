@@ -29,4 +29,15 @@ describe('responsive studio CSS contracts', () => {
     expect(buttonRule).toContain('white-space: normal');
     expect(buttonRule).toContain('overflow-wrap: anywhere');
   });
+
+  test('keeps large media previews on the panel radius token', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+    const mediaRule = css.match(
+      /\.work-item video,\s*\.video-placeholder\s*\{([^}]*)\}/,
+    )?.[1];
+
+    expect(mediaRule).toBeDefined();
+    expect(mediaRule).toContain('border-radius: var(--radius-panel)');
+    expect(mediaRule).not.toContain('var(--radius-control)');
+  });
 });

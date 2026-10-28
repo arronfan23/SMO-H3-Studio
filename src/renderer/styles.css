@@ -740,7 +740,7 @@ video:focus-visible {
   aspect-ratio: 16 / 9;
   max-height: 420px;
   background: #1d211e;
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-panel);
 }
 
 .video-placeholder {
