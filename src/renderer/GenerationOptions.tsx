@@ -87,7 +87,7 @@ export function GenerationOptions({
           </select>
         </div>
         <div className="field">
-          <label htmlFor={`${idPrefix}-subtitles`}>同步字幕</label>
+          <label htmlFor={`${idPrefix}-subtitles`}>生成画面内字幕</label>
           <label className="checkbox-field">
             <input
               id={`${idPrefix}-subtitles`}
@@ -98,7 +98,7 @@ export function GenerationOptions({
                 onChange({ ...value, subtitles: event.target.checked })
               }
             />
-            <span>在画面安全区内显示同步字幕</span>
+            <span>在画面安全区内显示字幕</span>
           </label>
         </div>
       </div>

@@ -38,6 +38,11 @@ describe('H3 generation options', () => {
 
   test('offers 0.4/0.7/1.0 MP resolutions with INT8 as the default model', () => {
     expect(RESOLUTION_OPTIONS.map((option) => option.value)).toEqual([0.4, 0.7, 1]);
+    expect(RESOLUTION_OPTIONS.map((option) => option.label)).toEqual([
+      '0.4MP（流畅）',
+      '0.7MP（标准，默认）',
+      '1.0MP（高清）',
+    ]);
     expect(H3_MODEL_OPTIONS.map((option) => option.value)).toEqual(['int8', 'bf16']);
     expect(H3_MODEL_OPTIONS.find((option) => option.value === 'bf16')?.label).toContain(
       '大显存候选，未实测',

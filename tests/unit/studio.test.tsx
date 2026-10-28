@@ -527,7 +527,7 @@ describe('generation options and hardware apply', () => {
     expect(panel.getByText('BF16 大显存候选，未实测')).toBeInTheDocument();
     expect(panel.getByLabelText('视频比例')).toHaveValue('16:9 (Widescreen)');
     expect(panel.getByLabelText('分辨率')).toHaveValue('0.7');
-    expect(panel.getByLabelText('同步字幕')).not.toBeChecked();
+    expect(panel.getByLabelText('生成画面内字幕')).not.toBeChecked();
   });
 
   test('applies the default INT8 profile before starting the text job', async () => {
@@ -600,8 +600,8 @@ describe('generation options and hardware apply', () => {
     fireEvent.change(panel.getByLabelText('原始文字'), {
       target: { value: '需要同步字幕' },
     });
-    fireEvent.click(panel.getByLabelText('同步字幕'));
-    expect(panel.getByLabelText('同步字幕')).toBeChecked();
+    fireEvent.click(panel.getByLabelText('生成画面内字幕'));
+    expect(panel.getByLabelText('生成画面内字幕')).toBeChecked();
 
     fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
 

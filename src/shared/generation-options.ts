@@ -39,9 +39,9 @@ export interface ResolutionOption {
 }
 
 export const RESOLUTION_OPTIONS: readonly ResolutionOption[] = [
-  { value: 0.4, label: '0.4 MP' },
-  { value: 0.7, label: '0.7 MP（默认）' },
-  { value: 1, label: '1.0 MP' },
+  { value: 0.4, label: '0.4MP（流畅）' },
+  { value: 0.7, label: '0.7MP（标准，默认）' },
+  { value: 1, label: '1.0MP（高清）' },
 ];
 
 export const DEFAULT_RESOLUTION_MP: ResolutionMegapixels = 0.7;
