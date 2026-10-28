@@ -10,6 +10,7 @@ import {
 import { GenerationOptions } from './GenerationOptions';
 import { JobStatus } from './JobStatus';
 import { errorMessage } from './ui';
+import { estimateNarrationDuration } from '../shared/duration';
 
 type PromptTab = 'original' | 'polished';
 
@@ -26,7 +27,8 @@ export function TextToVideoForm({
   const [polishedText, setPolishedText] = useState('');
   const [activeTab, setActiveTab] = useState<PromptTab>('original');
   const [skill, setSkill] = useState<'auto' | SkillName>('auto');
-  const [duration, setDuration] = useState(8);
+  const [duration, setDuration] = useState<number | ''>(8);
+  const [polishedAutoDuration, setPolishedAutoDuration] = useState<number | null>(null);
   const [seed, setSeed] = useState(42);
   const [options, setOptions] = useState<GenerationOptionsValue>(
     DEFAULT_GENERATION_OPTIONS,
@@ -41,13 +43,24 @@ export function TextToVideoForm({
       ? AUTO_SKILL_OPTION.description
       : SKILL_OPTIONS[skill].description;
 
+  const resolveDuration = (forPolishedPrompt: boolean): number => {
+    if (duration !== '') {
+      return duration;
+    }
+    if (forPolishedPrompt && polishedAutoDuration !== null) {
+      return polishedAutoDuration;
+    }
+    return estimateNarrationDuration(originalText);
+  };
+
   const polish = async (): Promise<void> => {
     const text = originalText.trim();
     if (text.length === 0) {
       setError('请先填写原始文字。');
       return;
     }
-    if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
+    const resolvedDuration = resolveDuration(false);
+    if (!Number.isFinite(resolvedDuration) || resolvedDuration < 4 || resolvedDuration > 15) {
       setError('视频时长必须在 4–15 秒之间。');
       return;
     }
@@ -56,13 +69,14 @@ export function TextToVideoForm({
     try {
       const result = await window.smo.llm.polish({
         text,
-        duration,
+        duration: resolvedDuration,
         imageCount: 1,
         mode: 'ref2va',
         referenceLabels: ['<Picture 1>'],
         skill,
       });
       setPolishedText(result.text);
+      setPolishedAutoDuration(duration === '' ? resolvedDuration : null);
       setActiveTab('polished');
     } catch (polishError) {
       setActiveTab('original');
@@ -78,7 +92,8 @@ export function TextToVideoForm({
       setError('请填写用于生成的文字。');
       return;
     }
-    if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
+    const resolvedDuration = resolveDuration(activeTab === 'polished');
+    if (!Number.isFinite(resolvedDuration) || resolvedDuration < 4 || resolvedDuration > 15) {
       setError('视频时长必须在 4–15 秒之间。');
       return;
     }
@@ -101,7 +116,7 @@ export function TextToVideoForm({
         mode: 'text',
         avatarId,
         prompt,
-        duration,
+        duration: resolvedDuration,
         seed,
         subtitles: options.subtitles,
       });
@@ -154,8 +169,16 @@ export function TextToVideoForm({
             max={15}
             step={1}
             value={duration}
-            onChange={(event) => setDuration(event.target.valueAsNumber)}
+            aria-describedby={duration === '' ? 'text-duration-hint' : undefined}
+            onChange={(event) =>
+              setDuration(event.target.value === '' ? '' : event.target.valueAsNumber)
+            }
           />
+          {duration === '' && (
+            <p id="text-duration-hint" className="skill-description">
+              留空自动：约 {estimateNarrationDuration(originalText)} 秒（含 2 秒收尾）
+            </p>
+          )}
         </div>
         <div className="field">
           <label htmlFor="text-seed">随机种子</label>

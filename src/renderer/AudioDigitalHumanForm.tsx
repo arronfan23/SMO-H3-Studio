@@ -23,7 +23,7 @@ export function AudioDigitalHumanForm({
   const [audioSeconds, setAudioSeconds] = useState<number | null>(null);
   const [prompt, setPrompt] = useState('');
   const [trimStart, setTrimStart] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [duration, setDuration] = useState<number | ''>(0);
   const [seed, setSeed] = useState(42);
   const [options, setOptions] = useState<GenerationOptionsValue>(
     DEFAULT_GENERATION_OPTIONS,
@@ -66,10 +66,15 @@ export function AudioDigitalHumanForm({
       setError('起始截取时间必须是非负数字。');
       return;
     }
+    if (trimStart >= audioSeconds) {
+      setError('截取范围不能超出实际音频时长。');
+      return;
+    }
+    const resolvedDuration = duration === '' ? audioSeconds - trimStart : duration;
     if (
-      !Number.isFinite(duration) ||
-      duration <= 0 ||
-      trimStart + duration > audioSeconds
+      !Number.isFinite(resolvedDuration) ||
+      resolvedDuration <= 0 ||
+      trimStart + resolvedDuration > audioSeconds
     ) {
       setError('截取范围不能超出实际音频时长。');
       return;
@@ -95,7 +100,7 @@ export function AudioDigitalHumanForm({
         prompt: normalizedPrompt,
         audioPath,
         trimStart,
-        duration,
+        duration: resolvedDuration,
         seed,
         subtitles: options.subtitles,
       });
@@ -182,8 +187,18 @@ export function AudioDigitalHumanForm({
             min={0.01}
             step={0.01}
             value={duration}
-            onChange={(event) => setDuration(event.target.valueAsNumber)}
+            aria-describedby={
+              duration === '' && audioSeconds !== null ? 'audio-duration-hint' : undefined
+            }
+            onChange={(event) =>
+              setDuration(event.target.value === '' ? '' : event.target.valueAsNumber)
+            }
           />
+          {duration === '' && audioSeconds !== null && (
+            <p id="audio-duration-hint" className="skill-description">
+              留空自动：使用剩余 {(audioSeconds - trimStart).toFixed(2)} 秒
+            </p>
+          )}
         </div>
         <div className="field">
           <label htmlFor="audio-seed">随机种子</label>

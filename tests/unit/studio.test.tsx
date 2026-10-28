@@ -428,6 +428,44 @@ describe('text-to-video studio', () => {
     expect(screen.getByText('等待中（pending）')).toBeInTheDocument();
   });
 
+  test('estimates a blank duration from the original text and reuses it after polishing', async () => {
+    const originalText = 'one two three four five six seven eight nine ten';
+    const polishedText =
+      '<Picture 1> 中的主播在明亮演播室里面对镜头，' +
+      '缓慢转身并自然挥手，镜头平稳推进。'.repeat(12);
+    smo.llm.polish.mockResolvedValue({
+      text: polishedText,
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderStudio();
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: originalText },
+    });
+    const durationInput = screen.getByLabelText('视频时长（秒）');
+    fireEvent.change(durationInput, { target: { value: '' } });
+
+    expect(durationInput).toHaveAttribute('aria-describedby', 'text-duration-hint');
+    expect(screen.getByText('留空自动：约 6 秒（含 2 秒收尾）')).toHaveAttribute(
+      'id',
+      'text-duration-hint',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await screen.findByRole('textbox', { name: '润色结果' })).toHaveValue(polishedText);
+    expect(smo.llm.polish).toHaveBeenCalledWith(expect.objectContaining({ duration: 6 }));
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt: polishedText, duration: 6 }),
+      ),
+    );
+  });
+
   test('keeps the original text after a polish failure and can generate it', async () => {
     smo.llm.polish.mockRejectedValue(new Error('LLM 暂时不可用'));
     await renderStudio();
@@ -484,6 +522,45 @@ describe('text-to-video studio', () => {
 });
 
 describe('audio digital human studio', () => {
+  test('uses the remaining audio seconds when the clip duration is blank', async () => {
+    const audioPath = 'G:\\recordings\\remaining.mp3';
+    smo.files.selectAudio.mockResolvedValue(audioPath);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    expect(await screen.findByText('remaining.mp3')).toBeInTheDocument();
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 12.5 });
+    fireEvent.loadedMetadata(audio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(12.5);
+
+    fireEvent.change(screen.getByLabelText('起始截取（秒）'), { target: { value: '1.25' } });
+    const durationInput = screen.getByLabelText('截取时长（秒）');
+    fireEvent.change(durationInput, { target: { value: '' } });
+
+    expect(durationInput).toHaveAttribute('aria-describedby', 'audio-duration-hint');
+    expect(screen.getByText('留空自动：使用剩余 11.25 秒')).toHaveAttribute(
+      'id',
+      'audio-duration-hint',
+    );
+
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '自然说话，轻微点头' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          audioPath,
+          trimStart: 1.25,
+          duration: 11.25,
+        }),
+      ),
+    );
+  });
+
   test('reads audio metadata, starts with the selected clip seconds, and cancels by job id', async () => {
     const audioPath = 'G:\\recordings\\voice.mp3';
     smo.files.selectAudio.mockResolvedValue(audioPath);
