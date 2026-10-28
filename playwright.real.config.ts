@@ -1,10 +1,11 @@
 import { defineConfig } from '@playwright/test';
 
-// Real-hardware acceptance suite: launches the real SelfLift ComfyUI backend
-// through the app and verifies node availability. Requires SMO_REAL_H3=1.
+// Real-acceptance suites: real-comfy.spec.ts launches the real SelfLift
+// ComfyUI backend (requires SMO_REAL_H3=1); real-llm.spec.ts validates the
+// user's real LLM profile and polish path (requires SMO_REAL_LLM=1).
 export default defineConfig({
   testDir: 'tests/e2e',
-  testMatch: /real-comfy\.spec\.ts/,
+  testMatch: /real-.*\.spec\.ts/,
   workers: 1,
   timeout: 420000,
   reporter: 'list',
