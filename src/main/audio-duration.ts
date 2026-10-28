@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 export const DEFAULT_FFPROBE_PATH =
-  'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\ComfyUI\\tools\\ffmpeg\\ffprobe.exe';
+  'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\tools\\ffmpeg\\ffprobe.exe';
 
 function resolveFfprobePath(): string {
   const envPath = process.env.SMO_FFPROBE_PATH;

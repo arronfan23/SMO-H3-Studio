@@ -12,6 +12,12 @@ describe('ffprobe audio duration reader', () => {
     delete process.env.SMO_FFMPEG_PATH;
   });
 
+  test('points at the actual H3 tools directory', () => {
+    expect(DEFAULT_FFPROBE_PATH).toBe(
+      'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130\\tools\\ffmpeg\\ffprobe.exe',
+    );
+  });
+
   test('uses the fixed H3 executable, arguments, and timeout', async () => {
     const execute = vi.fn(async () => ({ stdout: '12.5\n' }));
     const reader = createFfprobeDurationReader({ execute });
