@@ -284,7 +284,7 @@ describe('work updates', () => {
       });
       const metadata = {
         request: {
-          mode: 'text',
+          mode: 'text' as const,
           avatarId: avatar.id,
           prompt: 'A quiet studio shot.',
           duration: 8,

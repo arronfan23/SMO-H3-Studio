@@ -476,6 +476,73 @@ video:focus-visible {
   background: #fbeae6;
 }
 
+.work-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.work-progress-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 8px;
+  overflow: hidden;
+  background: #e3e9e4;
+  border-radius: 999px;
+}
+
+.work-progress-fill {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 0;
+  border-radius: inherit;
+  background: #8a928e;
+  transition: width 240ms ease;
+}
+
+.work-progress-indeterminate .work-progress-fill {
+  width: 30%;
+  animation: work-progress-slide 1.2s ease-in-out infinite;
+}
+
+.work-progress-pending .work-progress-fill {
+  background: #a5853a;
+}
+
+.work-progress-running .work-progress-fill {
+  background: #2f7ea6;
+}
+
+.work-progress-done .work-progress-fill {
+  background: #2e8b62;
+}
+
+.work-progress-failed .work-progress-fill {
+  background: #b0504a;
+}
+
+.work-progress-text {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4b554f;
+}
+
+.work-progress-failed .work-progress-text {
+  color: #973c33;
+}
+
+@keyframes work-progress-slide {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(360%);
+  }
+}
+
 .empty-state,
 .page-state {
   display: grid;

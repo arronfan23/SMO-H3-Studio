@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Work, WorkStatus } from '../shared/types';
-import { errorMessage, WORK_STATUS_TEXT } from './ui';
+import { errorMessage, readWorkProgress, WORK_STATUS_TEXT } from './ui';
+import { WorkProgressBar } from './WorkProgressBar';
 
 const POLL_INTERVAL_MS = 400;
 
@@ -96,6 +97,7 @@ export function JobStatus({
         </div>
         <StatusBadge status={status} />
       </div>
+      <WorkProgressBar status={status} progress={readWorkProgress(current?.work)} />
       {current?.work?.error && <p className="form-error" role="alert">{current.work.error}</p>}
       {current?.refreshError && (
         <p className="form-error" role="alert">状态更新失败：{current.refreshError}</p>

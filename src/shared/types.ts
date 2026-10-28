@@ -26,7 +26,23 @@ export interface Avatar {
 
 export type WorkStatus = 'pending' | 'running' | 'done' | 'failed';
 
-export type WorkMetadata = Record<string, unknown>;
+/** Real frame progress reported by ComfyUI (e.g. value 12 of max 24 frames). */
+export interface WorkProgress {
+  value: number;
+  max: number;
+}
+
+export interface WorkMetadata {
+  [key: string]: unknown;
+  /** Sanitized request snapshot kept for retry; written when the work is queued. */
+  request?: GenerationRequest;
+  /** Workflow identifier (frozen filename or explicit path) used for retry. */
+  workflowVersion?: string;
+  /** Id of the failed work this one retries, when applicable. */
+  retryOf?: string;
+  /** Last frame progress reported by ComfyUI while running. */
+  progress?: WorkProgress;
+}
 
 export interface Work {
   id: string;

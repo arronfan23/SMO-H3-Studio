@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import type {
   ComfyClient,
   ComfyOutputFile,
+  ComfyProgress,
   ComfySubmitResult,
 } from '../../src/main/comfy';
 import { FileService } from '../../src/main/files';
@@ -65,6 +66,7 @@ class FakeComfyClient {
   submitGate?: Deferred<ComfySubmitResult>;
   historyGate?: Deferred<void>;
   cancellations = 0;
+  progressEvents: ComfyProgress[] = [];
   outputs: ComfyOutputFile[] = [
     outputFile({ nodeId: 'preview', kind: 'images', filename: 'cover.png' }),
     outputFile({ filename: 'result.webm' }),
@@ -97,13 +99,19 @@ class FakeComfyClient {
     return { prompt_id: this.promptId, number: 1, node_errors: {} };
   }
 
-  async waitForCompletion(promptId: string): Promise<void> {
+  async waitForCompletion(
+    promptId: string,
+    onProgress?: (progress: ComfyProgress) => void,
+  ): Promise<void> {
     this.waits.push(promptId);
     if (this.completionGate) {
       await this.completionGate.promise;
     }
     if (this.completionError) {
       throw this.completionError;
+    }
+    for (const progress of this.progressEvents) {
+      onProgress?.(progress);
     }
   }
 
@@ -322,6 +330,26 @@ describe('GenerationHandler subtitle preference', () => {
     const work = harness.store.listWorks().find((candidate) => candidate.id === result.id);
     expect(work?.metadata).toMatchObject({
       request: { prompt: harness.textRequest.prompt },
+    });
+  });
+});
+
+describe('GenerationHandler progress metadata', () => {
+  test('stores ComfyUI frame progress while keeping request and workflowVersion', async () => {
+    const harness = await createHarness();
+    harness.comfy.progressEvents = [
+      { value: 6, max: 24 },
+      { value: 12, max: 24 },
+    ];
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, result.id, 'done');
+
+    const work = harness.store.getWork(result.id);
+    expect(work?.metadata).toMatchObject({
+      request: harness.textRequest,
+      workflowVersion: 'text-ref2va.json',
+      progress: { value: 12, max: 24 },
     });
   });
 });
@@ -1250,7 +1278,7 @@ describe('GenerationHandler retry', () => {
       outputPath: null,
       status: 'failed',
       metadata: {
-        request,
+        request: request as GenerationRequest,
         workflowVersion: 'text-ref2va.json',
       },
     });

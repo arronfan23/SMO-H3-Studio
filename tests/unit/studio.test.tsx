@@ -715,6 +715,22 @@ describe('works and settings', () => {
     );
   });
 
+  test('shows real frame progress for a running work', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'running-work',
+        status: 'running',
+        metadata: { progress: { value: 12, max: 24 } },
+      }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    const bar = await screen.findByRole('progressbar', { name: '生成进度' });
+    expect(bar).toHaveAttribute('aria-valuenow', '50');
+    expect(screen.getByText('50%')).toBeInTheDocument();
+  });
+
   test('shows real ComfyUI health and the configured LLM without exposing credentials', async () => {
     smo.comfy.health.mockResolvedValue({
       system: { os: 'Windows 11' },

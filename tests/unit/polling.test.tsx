@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { JobStatus } from '../../src/renderer/JobStatus';
@@ -19,7 +19,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-function makeWork(status: WorkStatus): Work {
+function makeWork(status: WorkStatus, metadata: Work['metadata'] = null): Work {
   return {
     id: 'job-1',
     avatarId: 'avatar-1',
@@ -28,8 +28,8 @@ function makeWork(status: WorkStatus): Work {
     status,
     createdAt: '2026-10-26T08:00:00.000Z',
     promptId: null,
-    metadata: null,
-    error: status === 'failed' ? '生成失败' : null,
+    metadata,
+    error: status === 'failed' ? '任务失败详情' : null,
   };
 }
 
@@ -161,6 +161,98 @@ describe('JobStatus polling lifecycle', () => {
     expect(vi.getTimerCount()).toBe(0);
     await advanceTimers(5000);
     expect(list).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WorkProgressBar accessibility', () => {
+  test('shows 50% with aria-valuenow while running with frame progress', async () => {
+    const { list, requests } = controlledWorks();
+    exposeWorks(list);
+    const view = render(<JobStatus jobId="job-1" />);
+
+    requests[0].resolve([
+      makeWork('running', { progress: { value: 12, max: 24 } }),
+    ]);
+    await flushPromises();
+
+    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    expect(bar).toHaveAttribute('aria-valuenow', '50');
+    expect(screen.getByText('50%')).toBeInTheDocument();
+    view.unmount();
+  });
+
+  test('shows 100% with aria-valuenow when done', async () => {
+    const { list, requests } = controlledWorks();
+    exposeWorks(list);
+    const view = render(<JobStatus jobId="job-1" />);
+
+    requests[0].resolve([makeWork('done')]);
+    await flushPromises();
+
+    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    expect(bar).toHaveAttribute('aria-valuenow', '100');
+    expect(screen.getByText('100%')).toBeInTheDocument();
+    view.unmount();
+  });
+
+  test('pending without frame progress has no aria-valuenow and shows preparation text', async () => {
+    const { list, requests } = controlledWorks();
+    exposeWorks(list);
+    const view = render(<JobStatus jobId="job-1" />);
+
+    requests[0].resolve([makeWork('pending')]);
+    await flushPromises();
+
+    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    expect(bar).not.toHaveAttribute('aria-valuenow');
+    expect(screen.getByText('准备中…')).toBeInTheDocument();
+    view.unmount();
+  });
+
+  test('failed keeps the last known progress', async () => {
+    const { list, requests } = controlledWorks();
+    exposeWorks(list);
+    const view = render(<JobStatus jobId="job-1" />);
+
+    requests[0].resolve([
+      makeWork('failed', { progress: { value: 12, max: 24 } }),
+    ]);
+    await flushPromises();
+
+    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    expect(bar).toHaveAttribute('aria-valuenow', '50');
+    expect(within(bar).getByText(/失败/)).toBeInTheDocument();
+    view.unmount();
+  });
+
+  test('failed without progress has no aria-valuenow and shows an error state', async () => {
+    const { list, requests } = controlledWorks();
+    exposeWorks(list);
+    const view = render(<JobStatus jobId="job-1" />);
+
+    requests[0].resolve([makeWork('failed')]);
+    await flushPromises();
+
+    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    expect(bar).not.toHaveAttribute('aria-valuenow');
+    expect(screen.getByText('生成失败')).toBeInTheDocument();
+    view.unmount();
+  });
+
+  test('renders real frame progress inside the works list', async () => {
+    const { list, requests } = controlledWorks();
+    exposeWorks(list);
+    const view = render(<WorksPage avatars={[]} />);
+
+    requests[0].resolve([
+      makeWork('running', { progress: { value: 12, max: 24 } }),
+    ]);
+    await flushPromises();
+
+    const bar = screen.getByRole('progressbar', { name: '生成进度' });
+    expect(bar).toHaveAttribute('aria-valuenow', '50');
+    expect(screen.getByText('50%')).toBeInTheDocument();
+    view.unmount();
   });
 });
 

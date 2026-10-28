@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw } from 'lucide-react';
 import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
+import { WorkProgressBar } from './WorkProgressBar';
 import { useMediaUrl } from './useMediaUrl';
-import { errorMessage, parentPath } from './ui';
+import { errorMessage, parentPath, readWorkProgress } from './ui';
 
 const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -168,6 +169,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 <StatusBadge status={work.status} />
               </header>
               <code className="work-id">{work.id}</code>
+              <WorkProgressBar status={work.status} progress={readWorkProgress(work)} />
               {work.status === 'failed' && work.error && (
                 <p className="form-error" role="alert">{work.error}</p>
               )}

@@ -13,7 +13,11 @@ import type { Store } from './store';
 import { patchWorkflow } from '../shared/workflow';
 import { withSubtitlePreference } from '../shared/generation-options';
 import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
-import type { GenerationRequest, GenerationStartResult } from '../shared/types';
+import type {
+  GenerationRequest,
+  GenerationStartResult,
+  WorkMetadata,
+} from '../shared/types';
 
 export interface GenerationExecutionOptions {
   workflowPath?: string;
@@ -320,6 +324,11 @@ export function createGenerationHandler(
       );
       await validateStagedAudioDuration(request, stagedAudioPath, readDuration);
     }
+    const baseMetadata: WorkMetadata = {
+      request,
+      workflowVersion,
+      ...(originalRetryOf ? { retryOf: originalRetryOf } : {}),
+    };
     store.addWork({
       id: workId,
       avatarId: request.avatarId,
@@ -327,11 +336,7 @@ export function createGenerationHandler(
       outputPath: null,
       status: 'pending',
       promptId: null,
-      metadata: {
-        request,
-        workflowVersion,
-        ...(originalRetryOf ? { retryOf: originalRetryOf } : {}),
-      },
+      metadata: baseMetadata,
       error: null,
     });
 
@@ -407,7 +412,11 @@ export function createGenerationHandler(
         await interruptIfRequested();
         throwIfCancelled();
         try {
-          await comfy.waitForCompletion(submitted.prompt_id);
+          await comfy.waitForCompletion(submitted.prompt_id, (progress) => {
+            store.updateWork(workId, {
+              metadata: { ...baseMetadata, progress },
+            });
+          });
         } finally {
           execution.interruptible = false;
         }

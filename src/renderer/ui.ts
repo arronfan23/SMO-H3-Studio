@@ -1,4 +1,4 @@
-import type { WorkStatus } from '../shared/types';
+import type { Work, WorkProgress, WorkStatus } from '../shared/types';
 
 export const WORK_STATUS_TEXT: Record<WorkStatus, string> = {
   pending: '等待中（pending）',
@@ -9,6 +9,25 @@ export const WORK_STATUS_TEXT: Record<WorkStatus, string> = {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Reads validated frame progress from persisted work metadata. */
+export function readWorkProgress(work: Work | null | undefined): WorkProgress | null {
+  const progress = work?.metadata?.progress;
+  if (progress === undefined || progress === null) {
+    return null;
+  }
+  const { value, max } = progress;
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    typeof max !== 'number' ||
+    !Number.isFinite(max) ||
+    max <= 0
+  ) {
+    return null;
+  }
+  return { value, max };
 }
 
 export function fileName(filePath: string): string {
