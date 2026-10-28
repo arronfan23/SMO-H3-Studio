@@ -131,6 +131,19 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
   });
 
+  test('keeps the unsubmitted text draft when switching modules', async () => {
+    await renderStudio();
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: '切换模块后保留这段草稿' },
+    });
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      expect(screen.getByLabelText('原始文字')).toHaveValue('切换模块后保留这段草稿');
+    }
+  });
+
   test('offers a real creation entry when no avatar exists', async () => {
     smo.avatars.list.mockResolvedValue([]);
     render(<App />);

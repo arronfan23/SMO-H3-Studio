@@ -430,6 +430,19 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page!.locator('.avatar-list article')).toHaveCount(1);
   });
 
+  test('keeps studio draft across navigation', async () => {
+    const draft = 'Keep this draft across every module.';
+    await createAvatar(page!, 'E2E Draft Avatar');
+    await openStudio(page!, 'E2E Draft Avatar');
+    await page!.fill('#original-text', draft);
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      await page!.click(`nav[aria-label="主导航"] button:has-text("${moduleName}")`);
+      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await expect(page!.locator('#original-text')).toHaveValue(draft);
+    }
+  });
+
   test('configures LLM profile and tests the model', async () => {
     await saveLlmProfile(page!, llmMock.baseUrl);
     await page!.click('button:has-text("获取模型")');

@@ -96,7 +96,7 @@ export function App() {
         </nav>
       </aside>
       <main className="main-content">
-        {page === 'studio' && (
+        <div hidden={page !== 'studio'}>
           <StudioPage
             avatar={selectedAvatar}
             loading={avatarsLoading}
@@ -104,7 +104,7 @@ export function App() {
             modelDirectory={modelDirectory}
             onCreateAvatar={() => setPage('avatars')}
           />
-        )}
+        </div>
         {page === 'avatars' && (
           <AvatarsPage
             avatars={avatars}
