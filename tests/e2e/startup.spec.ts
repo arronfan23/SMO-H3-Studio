@@ -49,7 +49,7 @@ test('Electron app starts with isolated env and exposes window.smo domains', asy
       llm: ['saveProfile', 'getProfile', 'listModels', 'testModel', 'polish'],
       comfy: ['health', 'open', 'start'],
       hardware: ['detect', 'recommend', 'reset', 'apply'],
-      works: ['list'],
+      works: ['delete', 'list'],
       files: ['selectImage', 'selectAudio', 'mediaUrl', 'openFolder'],
     };
 

@@ -66,7 +66,7 @@ afterEach(() => {
 
 function exposeWorks(list: ReturnType<typeof vi.fn>): void {
   window.smo = {
-    works: { list },
+    works: { list, delete: vi.fn() },
     jobs: { cancel: vi.fn() },
     files: { mediaUrl: vi.fn() },
   } as unknown as SmoApi;

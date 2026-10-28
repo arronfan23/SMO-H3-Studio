@@ -155,6 +155,9 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
   const services: IpcServices = {
     startGeneration: async () => ({ id: 'injected-job' }),
     retryWork: async () => ({ id: 'injected-retry' }),
+    deleteWork: async () => {
+      throw new Error('Unexpected deleteWork call');
+    },
     jobCoordinator,
     llm: {
       listModels: async () => {
@@ -340,6 +343,9 @@ describe('IPC input schema', () => {
     expect(
       schema.parse({ channel: 'avatars:delete', payload: { id: 'avatar-1' } }),
     ).toEqual({ channel: 'avatars:delete', payload: { id: 'avatar-1' } });
+    expect(
+      schema.parse({ channel: 'works:delete', payload: { id: 'work-1' } }),
+    ).toEqual({ channel: 'works:delete', payload: { id: 'work-1' } });
 
     const hardware = schema.parse({
       channel: 'hardware:apply',
@@ -425,6 +431,8 @@ describe('IPC input schema', () => {
     { channel: 'avatars:update', payload: { id: 'avatar-1', name: 'Renamed', photoPath: 'x' } },
     { channel: 'avatars:delete', payload: { id: '' } },
     { channel: 'avatars:delete', payload: { id: 'avatar-1', force: true } },
+    { channel: 'works:delete', payload: { id: '' } },
+    { channel: 'works:delete', payload: { id: 'work-1', force: true } },
   ])('rejects invalid avatar mutation input: %j', (request) => {
     expect(() => createIpcSchema().parse(request)).toThrow();
   });
@@ -771,6 +779,20 @@ describe('main-process IPC handlers', () => {
 
     await expect(harness.invoke('avatars:list')).resolves.toEqual([]);
     await expect(readFile(avatar.photoPath)).rejects.toThrow();
+  });
+
+  test('deletes works through the deleteWork service', async () => {
+    const deleted: string[] = [];
+    const harness = await createHarness({
+      deleteWork: async (id) => {
+        deleted.push(id);
+      },
+    });
+
+    await expect(
+      harness.invoke('works:delete', { id: 'work-1' }),
+    ).resolves.toBeUndefined();
+    expect(deleted).toEqual(['work-1']);
   });
 
   test('uses saved main-process credentials for all LLM services', async () => {
@@ -1154,7 +1176,7 @@ describe('preload API', () => {
     ]);
     expect(Object.keys(api.comfy)).toEqual(['health', 'start', 'open']);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
-    expect(Object.keys(api.works)).toEqual(['list']);
+    expect(Object.keys(api.works)).toEqual(['delete', 'list']);
     expect(Object.keys(api.files).sort()).toEqual([
       'mediaUrl',
       'openFolder',
@@ -1321,6 +1343,11 @@ describe('preload API', () => {
       channel: 'works:list',
       payload: {},
       call: (smo: SmoApi) => smo.works.list(),
+    },
+    {
+      channel: 'works:delete',
+      payload: { id: 'work-1' },
+      call: (smo: SmoApi) => smo.works.delete('work-1'),
     },
   ])('maps $channel without exposing a generic invoke method', async ({ channel, payload, call }) => {
     await call(api);

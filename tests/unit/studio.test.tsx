@@ -52,7 +52,7 @@ function createSmoMock() {
     },
     comfy: { health: vi.fn(), open: vi.fn(), start: vi.fn() },
     hardware: { detect: vi.fn(), recommend: vi.fn(), apply: vi.fn() },
-    works: { list: vi.fn() },
+    works: { list: vi.fn(), delete: vi.fn() },
   };
 }
 

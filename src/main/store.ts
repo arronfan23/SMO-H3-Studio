@@ -243,6 +243,23 @@ export class Store {
     return this.getWork(id)!;
   }
 
+  deleteWork(id: string): Work {
+    const work = this.getWork(id);
+    if (work === null) {
+      throw new Error(`Work not found: ${id}`);
+    }
+    if (work.status !== 'done' && work.status !== 'failed') {
+      throw new Error('Only completed or failed works can be deleted');
+    }
+    const result = this.db
+      .prepare("DELETE FROM works WHERE id = ? AND status IN ('done', 'failed')")
+      .run(id);
+    if (result.changes !== 1) {
+      throw new Error('Only completed or failed works can be deleted');
+    }
+    return work;
+  }
+
   close(): void {
     this.db.close();
   }

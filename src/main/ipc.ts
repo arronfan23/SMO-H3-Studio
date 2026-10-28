@@ -35,6 +35,7 @@ export type { GenerationHandler };
 export interface IpcServices {
   startGeneration: GenerationHandler;
   retryWork: (id: string) => Promise<GenerationStartResult>;
+  deleteWork: (id: string) => Promise<void>;
   jobCoordinator: Pick<JobCoordinator, 'cancel' | 'cancelActive'>;
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
@@ -118,6 +119,9 @@ async function dispatch(
       return undefined;
     case 'works:list':
       return services.store.listWorks();
+    case 'works:delete':
+      await services.deleteWork(request.payload.id);
+      return undefined;
     case 'comfy:health':
       return services.comfy.health();
     case 'comfy:start':

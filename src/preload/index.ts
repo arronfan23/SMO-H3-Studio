@@ -38,6 +38,7 @@ const api: SmoApi = {
     apply: (request) => ipcRenderer.invoke('hardware:apply', request),
   },
   works: {
+    delete: (id) => ipcRenderer.invoke('works:delete', { id }),
     list: () => ipcRenderer.invoke('works:list', {}),
   },
 };

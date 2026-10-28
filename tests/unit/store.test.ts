@@ -479,3 +479,43 @@ describe('file persistence', () => {
     }, databasePath);
   });
 });
+
+describe('work deletion', () => {
+  test('deletes done and failed works but keeps pending and running ones', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const done = store.addWork(makeWork(avatar.id, 'done-work'));
+      const failed = store.addWork({
+        ...makeWork(avatar.id, 'failed-work'),
+        status: 'failed',
+        outputPath: null,
+      });
+      const pending = store.addWork({
+        ...makeWork(avatar.id, 'pending-work'),
+        status: 'pending',
+        outputPath: null,
+      });
+      const running = store.addWork({
+        ...makeWork(avatar.id, 'running-work'),
+        status: 'running',
+        outputPath: null,
+      });
+
+      expect(store.deleteWork(done.id)).toEqual(done);
+      expect(store.getWork(done.id)).toBeNull();
+      expect(store.deleteWork(failed.id)).toEqual(failed);
+      expect(store.getWork(failed.id)).toBeNull();
+
+      expect(() => store.deleteWork(pending.id)).toThrow(/completed or failed/i);
+      expect(() => store.deleteWork(running.id)).toThrow(/completed or failed/i);
+      expect(store.getWork(pending.id)).not.toBeNull();
+      expect(store.getWork(running.id)).not.toBeNull();
+    });
+  });
+
+  test('rejects deleting an unknown work', () => {
+    withStore((store) => {
+      expect(() => store.deleteWork('missing')).toThrow(/not found/i);
+    });
+  });
+});

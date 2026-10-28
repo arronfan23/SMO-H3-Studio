@@ -17,6 +17,7 @@ import { LlmService } from './llm';
 import { FileLlmConfigStore } from './llm-config';
 import { SkillsService } from './skills';
 import { Store } from './store';
+import { WorkService } from './works';
 import {
   MediaRegistry,
   registerMediaProtocol,
@@ -189,6 +190,7 @@ export async function createAppServices(
       mediaRegistry,
       startGeneration,
     });
+    const workService = new WorkService({ outputDirectory, store });
     const openComfy = async (): Promise<void> => {
       await shell.openExternal(comfyBaseUrl);
     };
@@ -197,6 +199,7 @@ export async function createAppServices(
     return {
       startGeneration,
       retryWork,
+      deleteWork: (id) => workService.deleteWork(id),
       jobCoordinator,
       llm,
       skills: new SkillsService(llm),
