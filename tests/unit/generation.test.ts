@@ -22,6 +22,7 @@ import type {
   GenerationRequest,
   Work,
   WorkExecutionState,
+  WorkProgress,
   WorkStatus,
 } from '../../src/shared/types';
 
@@ -422,11 +423,21 @@ describe('GenerationHandler progress resilience and throttling', () => {
     const result = await harness.startGeneration(harness.textRequest);
     await waitForWork(harness.store, result.id, 'done');
 
-    const progressWrites = updateWorkSpy.mock.calls.filter(
-      ([, update]) =>
-        (update as { metadata?: { progress?: unknown } }).metadata?.progress !== undefined,
+    // Stage updates may legitimately re-include the same progress value, so the
+    // throttle budget is measured in writes that carry a new frame value.
+    const progressValues = updateWorkSpy.mock.calls
+      .map(
+        ([, update]) =>
+          (update as { metadata?: { progress?: WorkProgress } }).metadata?.progress,
+      )
+      .filter((progress): progress is WorkProgress => progress !== undefined);
+    const newFrameWrites = progressValues.filter(
+      (progress, index) =>
+        index === 0 ||
+        progress.value !== progressValues[index - 1].value ||
+        progress.max !== progressValues[index - 1].max,
     );
-    expect(progressWrites.length).toBeLessThanOrEqual(2);
+    expect(newFrameWrites.length).toBeLessThanOrEqual(2);
     expect(harness.store.getWork(result.id)?.metadata).toMatchObject({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
@@ -532,6 +543,38 @@ describe('GenerationHandler execution state metadata', () => {
         retryOf: 'previous-work',
       });
     }
+  });
+
+  test('keeps the written frame progress across pure stage updates', async () => {
+    const harness = await createHarness();
+    harness.comfy.completionGate = deferred();
+    harness.comfy.waitScript = [
+      { kind: 'progress', progress: { value: 5, max: 24 } },
+      { kind: 'update', update: { stage: 'executing', queuePosition: 0 } },
+    ];
+
+    const result = await harness.startGeneration({
+      ...harness.textRequest,
+      retryOf: 'previous-work',
+    });
+    await vi.waitFor(() => expect(harness.comfy.waits).toEqual(['prompt-1']));
+
+    // The pure stage update must not drop the already persisted frame progress:
+    // Store.updateWork replaces metadata wholesale.
+    const midRun = harness.store.getWork(result.id);
+    expect(midRun?.metadata?.execution).toMatchObject({
+      stage: 'executing',
+      queuePosition: 0,
+    });
+    expect(midRun?.metadata).toMatchObject({
+      request: harness.textRequest,
+      workflowVersion: 'text-ref2va.json',
+      retryOf: 'previous-work',
+      progress: { value: 5, max: 24 },
+    });
+
+    harness.comfy.completionGate.resolve();
+    await waitForWork(harness.store, result.id, 'done');
   });
 
   test('cancels the submitted prompt by id instead of interrupting blindly', async () => {

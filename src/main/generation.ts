@@ -359,7 +359,9 @@ export function createGenerationHandler(
           metadata: {
             ...baseMetadata,
             execution: currentExecution,
-            ...(progressChanged ? { progress: latestProgress! } : {}),
+            // Store.updateWork replaces metadata wholesale, so a stage-only
+            // update must still carry the last written frame progress.
+            ...(latestProgress !== null ? { progress: latestProgress } : {}),
           },
         });
         if (progressChanged) {
