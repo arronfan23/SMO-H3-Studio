@@ -301,11 +301,12 @@ describe('production application services', () => {
         modelDirectory,
       });
       appliedPath = applied.path;
+      const appliedFilename = appliedPath.split(/[\\/]/).pop();
       expect(
         JSON.parse(
           await readFile(join(dataDirectory, "workflow-profiles", "active-workflows.json"), "utf8"),
         ),
-      ).toEqual({ text: "conservative-text.json" });
+      ).toEqual({ text: appliedFilename });
     } finally {
       await first.close();
     }

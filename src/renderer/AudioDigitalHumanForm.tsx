@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { FileAudio, Video } from 'lucide-react';
 import {
   DEFAULT_GENERATION_OPTIONS,
-  DEFAULT_MODEL_DIRECTORY,
   buildHardwareProfile,
   type GenerationOptionsValue,
 } from '../shared/generation-options';
@@ -13,9 +12,11 @@ import { errorMessage, fileName } from './ui';
 
 export function AudioDigitalHumanForm({
   avatarId,
+  modelDirectory,
   active = true,
 }: {
   avatarId: string;
+  modelDirectory: string;
   active?: boolean;
 }) {
   const [audioPath, setAudioPath] = useState<string | null>(null);
@@ -86,7 +87,7 @@ export function AudioDigitalHumanForm({
         mode: 'audio',
         profile: buildHardwareProfile(options),
         confirmed: true,
-        modelDirectory: DEFAULT_MODEL_DIRECTORY,
+        modelDirectory,
       });
       const result = await window.smo.jobs.start({
         mode: 'audio',

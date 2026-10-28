@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { HardwarePreset, HardwareProfile, VideoMode } from "../shared/types";
@@ -58,8 +58,23 @@ function validateModelDirectory(modelDirectory: unknown): asserts modelDirectory
 
 function isAllowedProfileFilename(mode: VideoMode, value: string): boolean {
   return VALID_PRESETS.some(
-    (preset) => value === preset + "-" + mode + ".json",
+    (preset) =>
+      value === preset + "-" + mode + ".json" ||
+      new RegExp("^" + preset + "-" + mode + "-[0-9a-f]{16}\\.json$").test(value),
   );
+}
+
+// Hash-named copies keep every applied profile immutable: retries pinned to an
+// older workflowVersion keep reading the exact copy they started with.
+export function profileWorkflowFilename(
+  mode: VideoMode,
+  profile: HardwareProfile,
+): string {
+  const hash = createHash("sha256")
+    .update(JSON.stringify(profile))
+    .digest("hex")
+    .slice(0, 16);
+  return profile.preset + "-" + mode + "-" + hash + ".json";
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -113,10 +128,7 @@ export class HardwareWorkflowStore {
         await readFile(this.frozenWorkflowPath(mode), "utf8"),
       ) as WorkflowGraph;
       const copy = applyHardwareProfile(graph, profile, true, modelDirectory);
-      const path = join(
-        this.profilesDirectory,
-        profile.preset + "-" + mode + ".json",
-      );
+      const path = join(this.profilesDirectory, profileWorkflowFilename(mode, profile));
       const previousTarget = await this.readTargetBackup(path);
       await writeJsonAtomic(path, copy);
 

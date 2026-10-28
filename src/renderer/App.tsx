@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Clapperboard, FolderOpen, Settings, Users } from 'lucide-react';
+import { DEFAULT_MODEL_DIRECTORY } from '../shared/generation-options';
 import type { Avatar } from '../shared/types';
 import { AvatarsPage } from './AvatarsPage';
 import { SettingsPage } from './SettingsPage';
@@ -22,6 +23,7 @@ export function App() {
   const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
   const [avatarsLoading, setAvatarsLoading] = useState(true);
   const [avatarsError, setAvatarsError] = useState<string | null>(null);
+  const [modelDirectory, setModelDirectory] = useState(DEFAULT_MODEL_DIRECTORY);
   const mountedRef = useRef(true);
 
   const refreshAvatars = useCallback(async (preferredId?: string): Promise<void> => {
@@ -99,6 +101,7 @@ export function App() {
             avatar={selectedAvatar}
             loading={avatarsLoading}
             error={avatarsError}
+            modelDirectory={modelDirectory}
             onCreateAvatar={() => setPage('avatars')}
           />
         )}
@@ -113,7 +116,12 @@ export function App() {
           />
         )}
         {page === 'works' && <WorksPage avatars={avatars} />}
-        {page === 'settings' && <SettingsPage />}
+        {page === 'settings' && (
+          <SettingsPage
+            modelDirectory={modelDirectory}
+            onModelDirectoryChange={setModelDirectory}
+          />
+        )}
       </main>
     </div>
   );

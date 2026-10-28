@@ -3,7 +3,6 @@ import { Sparkles, Video } from 'lucide-react';
 import { SKILL_NAMES, type SkillName } from '../shared/skills';
 import {
   DEFAULT_GENERATION_OPTIONS,
-  DEFAULT_MODEL_DIRECTORY,
   buildHardwareProfile,
   type GenerationOptionsValue,
 } from '../shared/generation-options';
@@ -15,9 +14,11 @@ type PromptTab = 'original' | 'polished';
 
 export function TextToVideoForm({
   avatarId,
+  modelDirectory,
   active = true,
 }: {
   avatarId: string;
+  modelDirectory: string;
   active?: boolean;
 }) {
   const [originalText, setOriginalText] = useState('');
@@ -88,7 +89,7 @@ export function TextToVideoForm({
         mode: 'text',
         profile: buildHardwareProfile(options),
         confirmed: true,
-        modelDirectory: DEFAULT_MODEL_DIRECTORY,
+        modelDirectory,
       });
       const result = await window.smo.jobs.start({
         mode: 'text',

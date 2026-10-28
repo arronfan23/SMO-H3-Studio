@@ -506,6 +506,9 @@ function isRetryableRequest(value: unknown): value is GenerationRequest {
   if (request.mode === 'audio' && request.audioPath === undefined) {
     return false;
   }
+  if (request.subtitles !== undefined && typeof request.subtitles !== 'boolean') {
+    return false;
+  }
   return true;
 }
 

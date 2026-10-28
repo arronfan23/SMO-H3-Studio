@@ -7,7 +7,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { applyHardwareProfile } from '../../src/main/hardware';
-import { HardwareWorkflowStore } from '../../src/main/hardware-workflows';
+import {
+  HardwareWorkflowStore,
+  profileWorkflowFilename,
+} from '../../src/main/hardware-workflows';
 import type { HardwareProfile, VideoMode } from '../../src/shared/types';
 
 const INT8_UNET = 'minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors';
@@ -161,7 +164,7 @@ describe('hardware workflow copies', () => {
 
       const expectedPath = join(
         harness.profilesDirectory,
-        `${profile.preset}-${mode}.json`,
+        profileWorkflowFilename(mode, profile),
       );
       expect(result).toEqual({ path: expectedPath, profile });
       expect(result.path).not.toBe(sourcePath);
@@ -170,7 +173,7 @@ describe('hardware workflow copies', () => {
         JSON.parse(
           await readFile(join(harness.profilesDirectory, "active-workflows.json"), "utf8"),
         ),
-      ).toEqual({ [mode]: profile.preset + "-" + mode + ".json" });
+      ).toEqual({ [mode]: profileWorkflowFilename(mode, profile) });
       const expectedCopy = applyHardwareProfile(
         JSON.parse(frozenSource),
         profile,
@@ -245,10 +248,11 @@ describe('hardware workflow copies', () => {
 
   test('reapplying the same preset overwrites the previous copy idempotently', async () => {
     const harness = await makeHarness();
+    const profile = makeProfile({ preset: 'conservative' });
     const first = await harness.store.apply(
       {
         mode: 'text',
-        profile: makeProfile({ preset: 'conservative' }),
+        profile,
         confirmed: true,
         modelDirectory: harness.modelDirectory,
       },
@@ -257,7 +261,7 @@ describe('hardware workflow copies', () => {
     const second = await harness.store.apply(
       {
         mode: 'text',
-        profile: makeProfile({ preset: 'conservative', megapixels: 0.4 }),
+        profile: { ...profile },
         confirmed: true,
         modelDirectory: harness.modelDirectory,
       },
@@ -267,7 +271,7 @@ describe('hardware workflow copies', () => {
     expect(harness.store.getActiveWorkflow('text')).toBe(second.path);
     expect(await readdir(harness.profilesDirectory)).toEqual([
       'active-workflows.json',
-      'conservative-text.json',
+      profileWorkflowFilename('text', profile),
     ]);
     const copy = JSON.parse(await readFile(second.path, 'utf8'));
     expect(copy).toEqual(
@@ -275,7 +279,7 @@ describe('hardware workflow copies', () => {
         JSON.parse(
           await readFile(join(workflowsDirectory, WORKFLOW_FILENAMES.text), 'utf8'),
         ),
-        makeProfile({ preset: 'conservative', megapixels: 0.4 }),
+        profile,
         true,
         harness.modelDirectory,
       ),
@@ -311,7 +315,7 @@ describe('hardware workflow copies', () => {
       JSON.parse(
         await readFile(join(harness.profilesDirectory, "active-workflows.json"), "utf8"),
       ),
-    ).toEqual({ text: "balanced-16gb-text.json" });
+    ).toEqual({ text: profileWorkflowFilename("text", secondProfile) });
     expect(JSON.parse(await readFile(second.path, "utf8"))["115"].inputs.megapixels).toBe(0.7);
   });
 
@@ -338,12 +342,15 @@ describe('hardware workflow copies', () => {
     );
 
     expect(result.path).toBe(
-      join(customProfilesDirectory, 'high-memory-candidate-text.json'),
+      join(
+        customProfilesDirectory,
+        profileWorkflowFilename('text', makeProfile({ preset: 'high-memory-candidate' })),
+      ),
     );
     expect(harness.store.getActiveWorkflow('text')).toBe(result.path);
     expect(await readdir(customProfilesDirectory)).toEqual([
       'active-workflows.json',
-      'high-memory-candidate-text.json',
+      profileWorkflowFilename('text', makeProfile({ preset: 'high-memory-candidate' })),
     ]);
   });
 
@@ -388,4 +395,73 @@ describe('hardware workflow copies', () => {
       expect(resolutionNode.inputs.megapixels).toBe(0.7);
     },
   );
+
+  test('keeps an earlier profile copy immutable when a later apply uses a different profile', async () => {
+    const harness = await makeHarness();
+    const profileA = makeProfile({ megapixels: 0.4, tiling: 4 });
+    const profileB = makeProfile({ megapixels: 1 });
+
+    const appliedA = await harness.store.apply({
+      mode: 'text',
+      profile: profileA,
+      confirmed: true,
+      modelDirectory: harness.modelDirectory,
+    });
+    const contentsA = await readFile(appliedA.path, 'utf8');
+    const appliedB = await harness.store.apply({
+      mode: 'text',
+      profile: profileB,
+      confirmed: true,
+      modelDirectory: harness.modelDirectory,
+    });
+
+    expect(appliedB.path).not.toBe(appliedA.path);
+    expect(harness.store.getActiveWorkflow('text')).toBe(appliedB.path);
+    expect(await readFile(appliedA.path, 'utf8')).toBe(contentsA);
+
+    // A retry that pins workflowVersion to the first copy still reads the original params.
+    const retryCopy = JSON.parse(contentsA);
+    expect(retryCopy['115'].inputs.megapixels).toBe(0.4);
+    expect(retryCopy['269'].inputs.tiling_mode).toBe('manual');
+    const latestCopy = JSON.parse(await readFile(appliedB.path, 'utf8'));
+    expect(latestCopy['115'].inputs.megapixels).toBe(1);
+    expect(latestCopy['269'].inputs.tiling_mode).toBe('auto');
+  });
+
+  test('reapplying an identical profile keeps a stable target path', async () => {
+    const harness = await makeHarness();
+    const profile = makeProfile({ aspectRatio: '9:16 (Portrait Widescreen)' });
+
+    const first = await harness.store.apply({
+      mode: 'text',
+      profile,
+      confirmed: true,
+      modelDirectory: harness.modelDirectory,
+    });
+    const second = await harness.store.apply({
+      mode: 'text',
+      profile: { ...profile },
+      confirmed: true,
+      modelDirectory: harness.modelDirectory,
+    });
+
+    expect(second.path).toBe(first.path);
+    expect(second.path).toBe(
+      join(harness.profilesDirectory, profileWorkflowFilename('text', profile)),
+    );
+  });
+
+  test('still honors a legacy preset-mode active configuration after migration', async () => {
+    const harness = await makeHarness();
+    const legacyPath = join(harness.profilesDirectory, 'balanced-16gb-text.json');
+    await writeFile(legacyPath, '{}');
+    await writeFile(
+      join(harness.profilesDirectory, 'active-workflows.json'),
+      JSON.stringify({ text: 'balanced-16gb-text.json' }),
+    );
+
+    await harness.store.load();
+
+    expect(harness.store.getActiveWorkflow('text')).toBe(legacyPath);
+  });
 });

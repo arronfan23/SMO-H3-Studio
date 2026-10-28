@@ -1240,6 +1240,7 @@ describe('GenerationHandler retry', () => {
     { scenario: 'invalid seed', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1.5 } },
     { scenario: 'invalid audioPath type', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 123 } },
     { scenario: 'invalid trimStart', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', trimStart: -1 } },
+    { scenario: 'invalid subtitles type', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, subtitles: 'yes' } },
   ])('rejects a work with $scenario in metadata', async ({ request }) => {
     const harness = await createHarness();
     const work = harness.store.addWork({

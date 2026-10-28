@@ -9,11 +9,13 @@ export function StudioPage({
   avatar,
   loading,
   error,
+  modelDirectory,
   onCreateAvatar,
 }: {
   avatar: Avatar | null;
   loading: boolean;
   error: string | null;
+  modelDirectory: string;
   onCreateAvatar: () => void;
 }) {
   const [mode, setMode] = useState<'text' | 'audio'>('text');
@@ -73,7 +75,11 @@ export function StudioPage({
               aria-labelledby="text-mode-tab"
               hidden={mode !== 'text'}
             >
-              <TextToVideoForm avatarId={avatar.id} active={mode === 'text'} />
+              <TextToVideoForm
+                avatarId={avatar.id}
+                modelDirectory={modelDirectory}
+                active={mode === 'text'}
+              />
             </div>
             <div
               id="audio-mode-panel"
@@ -81,7 +87,11 @@ export function StudioPage({
               aria-labelledby="audio-mode-tab"
               hidden={mode !== 'audio'}
             >
-              <AudioDigitalHumanForm avatarId={avatar.id} active={mode === 'audio'} />
+              <AudioDigitalHumanForm
+                avatarId={avatar.id}
+                modelDirectory={modelDirectory}
+                active={mode === 'audio'}
+              />
             </div>
           </section>
         </div>

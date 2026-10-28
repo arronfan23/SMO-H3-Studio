@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Cpu, ExternalLink, Play, RefreshCw, RotateCcw, Save, Search, TestTube } from 'lucide-react';
 import type { ComfyHealth } from '../shared/ipc';
+import { DEFAULT_MODEL_DIRECTORY } from '../shared/generation-options';
 import type { HardwareInfo, HardwareProfile, LlmProfileView, VideoMode } from '../shared/types';
 import { errorMessage } from './ui';
 
@@ -11,13 +12,20 @@ type LlmStatus =
   | { kind: 'test'; latencyMs: number; summary: string }
   | { kind: 'error'; message: string };
 
-const DEFAULT_MODEL_DIRECTORY = "G:\\H3Selflift整合包\\模型部分\\diffusion_models";
-
 function formatGiB(value: number): string {
   return value.toFixed(1) + " GiB";
 }
 
-export function SettingsPage() {
+export function SettingsPage({
+  modelDirectory: controlledDirectory,
+  onModelDirectoryChange,
+}: {
+  modelDirectory?: string;
+  onModelDirectoryChange?: (directory: string) => void;
+} = {}) {
+  const [localDirectory, setLocalDirectory] = useState(DEFAULT_MODEL_DIRECTORY);
+  const modelDirectory = controlledDirectory ?? localDirectory;
+  const setModelDirectory = onModelDirectoryChange ?? setLocalDirectory;
   const [loading, setLoading] = useState(true);
   const [health, setHealth] = useState<ComfyHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
@@ -33,7 +41,6 @@ export function SettingsPage() {
   const [hardwareInfo, setHardwareInfo] = useState<HardwareInfo | null>(null);
   const [recommendation, setRecommendation] = useState<HardwareProfile | null>(null);
   const [hardwareMode, setHardwareMode] = useState<VideoMode>("text");
-  const [modelDirectory, setModelDirectory] = useState(DEFAULT_MODEL_DIRECTORY);
   const [hardwareAction, setHardwareAction] = useState<
     "detect" | "recommend" | "apply" | "reset" | null
   >(null);

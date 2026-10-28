@@ -46,7 +46,7 @@ function createSmoMock() {
       polish: vi.fn(),
     },
     comfy: { health: vi.fn(), open: vi.fn(), start: vi.fn() },
-    hardware: { detect: vi.fn(), apply: vi.fn() },
+    hardware: { detect: vi.fn(), recommend: vi.fn(), apply: vi.fn() },
     works: { list: vi.fn() },
   };
 }
@@ -79,6 +79,23 @@ beforeEach(() => {
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
   smo.comfy.start.mockResolvedValue({ system: {}, devices: [] });
+  smo.hardware.detect.mockResolvedValue({
+    gpu: 'NVIDIA GeForce RTX 5080',
+    vramGiB: 16,
+    ramGiB: 64,
+    windowsVersion: 'Microsoft Windows 11 Pro 10.0.22631',
+    driverVersion: '576.88',
+    cudaComputeCapability: '12.0',
+    freeDiskGiB: 512,
+  });
+  smo.hardware.recommend.mockResolvedValue({
+    preset: 'balanced-16gb',
+    modelPolicy: 'int8',
+    megapixels: 0.7,
+    lowvram: true,
+    tiling: 'auto',
+    requiresConfirmation: true,
+  });
   smo.hardware.apply.mockResolvedValue({
     path: 'G:\\SMO-H3-Data\\workflow-profiles\\balanced-16gb-text.json',
     profile: {},
@@ -623,6 +640,28 @@ describe('generation options and hardware apply', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('模型目录不存在');
     expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test('shares the settings model directory with studio generation', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(await screen.findByRole('button', { name: '检测硬件' }));
+    expect(await screen.findByText('NVIDIA GeForce RTX 5080')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: '获取推荐' }));
+    const directoryInput = await screen.findByLabelText('模型目录');
+    fireEvent.change(directoryInput, { target: { value: 'D:\\自定义模型目录' } });
+
+    fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+    const panel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '共享目录后的生成' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalled());
+    expect(smo.hardware.apply).toHaveBeenCalledWith(
+      expect.objectContaining({ modelDirectory: 'D:\\自定义模型目录' }),
+    );
   });
 });
 

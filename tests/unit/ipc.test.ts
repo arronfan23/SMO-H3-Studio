@@ -9,7 +9,10 @@ import { ComfyClient } from '../../src/main/comfy';
 import { AvatarService } from '../../src/main/avatars';
 import { FileService } from '../../src/main/files';
 import { recommendHardware } from "../../src/main/hardware";
-import { HardwareWorkflowStore } from '../../src/main/hardware-workflows';
+import {
+  HardwareWorkflowStore,
+  profileWorkflowFilename,
+} from '../../src/main/hardware-workflows';
 import {
   registerIpc,
   type IpcHandler,
@@ -28,6 +31,7 @@ import {
   type IpcChannel,
   type SmoApi,
 } from '../../src/shared/ipc';
+import { ASPECT_RATIO_OPTIONS } from '../../src/shared/generation-options';
 import type { Avatar, HardwareInfo, Work } from '../../src/shared/types';
 import {
   startLlmUpstream,
@@ -360,6 +364,40 @@ describe('IPC input schema', () => {
 
     expect(createIpcSchema().parse(recommendation)).toEqual(recommendation);
     expect(createIpcSchema().parse(reset)).toEqual(reset);
+  });
+
+  test("accepts only the eight H3 aspect ratios on hardware profiles", () => {
+    const schema = createIpcSchema();
+    const base = {
+      channel: "hardware:apply",
+      payload: { mode: "text", confirmed: true, modelDirectory: "G:\\models" },
+    };
+
+    for (const option of ASPECT_RATIO_OPTIONS) {
+      expect(
+        schema.parse({
+          ...base,
+          payload: {
+            ...base.payload,
+            profile: { ...hardwareProfile, aspectRatio: option.value },
+          },
+        }),
+      ).toMatchObject({
+        payload: { profile: { aspectRatio: option.value } },
+      });
+    }
+
+    for (const aspectRatio of ["foo;bar", "16:9", ""]) {
+      expect(() =>
+        schema.parse({
+          ...base,
+          payload: {
+            ...base.payload,
+            profile: { ...hardwareProfile, aspectRatio },
+          },
+        }),
+      ).toThrow();
+    }
   });
 
   test("hardware apply rejects a renderer-supplied graph", () => {
@@ -1009,7 +1047,10 @@ describe('main-process IPC handlers', () => {
       modelDirectory,
     })) as { path: string; profile: typeof hardwareProfile };
 
-    const expectedPath = join(profilesDirectory, 'balanced-16gb-text.json');
+    const expectedPath = join(
+      profilesDirectory,
+      profileWorkflowFilename('text', hardwareProfile),
+    );
     expect(result).toEqual({ path: expectedPath, profile: hardwareProfile });
     const patched = JSON.parse(await readFile(result.path, 'utf8'));
     expect(patched['127'].inputs.unet_name).toBe(unetName);

@@ -227,19 +227,13 @@ async function assertViewLayout(
   viewName: string,
   selectors: string[],
 ): Promise<void> {
-  for (const selector of selectors) {
-    await page.locator(selector).scrollIntoViewIfNeeded();
-  }
-  const violations = await page.evaluate(
-    ({ view, selectors }) => {
+  type Rect = { left: number; top: number; right: number; bottom: number; width: number; height: number };
+  type Violation = { view: string; type: string; selector?: string; message: string; rect?: Rect };
+
+  const documentViolations = await page.evaluate(
+    ({ view }) => {
       const viewport = { width: window.innerWidth, height: window.innerHeight };
-      const results: Array<{
-        view: string;
-        type: string;
-        selector?: string;
-        message: string;
-        rect?: { left: number; top: number; right: number; bottom: number; width: number; height: number };
-      }> = [];
+      const results: Violation[] = [];
       if (document.documentElement.scrollWidth > viewport.width) {
         results.push({
           view,
@@ -247,11 +241,28 @@ async function assertViewLayout(
           message: `scrollWidth ${document.documentElement.scrollWidth} > innerWidth ${viewport.width}`,
         });
       }
-      for (const selector of selectors) {
+      return results;
+    },
+    { view: viewName },
+  );
+  expect(documentViolations).toEqual([]);
+
+  for (const selector of selectors) {
+    await page.locator(selector).scrollIntoViewIfNeeded();
+    const violations = await page.evaluate(
+      ({ view, selector }) => {
+        const viewport = { width: window.innerWidth, height: window.innerHeight };
+        const results: Array<{
+          view: string;
+          type: string;
+          selector?: string;
+          message: string;
+          rect?: { left: number; top: number; right: number; bottom: number; width: number; height: number };
+        }> = [];
         const element = document.querySelector(selector);
         if (!element) {
           results.push({ view, type: 'missing', selector, message: 'element not found' });
-          continue;
+          return results;
         }
         const rect = element.getBoundingClientRect();
         if (rect.left < 0 || rect.right > viewport.width || rect.top < 0 || rect.bottom > viewport.height) {
@@ -270,12 +281,12 @@ async function assertViewLayout(
             },
           });
         }
-      }
-      return results;
-    },
-    { view: viewName, selectors },
-  );
-  expect(violations).toEqual([]);
+        return results;
+      },
+      { view: viewName, selector },
+    );
+    expect(violations).toEqual([]);
+  }
 }
 
 async function createAvatar(page: Page, name: string): Promise<void> {

@@ -10,6 +10,7 @@ import type {
   HardwareWorkflowResult,
 } from "../../src/main/hardware-workflows";
 import * as hardwareWorkflows from "../../src/main/hardware-workflows";
+import { profileWorkflowFilename } from "../../src/main/hardware-workflows";
 import type { HardwareProfile, VideoMode } from "../../src/shared/types";
 
 const INT8_UNET = "minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors";
@@ -109,7 +110,7 @@ describe("HardwareWorkflowStore", () => {
     const migrated = await makeHarness();
     const firstStore = createStore({ profilesDirectory: first.profilesDirectory });
     const applied = await firstStore.apply(applyInput(first));
-    const filename = "balanced-16gb-text.json";
+    const filename = applied.path.split(/[\\/]/).pop() ?? "";
 
     expect(
       JSON.parse(
@@ -173,7 +174,10 @@ describe("HardwareWorkflowStore", () => {
     const harness = await makeHarness();
     const store = createStore({ profilesDirectory: harness.profilesDirectory });
     const previous = await store.apply(applyInput(harness));
-    const newTarget = join(harness.profilesDirectory, "conservative-text.json");
+    const newTarget = join(
+      harness.profilesDirectory,
+      profileWorkflowFilename("text", makeProfile({ preset: "conservative" })),
+    );
     await sabotageActivePersistence(harness.profilesDirectory);
 
     await expect(

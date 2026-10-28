@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ASPECT_RATIO_OPTIONS, type AspectRatio } from './generation-options';
 import { H3_MODES, type H3Mode } from './prompt-contract';
 import { SKILL_NAMES, type SkillName } from './skills';
 import type {
@@ -47,6 +48,10 @@ export const IPC_CHANNELS = [
 const nonEmptyString = z
   .string()
   .refine((value) => value.trim().length > 0, 'Value must not be empty');
+const ASPECT_RATIO_VALUES = ASPECT_RATIO_OPTIONS.map((option) => option.value) as [
+  AspectRatio,
+  ...AspectRatio[],
+];
 const positiveFiniteNumber = z.number().finite().positive();
 const nonNegativeFiniteNumber = z.number().finite().nonnegative();
 const emptyPayload = z.object({}).strict();
@@ -133,7 +138,7 @@ const hardwareProfileSchema = z
     preset: z.enum(['conservative', 'balanced-16gb', 'high-memory-candidate']),
     modelPolicy: z.enum(['int8', 'bf16-if-present']),
     megapixels: positiveFiniteNumber,
-    aspectRatio: nonEmptyString.optional(),
+    aspectRatio: z.enum(ASPECT_RATIO_VALUES).optional(),
     lowvram: z.boolean(),
     tiling: z.union([z.literal('auto'), z.number().int().positive()]),
     requiresConfirmation: z.boolean(),
