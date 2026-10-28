@@ -386,6 +386,14 @@ video:focus-visible {
   border: 1px solid #bde2ca;
 }
 
+.form-notice-success {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #177245;
+  font-weight: 600;
+}
+
 .job-status {
   display: grid;
   gap: 10px;

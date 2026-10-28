@@ -1,6 +1,7 @@
 import type { LlmConnection, LlmCredentials } from '../shared/types';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
+const DEFAULT_POLISH_TIMEOUT_MS = 120_000;
 
 export interface LlmChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -86,10 +87,15 @@ function parseChatContent(value: unknown): string {
 }
 
 export class LlmService {
-  constructor(private readonly timeoutMs = DEFAULT_TIMEOUT_MS) {}
+  constructor(
+    private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
+    private readonly polishTimeoutMs = DEFAULT_POLISH_TIMEOUT_MS,
+  ) {}
 
   async listModels(profile: LlmConnection): Promise<string[]> {
-    return parseModelList(await this.request('models', profile));
+    return parseModelList(
+      await this.request('models', profile, undefined, this.timeoutMs),
+    );
   }
 
   async testModel(profile: LlmCredentials): Promise<LlmTestResult> {
@@ -98,6 +104,7 @@ export class LlmService {
       profile,
       [{ role: 'user', content: 'Reply with OK only.' }],
       4,
+      this.timeoutMs,
     );
 
     return {
@@ -111,13 +118,19 @@ export class LlmService {
     profile: LlmCredentials,
     messages: readonly LlmChatMessage[],
     maxTokens: number,
+    timeoutMs: number = this.polishTimeoutMs,
   ): Promise<string> {
-    const data = await this.request('chat/completions', profile, {
-      model: profile.model,
-      messages,
-      max_tokens: maxTokens,
-      stream: false,
-    });
+    const data = await this.request(
+      'chat/completions',
+      profile,
+      {
+        model: profile.model,
+        messages,
+        max_tokens: maxTokens,
+        stream: false,
+      },
+      timeoutMs,
+    );
     return parseChatContent(data);
   }
 
@@ -125,10 +138,11 @@ export class LlmService {
     path: string,
     connection: LlmConnection,
     body?: unknown,
+    timeoutMs: number = this.timeoutMs,
   ): Promise<unknown> {
     const endpoint = createEndpoint(connection, path);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(endpoint, {
@@ -142,7 +156,7 @@ export class LlmService {
         signal: controller.signal,
       }).catch(() => {
         if (controller.signal.aborted) {
-          throw new Error(`LLM request timed out after ${this.timeoutMs} ms`);
+          throw new Error(`LLM request timed out after ${timeoutMs} ms`);
         }
         throw new Error('Could not connect to the LLM service');
       });
@@ -154,7 +168,7 @@ export class LlmService {
 
       const text = await response.text().catch(() => {
         if (controller.signal.aborted) {
-          throw new Error(`LLM request timed out after ${this.timeoutMs} ms`);
+          throw new Error(`LLM request timed out after ${timeoutMs} ms`);
         }
         throw new Error('Could not read the LLM service response');
       });

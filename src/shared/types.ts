@@ -51,6 +51,12 @@ export interface LlmProfile {
   model: string;
 }
 
+export type LlmKeyStatus = 'valid' | 'reenter-required';
+
+export interface LlmProfileView extends LlmProfile {
+  keyStatus: LlmKeyStatus;
+}
+
 export interface LlmCredentials extends LlmProfile {
   apiKey: string;
 }

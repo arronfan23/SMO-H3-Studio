@@ -237,4 +237,31 @@ describe('async effects on unmounted components', () => {
 
     expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
   });
+
+  test("SettingsPage does not update state when saving the LLM profile settles after unmount", async () => {
+    const request = deferred<void>();
+    window.smo = {
+      comfy: { health: async () => ({ system: {}, devices: [] }) },
+      llm: {
+        getProfile: async () => ({
+          baseUrl: "https://api.example.com/v1",
+          model: "gpt-4o",
+          keyStatus: "valid",
+        }),
+        saveProfile: () => request.promise,
+      },
+    } as unknown as SmoApi;
+    const view = render(<SettingsPage />);
+    fireEvent.change(await screen.findByLabelText("API 密钥"), {
+      target: { value: "sk-late-save" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+
+    view.unmount();
+    const updateCount = stateUpdates.mock.calls.length;
+    request.resolve(undefined);
+    await flushPromises();
+
+    expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
+  });
 });

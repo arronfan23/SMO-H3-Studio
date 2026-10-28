@@ -723,6 +723,64 @@ describe('settings page LLM configuration', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('首次配置必须提供 API key');
   });
+
+  test('requires re-entering the API key when the saved one cannot be decrypted', async () => {
+    smo.llm.getProfile.mockResolvedValue({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-4o',
+      keyStatus: 'reenter-required',
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByDisplayValue('gpt-4o');
+
+    expect(screen.getByText(/需要重新输入密钥/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存设置' })).toBeDisabled();
+    expect(screen.queryByText('已保存')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('API 密钥'), { target: { value: 'sk-fresh' } });
+    expect(screen.getByRole('button', { name: '保存设置' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() =>
+      expect(smo.llm.saveProfile).toHaveBeenCalledWith({
+        baseUrl: 'https://api.example.com/v1',
+        model: 'gpt-4o',
+        apiKey: 'sk-fresh',
+      }),
+    );
+    expect(screen.queryByText(/需要重新输入密钥/)).not.toBeInTheDocument();
+    expect(await screen.findByText('已保存')).toBeInTheDocument();
+  });
+
+  test('shows the saved state and flags unsaved modifications', async () => {
+    smo.llm.getProfile.mockResolvedValue({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-4o',
+      keyStatus: 'valid',
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByDisplayValue('gpt-4o');
+
+    expect(screen.getByText('已保存')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'gpt-4o-mini' } });
+    expect(screen.queryByText('已保存')).not.toBeInTheDocument();
+    expect(screen.getByText('有未保存修改')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'gpt-4o' } });
+    expect(screen.queryByText('有未保存修改')).not.toBeInTheDocument();
+    expect(screen.getByText('已保存')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('API 密钥'), { target: { value: 'sk-rotated' } });
+    expect(screen.getByText('有未保存修改')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(smo.llm.saveProfile).toHaveBeenCalled());
+    expect(await screen.findByText('已保存')).toBeInTheDocument();
+    expect(screen.queryByText('有未保存修改')).not.toBeInTheDocument();
+  });
 });
 
 describe('works page actions', () => {

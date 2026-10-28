@@ -318,3 +318,55 @@ describe('LlmService failures and privacy', () => {
     );
   });
 });
+
+describe('LlmService timeout budget', () => {
+  function useSlowUpstream(latencyMs: number): Promise<LocalLlmUpstream> {
+    return useUpstream((request, response) => {
+      setTimeout(() => {
+        if (response.writableEnded || response.destroyed) {
+          return;
+        }
+        if (request.url?.includes('/models')) {
+          json(response, { data: [{ id: 'model-a' }] });
+        } else {
+          json(response, {
+            choices: [
+              { message: { role: 'assistant', content: 'polished text' } },
+            ],
+          });
+        }
+      }, latencyMs);
+    });
+  }
+
+  test('applies the short timeout to listModels and testModel but the polish window to chatCompletion', async () => {
+    const upstream = await useSlowUpstream(50);
+    const service = new LlmService(10, 100);
+    const profile = {
+      baseUrl: `${upstream.baseUrl}/v1`,
+      apiKey: API_KEY,
+      model: 'model-a',
+    };
+
+    await expectSafeRejection(service.listModels(profile), /timed out/);
+    await expectSafeRejection(service.testModel(profile), /timed out/);
+    await expect(
+      service.chatCompletion(profile, [{ role: 'user', content: 'polish this' }], 16),
+    ).resolves.toBe('polished text');
+  });
+
+  test('chatCompletion honors an explicit per-call timeout override', async () => {
+    const upstream = await useSlowUpstream(50);
+    const service = new LlmService(10, 5_000);
+
+    await expectSafeRejection(
+      service.chatCompletion(
+        { baseUrl: `${upstream.baseUrl}/v1`, apiKey: API_KEY, model: 'model-a' },
+        [{ role: 'user', content: 'polish this' }],
+        16,
+        10,
+      ),
+      /timed out/,
+    );
+  });
+});

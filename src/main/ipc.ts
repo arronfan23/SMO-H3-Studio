@@ -88,10 +88,7 @@ async function dispatch(
       await services.llmConfig.saveProfile(request.payload);
       return undefined;
     case 'llm:getProfile': {
-      const profile = await services.llmConfig.getProfile();
-      return profile === null
-        ? null
-        : { baseUrl: profile.baseUrl, model: profile.model };
+      return services.llmConfig.getProfile();
     }
     case 'llm:listModels':
       return services.llm.listModels(

@@ -117,3 +117,67 @@ describe('FileLlmConfigStore model discovery connection', () => {
     ).rejects.toThrow(/model/i);
   });
 });
+
+const brokenCipher: SecretCipher = {
+  isEncryptionAvailable: () => true,
+  encryptString: (value: string) =>
+    Buffer.concat([prefix, transform(Buffer.from(value, 'utf8'))]),
+  decryptString: () => {
+    throw new Error('decryption failed');
+  },
+};
+
+describe('FileLlmConfigStore credential recovery', () => {
+  test('keeps baseUrl/model with reenter-required when the cipher cannot decrypt', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-llm-config-'));
+    directories.push(directory);
+    const path = join(directory, 'llm-config.json');
+
+    const working = new FileLlmConfigStore(path, cipher);
+    await working.save({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey: 'sk-saved-secret',
+    });
+
+    const broken = new FileLlmConfigStore(path, brokenCipher);
+
+    await expect(broken.getProfile()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      keyStatus: 'reenter-required',
+    });
+    await expect(broken.getCredentials()).rejects.toThrow(/重新输入 API Key/);
+  });
+
+  test('restores a valid status and the fresh key after re-saving', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-llm-config-'));
+    directories.push(directory);
+    const path = join(directory, 'llm-config.json');
+
+    const working = new FileLlmConfigStore(path, cipher);
+    await working.save({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey: 'sk-saved-secret',
+    });
+
+    const broken = new FileLlmConfigStore(path, brokenCipher);
+    await broken.save({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey: 'sk-fresh-secret',
+    });
+
+    await expect(working.getProfile()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      keyStatus: 'valid',
+    });
+    await expect(working.getCredentials()).resolves.toEqual({
+      baseUrl: 'https://saved.example.com/v1',
+      model: 'saved-model',
+      apiKey: 'sk-fresh-secret',
+    });
+  });
+});

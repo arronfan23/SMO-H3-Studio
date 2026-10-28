@@ -10,6 +10,7 @@ import type {
   HardwareRecommendationInput,
   VideoMode,
   LlmProfile,
+  LlmProfileView,
   LlmDiscoveryInput,
   Work,
 } from './types';
@@ -289,7 +290,7 @@ export interface SmoApi {
   };
   readonly llm: {
     saveProfile(input: LlmProfile & { apiKey?: string }): Promise<void>;
-    getProfile(): Promise<LlmProfile | null>;
+    getProfile(): Promise<LlmProfileView | null>;
     listModels(input: LlmDiscoveryInput): Promise<string[]>;
     testModel(input: LlmProfile & { apiKey?: string }): Promise<LlmTestResult>;
     polish(request: LlmPolishInput): Promise<PolishResult>;

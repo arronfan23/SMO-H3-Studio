@@ -779,7 +779,11 @@ describe('main-process IPC handlers', () => {
     });
     const polished = await harness.invoke('llm:polish', polishRequest);
 
-    expect(profile).toEqual({ baseUrl: credentials.baseUrl, model: 'model-a' });
+    expect(profile).toEqual({
+      baseUrl: credentials.baseUrl,
+      model: 'model-a',
+      keyStatus: 'valid',
+    });
     expect(models).toEqual(['model-a', 'model-b']);
     expect(tested).toMatchObject({ ok: true, summary: 'OK' });
     expect(polished).toMatchObject({
@@ -1063,6 +1067,7 @@ describe('LLM configuration privacy', () => {
       expect(profile).toEqual({
         baseUrl: 'http://127.0.0.1:11434/v1',
         model: 'local-model',
+        keyStatus: 'valid',
       });
       expect(JSON.stringify(profile)).not.toContain(apiKey);
       expect(await readFile(path, 'utf8')).not.toContain(apiKey);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Cpu, ExternalLink, Play, RefreshCw, RotateCcw, Save, Search, TestTube } from 'lucide-react';
 import type { ComfyHealth } from '../shared/ipc';
-import type { HardwareInfo, HardwareProfile, LlmProfile, VideoMode } from '../shared/types';
+import type { HardwareInfo, HardwareProfile, LlmProfileView, VideoMode } from '../shared/types';
 import { errorMessage } from './ui';
 
 type LlmStatus =
@@ -22,7 +22,7 @@ export function SettingsPage() {
   const [health, setHealth] = useState<ComfyHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [startingComfy, setStartingComfy] = useState(false);
-  const [profile, setProfile] = useState<LlmProfile | null>(null);
+  const [profile, setProfile] = useState<LlmProfileView | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
@@ -77,8 +77,19 @@ export function SettingsPage() {
     };
   }, [refresh]);
 
+  const reenterRequired =
+    profile !== null && profile.keyStatus === 'reenter-required';
+  const matchesSavedProfile =
+    profile !== null &&
+    baseUrl.trim() === profile.baseUrl &&
+    model.trim() === profile.model;
+  const hasUnsavedChanges =
+    profile !== null && (!matchesSavedProfile || apiKey.trim().length > 0);
   const canListModels = baseUrl.trim().length > 0;
-  const canSave = canListModels && model.trim().length > 0;
+  const canSave =
+    canListModels &&
+    model.trim().length > 0 &&
+    (!reenterRequired || apiKey.trim().length > 0);
 
   const save = async (): Promise<void> => {
     if (!canSave) {
@@ -96,7 +107,11 @@ export function SettingsPage() {
       if (!mountedRef.current) {
         return;
       }
-      setProfile({ baseUrl: baseUrl.trim(), model: model.trim() });
+      setProfile({
+        baseUrl: baseUrl.trim(),
+        model: model.trim(),
+        keyStatus: 'valid',
+      });
       setApiKey('');
     } catch (error) {
       if (mountedRef.current) {
@@ -472,10 +487,21 @@ export function SettingsPage() {
                 id="llm-api-key"
                 type="password"
                 value={apiKey}
-                placeholder={profile ? '留空以保留已有密钥' : '首次配置必须填写'}
+                placeholder={
+                  reenterRequired
+                    ? '密钥无法读取，请重新输入'
+                    : profile
+                      ? '留空以保留已有密钥'
+                      : '首次配置必须填写'
+                }
                 onChange={(event) => setApiKey(event.target.value)}
               />
             </div>
+            {reenterRequired && (
+              <p className="form-error" role="alert">
+                密钥无法读取，需要重新输入密钥后才能保存或测试。
+              </p>
+            )}
             <div className="settings-actions">
               <button
                 className="button button-primary"
@@ -505,6 +531,15 @@ export function SettingsPage() {
                 测试模型
               </button>
             </div>
+            {profile !== null && !reenterRequired && !hasUnsavedChanges && (
+              <p className="form-notice form-notice-success" role="status">
+                <Check size={14} aria-hidden="true" />
+                已保存
+              </p>
+            )}
+            {hasUnsavedChanges && (
+              <p className="form-notice" role="status">有未保存修改</p>
+            )}
             {llmStatus.kind === 'loading' && <p className="form-notice" role="status">{llmStatus.message}</p>}
             {llmStatus.kind === 'models' && (
               <div className="model-list">

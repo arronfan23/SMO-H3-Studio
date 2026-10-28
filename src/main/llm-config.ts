@@ -6,12 +6,16 @@ import type {
   LlmCredentials,
   LlmDiscoveryInput,
   LlmProfile,
+  LlmProfileView,
 } from '../shared/types';
 import {
   decryptSecret,
   encryptSecret,
   type SecretCipher,
 } from './secrets';
+
+export const LLM_REENTER_REQUIRED_MESSAGE =
+  '密钥无法读取，请在设置页重新输入 API Key';
 
 interface StoredLlmConfig {
   version: 1;
@@ -25,7 +29,7 @@ export interface LlmConfigStore {
   saveProfile(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials>;
   resolveConnection(input: LlmDiscoveryInput): Promise<LlmConnection>;
   resolveCredentials(input: LlmProfile & { apiKey?: string }): Promise<LlmCredentials>;
-  getProfile(): Promise<LlmProfile | null>;
+  getProfile(): Promise<LlmProfileView | null>;
   getCredentials(): Promise<LlmCredentials | null>;
 }
 
@@ -123,11 +127,19 @@ export class FileLlmConfigStore implements LlmConfigStore {
     return model.length > 0 ? { baseUrl, model, apiKey } : { baseUrl, apiKey };
   }
 
-  async getProfile(): Promise<LlmProfile | null> {
+  async getProfile(): Promise<LlmProfileView | null> {
     const stored = await this.read();
-    return stored === null
-      ? null
-      : { baseUrl: stored.baseUrl, model: stored.model };
+    if (stored === null) {
+      return null;
+    }
+
+    let keyStatus: LlmProfileView['keyStatus'] = 'valid';
+    try {
+      this.decryptApiKey(stored.encryptedApiKey);
+    } catch {
+      keyStatus = 'reenter-required';
+    }
+    return { baseUrl: stored.baseUrl, model: stored.model, keyStatus };
   }
 
   async getCredentials(): Promise<LlmCredentials | null> {
@@ -136,10 +148,19 @@ export class FileLlmConfigStore implements LlmConfigStore {
       return null;
     }
 
-    const apiKey = this.cipher
-      ? decryptSecret(stored.encryptedApiKey, this.cipher)
-      : decryptSecret(stored.encryptedApiKey);
+    let apiKey: string;
+    try {
+      apiKey = this.decryptApiKey(stored.encryptedApiKey);
+    } catch {
+      throw new Error(LLM_REENTER_REQUIRED_MESSAGE);
+    }
     return { baseUrl: stored.baseUrl, model: stored.model, apiKey };
+  }
+
+  private decryptApiKey(encryptedApiKey: string): string {
+    return this.cipher
+      ? decryptSecret(encryptedApiKey, this.cipher)
+      : decryptSecret(encryptedApiKey);
   }
 
   private async read(): Promise<StoredLlmConfig | null> {
