@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent } from 'react';
 import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react';
 import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
@@ -38,6 +39,8 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const pageRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -131,7 +134,28 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     }
   };
 
-  const openDeleteDialog = (work: Work): void => {
+  const deleteDialogWasOpen = useRef(false);
+
+  useEffect(() => {
+    if (deleteTarget !== null) {
+      deleteDialogWasOpen.current = true;
+      return;
+    }
+    if (!deleteDialogWasOpen.current) {
+      return;
+    }
+    deleteDialogWasOpen.current = false;
+    const trigger = deleteTriggerRef.current;
+    deleteTriggerRef.current = null;
+    if (trigger !== null && trigger.isConnected) {
+      trigger.focus();
+    } else {
+      pageRef.current?.focus();
+    }
+  }, [deleteTarget]);
+
+  const openDeleteDialog = (work: Work, trigger: HTMLButtonElement): void => {
+    deleteTriggerRef.current = trigger;
     setDeleteTarget(work);
     setDeleteError(null);
   };
@@ -154,7 +178,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
       }
       await refresh();
       if (mountedRef.current) {
-        setDeleteTarget(null);
+        closeDeleteDialog();
       }
     } catch (deletionError) {
       if (mountedRef.current) {
@@ -167,8 +191,42 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     }
   };
 
+  const handleDeleteDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!deleting) {
+        closeDeleteDialog();
+      }
+      return;
+    }
+    if (event.key !== 'Tab') {
+      return;
+    }
+    const buttons = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('.modal-actions button'),
+    ).filter((button) => !button.disabled);
+    if (buttons.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const active = document.activeElement;
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+    if (!buttons.includes(active as HTMLButtonElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
-    <div className="standard-page">
+    <div className="standard-page" ref={pageRef} tabIndex={-1}>
       <header className="page-header">
         <div>
           <span className="page-kicker">生成记录</span>
@@ -246,7 +304,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                       onClick={() => void window.smo.comfy.open()}
                       aria-label="打开 ComfyUI"
                     >
-                    <ExternalLink size={16} aria-hidden="true" />
+                      <ExternalLink size={16} aria-hidden="true" />
                     </button>
                   </>
                 )}
@@ -254,7 +312,8 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                   <button
                     className="button button-secondary"
                     type="button"
-                    onClick={() => openDeleteDialog(work)}
+                    aria-label={`删除作品 ${work.id}`}
+                    onClick={(event) => openDeleteDialog(work, event.currentTarget)}
                   >
                     <Trash2 size={16} aria-hidden="true" />
                     删除
@@ -266,21 +325,33 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
         </div>
       )}
       {deleteTarget !== null && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="删除作品">
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="删除作品"
+          onKeyDown={handleDeleteDialogKeyDown}
+        >
           <div className="modal-card">
             <h3>删除作品</h3>
             {deleteTarget.outputPath !== null && deleteTarget.outputPath.trim().length > 0 ? (
               <p>
-                确定要删除模特“{avatarName(deleteTarget.avatarId)}”的作品“
-                {fileName(deleteTarget.outputPath)}”吗？
-                作品记录和视频文件将一起删除，此操作不可撤销。
+                {`确定要删除模特“${avatarName(deleteTarget.avatarId)}”的作品“${fileName(deleteTarget.outputPath)}”吗？作品记录和视频文件将一起删除，此操作不可撤销。`}
               </p>
-            ) : (
+            ) : deleteTarget.status === 'failed' ? (
               <p>这条失败记录将被删除，此操作不可撤销。</p>
+            ) : (
+              <p>这条作品记录将被删除，此操作不可撤销。</p>
             )}
             {deleteError && <p className="form-error" role="alert">{deleteError}</p>}
             <div className="modal-actions">
-              <button className="button button-secondary" type="button" onClick={closeDeleteDialog}>
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={deleting}
+                autoFocus
+                onClick={closeDeleteDialog}
+              >
                 <X size={16} aria-hidden="true" /> 取消
               </button>
               <button

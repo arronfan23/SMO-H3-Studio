@@ -1323,7 +1323,7 @@ describe('works deletion', () => {
     await openWorksPage();
     await screen.findByText('已完成（done）');
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 done-work' }));
 
     const dialog = screen.getByRole('dialog', { name: '删除作品' });
     expect(dialog).toHaveTextContent('薄荷主播');
@@ -1346,13 +1346,16 @@ describe('works deletion', () => {
     await openWorksPage();
     await screen.findByText('已完成（done）');
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    const pageContainer = screen.getByText('已完成（done）').closest('.standard-page');
+    expect(pageContainer).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 done-work' }));
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
 
     await waitFor(() => expect(smo.works.delete).toHaveBeenCalledWith('done-work'));
     expect(await screen.findByText('还没有作品')).toBeInTheDocument();
     expect(screen.queryByText('已完成（done）')).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(pageContainer).toHaveFocus();
   });
 
   test('shows the deletion error, keeps the dialog and work, and allows confirming again', async () => {
@@ -1365,7 +1368,7 @@ describe('works deletion', () => {
     await openWorksPage();
     await screen.findByText('已完成（done）');
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 done-work' }));
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('文件被占用');
@@ -1397,14 +1400,14 @@ describe('works deletion', () => {
     expect(pendingCard).not.toBeNull();
     expect(runningCard).not.toBeNull();
     expect(
-      within(pendingCard as HTMLElement).queryByRole('button', { name: '删除' }),
+      within(pendingCard as HTMLElement).queryByRole('button', { name: /删除/ }),
     ).not.toBeInTheDocument();
     expect(
-      within(runningCard as HTMLElement).queryByRole('button', { name: '删除' }),
+      within(runningCard as HTMLElement).queryByRole('button', { name: /删除/ }),
     ).not.toBeInTheDocument();
 
     const failedCard = screen.getByText('failed-work').closest('article') as HTMLElement;
-    fireEvent.click(within(failedCard).getByRole('button', { name: '删除' }));
+    fireEvent.click(within(failedCard).getByRole('button', { name: '删除作品 failed-work' }));
 
     const dialog = screen.getByRole('dialog', { name: '删除作品' });
     expect(dialog).toHaveTextContent('这条失败记录将被删除，此操作不可撤销');
@@ -1412,6 +1415,22 @@ describe('works deletion', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     expect(smo.works.delete).not.toHaveBeenCalled();
+  });
+
+  test('describes a finished work without an output file as a neutral record', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-no-file', status: 'done', outputPath: null }),
+    ]);
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 done-no-file' }));
+
+    const dialog = screen.getByRole('dialog', { name: '删除作品' });
+    expect(dialog).toHaveTextContent('这条作品记录将被删除，此操作不可撤销');
+    expect(dialog).not.toHaveTextContent('失败记录');
+    expect(dialog).not.toHaveTextContent('视频文件');
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
   });
 
   test('disables the confirmation button while deleting', async () => {
@@ -1428,11 +1447,69 @@ describe('works deletion', () => {
     await openWorksPage();
     await screen.findByText('已完成（done）');
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 done-work' }));
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
 
     expect(screen.getByRole('button', { name: '正在删除…' })).toBeDisabled();
+    const cancelButton = screen.getByRole('button', { name: '取消' });
+    expect(cancelButton).toBeDisabled();
+    fireEvent.click(cancelButton);
+    fireEvent.keyDown(screen.getByRole('dialog', { name: '删除作品' }), { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: '删除作品' })).toBeInTheDocument();
     expect(smo.works.delete).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveDelete?.();
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  test('focuses cancel on open, traps Tab inside the dialog, and restores focus on close', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    const trigger = screen.getByRole('button', { name: '删除作品 done-work' });
+    fireEvent.click(trigger);
+
+    const dialog = screen.getByRole('dialog', { name: '删除作品' });
+    const cancelButton = screen.getByRole('button', { name: '取消' });
+    const confirmButton = screen.getByRole('button', { name: '确认删除' });
+    expect(cancelButton).toHaveFocus();
+
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(confirmButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(cancelButton).toHaveFocus();
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(smo.works.delete).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  test('prevents Tab when every dialog button is disabled during deletion', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+    let resolveDelete: (() => void) | undefined;
+    smo.works.delete.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDelete = resolve;
+        }),
+    );
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 done-work' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    const dialog = screen.getByRole('dialog', { name: '删除作品' });
+    expect(fireEvent.keyDown(dialog, { key: 'Tab' })).toBe(false);
+    expect(fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })).toBe(false);
 
     await act(async () => {
       resolveDelete?.();
@@ -1456,7 +1533,7 @@ describe('works deletion', () => {
     await screen.findByText('已完成（done）');
     const listCallsBeforeDelete = smo.works.list.mock.calls.length;
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 done-work' }));
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
     await waitFor(() => expect(smo.works.delete).toHaveBeenCalledWith('done-work'));
     view.unmount();

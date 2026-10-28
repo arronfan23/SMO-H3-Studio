@@ -621,7 +621,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(work).toBeVisible();
     await expect(work).toContainText('已完成');
 
-    await work.getByRole('button', { name: '删除' }).click();
+    await work.getByRole('button', { name: `删除作品 ${jobId}` }).click();
     const dialog = page!.getByRole('dialog', { name: '删除作品' });
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText(avatarName);
