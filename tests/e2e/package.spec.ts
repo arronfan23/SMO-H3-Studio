@@ -494,8 +494,10 @@ test.describe('SMO.H3 Studio portable package', () => {
     const cdpPort = await reserveFreePort();
     const wrapperDataDirectory = join(tempDirectory!, 'wrapper-data');
     const wrapperOutputDirectory = join(tempDirectory!, 'wrapper-output');
+    const wrapperUserDataDir = join(tempDirectory!, 'wrapper-user');
     await mkdir(wrapperDataDirectory, { recursive: true });
     await mkdir(wrapperOutputDirectory, { recursive: true });
+    await mkdir(wrapperUserDataDir, { recursive: true });
 
     const wrapperLogs: string[] = [];
     const wrapper: ChildProcess = spawn(
@@ -506,6 +508,8 @@ test.describe('SMO.H3 Studio portable package', () => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         `--remote-debugging-port=${cdpPort}`,
+        '--user-data-dir',
+        wrapperUserDataDir,
       ],
       {
         env: {
