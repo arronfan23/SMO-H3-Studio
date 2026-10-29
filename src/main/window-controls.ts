@@ -45,7 +45,7 @@ export interface WindowControlsTarget {
 }
 
 export interface WindowControlsScreen {
-  getPrimaryDisplay(): { workArea: WindowBounds };
+  getDisplayMatching(rect: WindowBounds): { workArea: WindowBounds };
   getCursorScreenPoint(): WindowPoint;
 }
 
@@ -89,6 +89,8 @@ export function registerWindowControls(
     useWorkAreaMaximize ? customMaximized : window.isMaximized();
 
   const toggleMaximize = (): boolean => {
+    // A stale drag session would keep resizing the (un)maximized window.
+    resizeSession = null;
     if (!useWorkAreaMaximize) {
       if (window.isMaximized()) {
         window.unmaximize();
@@ -105,7 +107,8 @@ export function registerWindowControls(
       customMaximized = false;
     } else {
       savedBounds = window.getBounds();
-      window.setBounds(screen.getPrimaryDisplay().workArea);
+      // Maximize on the monitor that currently hosts the window.
+      window.setBounds(screen.getDisplayMatching(savedBounds).workArea);
       customMaximized = true;
     }
     return customMaximized;

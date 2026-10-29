@@ -48,13 +48,20 @@ describe('WindowResizeHandles', () => {
     const { container } = render(<WindowResizeHandles />);
     const handle = container.querySelector('.window-resize-se')!;
 
-    fireEvent.pointerDown(handle, { pointerId: 1, button: 0 });
+    fireEvent.pointerDown(handle, {
+      pointerId: 1,
+      button: 0,
+      screenX: 100,
+      screenY: 200,
+    });
     await waitFor(() =>
-      expect(bridge.beginResize).toHaveBeenCalledWith('se'),
+      expect(bridge.beginResize).toHaveBeenCalledWith('se', { x: 100, y: 200 }),
     );
 
-    fireEvent.pointerMove(handle, { pointerId: 1 });
-    await waitFor(() => expect(bridge.resize).toHaveBeenCalledWith('se'));
+    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 130, screenY: 240 });
+    await waitFor(() =>
+      expect(bridge.resize).toHaveBeenCalledWith('se', { x: 130, y: 240 }),
+    );
 
     fireEvent.pointerUp(handle, { pointerId: 1 });
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
@@ -73,9 +80,14 @@ describe('WindowResizeHandles', () => {
     const { container } = render(<WindowResizeHandles />);
     const handle = container.querySelector('.window-resize-e')!;
 
-    fireEvent.pointerDown(handle, { pointerId: 1, button: 0 });
+    fireEvent.pointerDown(handle, {
+      pointerId: 1,
+      button: 0,
+      screenX: 300,
+      screenY: 400,
+    });
     await waitFor(() =>
-      expect(bridge.beginResize).toHaveBeenCalledWith('e'),
+      expect(bridge.beginResize).toHaveBeenCalledWith('e', { x: 300, y: 400 }),
     );
 
     fireEvent.pointerMove(handle, { pointerId: 1 });
@@ -100,11 +112,67 @@ describe('WindowResizeHandles', () => {
     const { container } = render(<WindowResizeHandles />);
     const handle = container.querySelector('.window-resize-w')!;
 
-    fireEvent.pointerDown(handle, { pointerId: 7, button: 0 });
+    fireEvent.pointerDown(handle, {
+      pointerId: 7,
+      button: 0,
+      screenX: 50,
+      screenY: 60,
+    });
     await waitFor(() =>
-      expect(bridge.beginResize).toHaveBeenCalledWith('w'),
+      expect(bridge.beginResize).toHaveBeenCalledWith('w', { x: 50, y: 60 }),
     );
     fireEvent.pointerUp(handle, { pointerId: 7 });
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+  });
+
+  test('releases the session when pointer up precedes a delayed begin', async () => {
+    let resolveBegin: (begun: boolean) => void = () => undefined;
+    bridge.beginResize.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveBegin = resolve;
+        }),
+    );
+    const { container } = render(<WindowResizeHandles />);
+    const handle = container.querySelector('.window-resize-se')!;
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 1,
+      button: 0,
+      screenX: 10,
+      screenY: 10,
+    });
+    // Release before begin resolves: end must still be sent (IPC order makes
+    // it land after begin in the main process).
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+
+    // The late resolve must not enter the dragging state; it ends the session
+    // the main process just opened.
+    resolveBegin(true);
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(2));
+
+    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 60, screenY: 70 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.resize).not.toHaveBeenCalled();
+  });
+
+  test('ends exactly once when pointer up follows a resolved begin', async () => {
+    const { container } = render(<WindowResizeHandles />);
+    const handle = container.querySelector('.window-resize-se')!;
+
+    fireEvent.pointerDown(handle, { pointerId: 1, button: 0 });
+    await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(1));
+
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+
+    // The session is fully closed: further hovers and a repeated pointerup
+    // neither resize nor send another end.
+    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 60, screenY: 70 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.resize).not.toHaveBeenCalled();
+    expect(bridge.endResize).toHaveBeenCalledTimes(1);
   });
 });

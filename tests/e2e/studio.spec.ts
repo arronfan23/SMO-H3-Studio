@@ -222,6 +222,18 @@ async function waitForVideoReadyByJobId(page: Page, jobId: string): Promise<void
   );
 }
 
+function readWindowBounds(
+  app: ElectronApplication,
+): Promise<{ x: number; y: number; width: number; height: number }> {
+  return app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) {
+      throw new Error('No BrowserWindow found');
+    }
+    return win.getBounds();
+  });
+}
+
 async function assertViewLayout(
   page: Page,
   viewName: string,
@@ -928,14 +940,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     const box = await handle.boundingBox();
     expect(box).not.toBeNull();
 
-    const readBounds = () =>
-      app!.evaluate(({ BrowserWindow }) => {
-        const win = BrowserWindow.getAllWindows()[0];
-        if (!win) {
-          throw new Error('No BrowserWindow found');
-        }
-        return win.getBounds();
-      });
+    const readBounds = () => readWindowBounds(app!);
 
     const startBounds = await readBounds();
     const centerX = box!.x + box!.width / 2;
@@ -975,5 +980,69 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.waitForTimeout(250);
     expect(await readBounds()).toEqual(resizedBounds);
     await expect(page!.locator('.app-shell')).toBeVisible();
+  });
+
+  test('window resize via the ne corner never hits the close button', async () => {
+    await expect(page!.locator('.app-shell')).toBeVisible();
+    await setViewport(app!, page!, 1280, 820);
+
+    // The ne hot zone overlaps the titlebar's close button area; the drag
+    // must resize the window without ever triggering close.
+    const handle = page!.locator('.window-resize-ne');
+    await expect(handle).toBeVisible();
+    const box = await handle.boundingBox();
+    expect(box).not.toBeNull();
+
+    const readBounds = () => readWindowBounds(app!);
+    const startBounds = await readBounds();
+    const centerX = box!.x + box!.width / 2;
+    const centerY = box!.y + box!.height / 2;
+
+    // Drag diagonally up-right at least 30 px along both axes.
+    await page!.mouse.move(centerX, centerY);
+    await page!.mouse.down();
+    await page!.mouse.move(centerX + 15, centerY - 15, { steps: 3 });
+    await page!.mouse.move(centerX + 45, centerY - 45, { steps: 6 });
+    await page!.mouse.up();
+
+    let resizedBounds = startBounds;
+    await expect
+      .poll(
+        async () => {
+          resizedBounds = await readBounds();
+          return Math.min(
+            resizedBounds.width - startBounds.width,
+            resizedBounds.height - startBounds.height,
+          );
+        },
+        { timeout: 5_000 },
+      )
+      .toBeGreaterThanOrEqual(20);
+
+    // ne grows width/height, moves the top edge up and anchors the
+    // bottom-left corner (the edge opposite the dragged corner stays put).
+    expect(resizedBounds.width - startBounds.width).toBeGreaterThanOrEqual(20);
+    expect(resizedBounds.height - startBounds.height).toBeGreaterThanOrEqual(20);
+    expect(resizedBounds.y).toBeLessThan(startBounds.y);
+    expect(Math.abs(resizedBounds.x - startBounds.x)).toBeLessThanOrEqual(2);
+    expect(
+      Math.abs(
+        resizedBounds.y + resizedBounds.height -
+          (startBounds.y + startBounds.height),
+      ),
+    ).toBeLessThanOrEqual(2);
+
+    // The app survived the corner drag: window alive, close button unused.
+    const windowCount = await app!.evaluate(
+      ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+    );
+    expect(windowCount).toBe(1);
+    await expect(page!).toHaveTitle('SMO.H3 Studio');
+    await expect(page!.locator('.app-shell')).toBeVisible();
+
+    // Session ended: hovering further does not resize.
+    await page!.mouse.move(centerX + 80, centerY - 80, { steps: 5 });
+    await page!.waitForTimeout(250);
+    expect(await readBounds()).toEqual(resizedBounds);
   });
 });

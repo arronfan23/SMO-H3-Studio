@@ -145,6 +145,16 @@ body[data-window-maximized='true'] .window-resize-handle {
   cursor: sw-resize;
 }
 
+/* Corner hot zones deliberately overlap 16px into the titlebar: they must sit
+   above the titlebar buttons (z-index 50) so a drag starting at the corner
+   can never land on the close button. */
+.window-resize-ne,
+.window-resize-nw,
+.window-resize-se,
+.window-resize-sw {
+  z-index: 60;
+}
+
 .window-titlebar {
   display: flex;
   align-items: stretch;

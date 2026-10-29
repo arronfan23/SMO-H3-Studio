@@ -41,8 +41,15 @@ function releasePointer(target: Element | null, pointerId: number): void {
 // synthetic input works without moving the real OS cursor.
 export function WindowResizeHandles() {
   const activeDirection = useRef<WindowResizeDirection | null>(null);
+  // True from sending begin-resize until end-resize is sent, so a pointerup
+  // arriving before the begin IPC resolves cannot leak a main-process session.
+  const sessionOpen = useRef(false);
   const latestCursor = useRef<WindowScreenPoint | null>(null);
   const framePending = useRef(false);
+
+  const sendEndResize = (): void => {
+    void windowBridge()?.endResize().catch(() => undefined);
+  };
 
   const handlePointerDown =
     (direction: WindowResizeDirection) =>
@@ -57,16 +64,25 @@ export function WindowResizeHandles() {
       const target = event.currentTarget;
       capturePointer(target, event.pointerId);
       latestCursor.current = { x: event.screenX, y: event.screenY };
+      sessionOpen.current = true;
       void bridge
         .beginResize(direction, latestCursor.current)
         .then((begun) => {
-          if (begun) {
+          if (!sessionOpen.current) {
+            // Released before begin resolved: never enter the dragging state,
+            // and close the session the main process may have just opened.
+            if (begun) {
+              sendEndResize();
+            }
+          } else if (begun) {
             activeDirection.current = direction;
           } else {
+            sessionOpen.current = false;
             releasePointer(target, event.pointerId);
           }
         })
         .catch(() => {
+          sessionOpen.current = false;
           releasePointer(target, event.pointerId);
         });
     };
@@ -91,13 +107,14 @@ export function WindowResizeHandles() {
   };
 
   const handlePointerEnd = (event: ReactPointerEvent<HTMLDivElement>): void => {
-    if (activeDirection.current === null) {
+    if (!sessionOpen.current) {
       return;
     }
+    sessionOpen.current = false;
     activeDirection.current = null;
     latestCursor.current = null;
     releasePointer(event.currentTarget, event.pointerId);
-    void windowBridge()?.endResize().catch(() => undefined);
+    sendEndResize();
   };
 
   return (

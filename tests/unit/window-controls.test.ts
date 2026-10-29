@@ -10,7 +10,7 @@ const { ipcMainHandle, ipcMainRemoveHandler } = vi.hoisted(() => ({
 vi.mock('electron', () => ({
   ipcMain: { handle: ipcMainHandle, removeHandler: ipcMainRemoveHandler },
   screen: {
-    getPrimaryDisplay: () => ({
+    getDisplayMatching: () => ({
       workArea: { x: 0, y: 0, width: 1920, height: 1080 },
     }),
     getCursorScreenPoint: () => ({ x: 0, y: 0 }),
@@ -91,7 +91,9 @@ function createScreenMock() {
   };
   return {
     state,
-    getPrimaryDisplay: vi.fn(() => ({ workArea: state.workArea })),
+    getDisplayMatching: vi.fn((_bounds: WindowBounds) => ({
+      workArea: state.workArea,
+    })),
     getCursorScreenPoint: vi.fn(() => ({ ...state.cursor })),
   };
 }
@@ -385,7 +387,10 @@ describe('transparent window work-area maximization', () => {
   const options: WindowControlsOptions = { transparent: true, screen };
 
   beforeEach(() => {
-    screen.getPrimaryDisplay.mockClear();
+    screen.getDisplayMatching.mockClear();
+    screen.getDisplayMatching.mockImplementation((_bounds: WindowBounds) => ({
+      workArea: screen.state.workArea,
+    }));
   });
 
   test('maximizes to the work area without calling native maximize', async () => {
@@ -429,6 +434,69 @@ describe('transparent window work-area maximization', () => {
     await invoke('window:toggle-maximize');
 
     expect(windowStub.setBounds).toHaveBeenNthCalledWith(2, movedBounds);
+  });
+
+  test('maximizes on the display that currently hosts the window', async () => {
+    const primaryWorkArea = { x: 0, y: 0, width: 1920, height: 1040 };
+    const secondaryWorkArea = { x: 1920, y: 0, width: 2560, height: 1400 };
+    screen.getDisplayMatching.mockImplementation((bounds: WindowBounds) => ({
+      workArea:
+        bounds.x >= 1920 ? secondaryWorkArea : primaryWorkArea,
+    }));
+    const { windowStub, invoke } = createHarness(options);
+
+    // Park the window on the secondary display before maximizing.
+    windowStub.setBounds({ x: 2000, y: 100, width: 1280, height: 820 });
+    windowStub.setBounds.mockClear();
+
+    await expect(invoke('window:toggle-maximize')).resolves.toBe(true);
+    expect(screen.getDisplayMatching).toHaveBeenCalledWith({
+      x: 2000,
+      y: 100,
+      width: 1280,
+      height: 820,
+    });
+    expect(windowStub.setBounds).toHaveBeenLastCalledWith(secondaryWorkArea);
+
+    // Restoring still returns to the saved bounds on that display.
+    await expect(invoke('window:toggle-maximize')).resolves.toBe(false);
+    expect(windowStub.setBounds).toHaveBeenLastCalledWith({
+      x: 2000,
+      y: 100,
+      width: 1280,
+      height: 820,
+    });
+  });
+
+  test('toggle-maximize drops an in-flight resize session', async () => {
+    const { windowStub, invoke } = createHarness(options);
+
+    await expect(
+      invoke('window:begin-resize', {
+        direction: 'se',
+        cursor: { x: 500, y: 400 },
+      }),
+    ).resolves.toBe(true);
+
+    // Maximizing mid-drag must not leave a stale session behind.
+    await expect(invoke('window:toggle-maximize')).resolves.toBe(true);
+    windowStub.setBounds.mockClear();
+
+    await invoke('window:resize', {
+      direction: 'se',
+      cursor: { x: 900, y: 900 },
+    });
+    expect(windowStub.setBounds).not.toHaveBeenCalled();
+
+    // After restoring, a fresh drag starts cleanly from current bounds.
+    await invoke('window:toggle-maximize');
+    await expect(
+      invoke('window:begin-resize', {
+        direction: 'se',
+        cursor: { x: 500, y: 400 },
+      }),
+    ).resolves.toBe(true);
+    await invoke('window:end-resize');
   });
 
   test('still rejects foreign senders and strict-violating payloads', async () => {
