@@ -824,8 +824,34 @@ describe('generation options and hardware apply', () => {
     expect(panel.getByLabelText('H3 模型')).toHaveValue('int8');
     expect(panel.getByText('BF16 大显存候选，未实测')).toBeInTheDocument();
     expect(panel.getByLabelText('视频比例')).toHaveValue('16:9 (Widescreen)');
-    expect(panel.getByLabelText('分辨率')).toHaveValue('0.7');
+    const resolution = panel.getByLabelText('分辨率');
+    expect(resolution).toHaveValue('0.7');
+    expect(
+      within(resolution).getByRole('option', { name: '1152 × 640 px' }),
+    ).toBeInTheDocument();
+    expect(panel.queryByText(/0\.\dMP/)).not.toBeInTheDocument();
     expect(panel.getByLabelText('生成画面内字幕')).not.toBeChecked();
+  });
+
+  test('updates the resolution pixel labels when the aspect ratio changes', async () => {
+    await renderStudio();
+    const panel = within(textPanel());
+    const resolution = panel.getByLabelText('分辨率');
+
+    expect(
+      within(resolution).getByRole('option', { name: '1152 × 640 px' }),
+    ).toBeInTheDocument();
+
+    fireEvent.change(panel.getByLabelText('视频比例'), {
+      target: { value: '9:16 (Portrait Widescreen)' },
+    });
+
+    expect(
+      within(resolution).getByRole('option', { name: '640 × 1152 px' }),
+    ).toBeInTheDocument();
+    expect(
+      within(resolution).queryByRole('option', { name: '1152 × 640 px' }),
+    ).not.toBeInTheDocument();
   });
 
   test('applies the default INT8 profile before starting the text job', async () => {

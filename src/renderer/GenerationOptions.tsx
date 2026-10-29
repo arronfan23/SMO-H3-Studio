@@ -7,6 +7,7 @@ import {
   type H3ModelOption,
   type ResolutionMegapixels,
 } from '../shared/generation-options';
+import { resolveH3Resolution } from '../shared/resolution';
 
 export type { GenerationOptionsValue } from '../shared/generation-options';
 
@@ -79,11 +80,17 @@ export function GenerationOptions({
               })
             }
           >
-            {RESOLUTION_OPTIONS.map((option) => (
-              <option key={option.value} value={String(option.value)}>
-                {option.label}
-              </option>
-            ))}
+            {RESOLUTION_OPTIONS.map((option) => {
+              const { width, height } = resolveH3Resolution(
+                value.aspectRatio,
+                option.value,
+              );
+              return (
+                <option key={option.value} value={String(option.value)}>
+                  {width} × {height} px
+                </option>
+              );
+            })}
           </select>
         </div>
         <div className="field">
