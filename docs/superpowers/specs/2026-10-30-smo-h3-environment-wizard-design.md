@@ -17,7 +17,8 @@
 
 - 当前 SelfLift Spark 运行环境约 24.23 GiB，模型目录约 175.04 GiB，不应整包发布。
 - 现有工作流只引用 11 个模型/LoRA 文件，可按清单下载，避免无关 BF16、GGUF 和备用模型。
-- 当前 Spark 包只适配 SM120（RTX 50 系）。README 明确 30 系不支持当前两份 Spark 包，其他架构需要单独验证的构建，不能自动套用。
+- 当前最低测试门槛为 30 系 8GB 显存 + 32GB 内存：30/40 系使用 SM89，50 系使用 SM120。30 系实际速度与稳定性仍需实测，未验证前只能称为兼容候选。
+- 本地已有 `ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip` 与 `ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip`，每份约 4.55 GiB，可直接作为分块运行包，不需要重新打包整个 24.23 GiB 解压目录。
 - 当前 `recommendHardware` 已提供低显存 `conservative`（INT8、0.4MP、lowvram、tiling=4）、`balanced-16gb` 和 `high-memory-candidate`，应复用而非重写。
 - 默认模型目录、ComfyUI 根目录和输出目录目前硬编码为 G 盘路径，必须改为安装后持久化配置。
 - 已验证本机环境仅为 RTX 5080、INT8、16GB。8GB 配置只能先标为兼容候选，实际速度与稳定性由用户朋友电脑测试确认。
@@ -42,7 +43,7 @@
 
 - 使用现有 `nvidia-smi` 获取 GPU 名称、显存、驱动和 CUDA Compute Capability；读取 RAM、Windows 版本和安装盘剩余空间。
 - 最低安装门槛：
-  - NVIDIA GPU 且 Compute Capability 属于已有验证运行包的架构；当前仅为 `sm120`。
+- NVIDIA GPU 且 Compute Capability 属于已有验证运行包的架构：30/40 系使用 `sm89`，50 系使用 `sm120`；不满足该映射的架构停止安装。
   - 显存不少于 8 GiB。
   - 物理内存不少于 32 GiB。
   - 磁盘剩余空间不少于“当前运行包、所选模型、临时下载和校验所需空间”的计算值，不固定写死一个数字。
@@ -54,7 +55,7 @@
 - `conservative`：用于最低兼容候选，INT8、0.4MP、lowvram、tiling=4；不宣称 8GB 已验证。
 - `balanced-16gb`：用于 12–19 GiB 显存，INT8、0.7MP、lowvram、自动 tiling。
 - `high-memory-candidate`：用于 20 GiB 及以上显存，BF16-if-present、1.0MP、自动 tiling，仍标为未实测，默认不选。
-- 当前运行包架构与档案分离：档案只控制模型和工作流参数，不能绕过 SM120 启动兼容性。
+- 当前运行包架构与档案分离：档案只控制模型和工作流参数，不能用错 SM89/SM120 启动包。
 
 ## 3. 首次启动向导与持久化
 
@@ -68,8 +69,8 @@
 
 ### 运行包
 
-- 新建公开仓库 `SMO-H3-Runtime`，保存 `README.md`、运行清单、安装脚本、LICENSE/NOTICE 和经过验证的 SelfLift Spark 运行包。
-- 运行包按 GitHub Release 分块提供，每块不超过 2 GB。清单记录每块 URL、大小、SHA256、合并后的总大小和完整包 SHA256。
+- 新建公开仓库 `SMO-H3-Runtime`，保存 `README.md`、运行清单、安装脚本、LICENSE/NOTICE 和本地已有的两份无模型运行包。
+- `ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip` 用于 30/40 系，`ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip` 用于 50 系。每份运行包按 3 个分块提供，单块不超过 2 GB；清单记录每块 URL、大小、SHA256、合并后的总大小和完整包 SHA256。
 - 下载完成后按顺序合并、校验、解压，并使用上游 `docs/file-manifest.sha256` 做关键文件验证。
 - 运行包排除模型、输入/输出素材、历史、缓存、临时文件和 API Key；包含上游许可证、启动器、Python、ComfyUI、节点和 ffprobe。
 
