@@ -1,33 +1,27 @@
 // @vitest-environment node
 
-import { describe, expect, test, vi } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import {
   decryptSecret,
   encryptSecret,
   type SecretCipher,
 } from '../../src/main/secrets';
 
-const { defaultCipher } = vi.hoisted(() => {
-  const prefix = Buffer.from('test-cipher-v1\0');
-  const transform = (value: Buffer) =>
-    Buffer.from(value.map((byte) => byte ^ 0x5a));
+const prefix = Buffer.from('test-cipher-v1\0');
+const transform = (value: Buffer) =>
+  Buffer.from(value.map((byte) => byte ^ 0x5a));
 
-  return {
-    defaultCipher: {
-      isEncryptionAvailable: () => true,
-      encryptString: (value: string) =>
-        Buffer.concat([prefix, transform(Buffer.from(value, 'utf8'))]),
-      decryptString: (value: Buffer) => {
-        if (!value.subarray(0, prefix.length).equals(prefix)) {
-          throw new Error('Invalid test ciphertext');
-        }
-        return transform(value.subarray(prefix.length)).toString('utf8');
-      },
-    },
-  };
-});
-
-vi.mock('electron', () => ({ safeStorage: defaultCipher }));
+const defaultCipher: SecretCipher = {
+  isEncryptionAvailable: () => true,
+  encryptString: (value: string) =>
+    Buffer.concat([prefix, transform(Buffer.from(value, 'utf8'))]),
+  decryptString: (value: Buffer) => {
+    if (!value.subarray(0, prefix.length).equals(prefix)) {
+      throw new Error('Invalid test ciphertext');
+    }
+    return transform(value.subarray(prefix.length)).toString('utf8');
+  },
+};
 
 const PLAINTEXT = 'sk-test-never-store-in-plaintext';
 
@@ -38,7 +32,7 @@ function createCipher(available = true): SecretCipher {
   };
 }
 
-describe('safeStorage secrets', () => {
+describe('Windows DPAPI secrets', () => {
   test('roundtrips a secret without plaintext in the encoded or decoded ciphertext', () => {
     const cipher = createCipher();
 
@@ -49,9 +43,11 @@ describe('safeStorage secrets', () => {
     expect(decryptSecret(encrypted, cipher)).toBe(PLAINTEXT);
   });
 
-  test('uses the default Electron safeStorage cipher for roundtrip', () => {
+  test('uses the default Windows DPAPI cipher for roundtrip', () => {
     const encrypted = encryptSecret(PLAINTEXT);
 
+    expect(encrypted).not.toContain(PLAINTEXT);
+    expect(Buffer.from(encrypted, 'base64').toString('utf8')).not.toContain(PLAINTEXT);
     expect(decryptSecret(encrypted)).toBe(PLAINTEXT);
   });
 
