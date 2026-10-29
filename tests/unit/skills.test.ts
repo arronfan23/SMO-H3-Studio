@@ -435,9 +435,31 @@ describe('SkillsService polish validation and repair', () => {
     expect(llm.calls[1].messages.some((message) => message.role === 'assistant')).toBe(false);
   });
 
-  test('throws after a second invalid result and preserves the original text', async () => {
+  test('requests a second correction and returns the final text', async () => {
+    const valid = basePrompt();
+    const llm = new FakeChatCompletion(['summary: invalid', 'still invalid', valid]);
+    const service = new SkillsService(llm);
+
+    const result = await service.polish(profile, {
+      text: 'A quiet studio shot.',
+      duration: 8,
+      skill: 'h3-prompt-writing',
+    });
+
+    expect(result.attempts).toBe(3);
+    expect(result.text).toBe(valid);
+    expect(llm.calls).toHaveLength(3);
+    expect(llm.calls[2].messages.at(-1)?.content).toContain('Missing required fields:');
+    expect(llm.calls[2].messages.some((message) => message.role === 'assistant')).toBe(false);
+  });
+
+  test('throws after two invalid repairs and preserves the original text', async () => {
     const original = 'A quiet studio shot with the original wording preserved.';
-    const llm = new FakeChatCompletion(['invalid draft one', 'invalid draft two']);
+    const llm = new FakeChatCompletion([
+      'invalid draft one',
+      'invalid draft two',
+      'invalid draft three',
+    ]);
     const service = new SkillsService(llm);
 
     const error = await service
@@ -452,9 +474,10 @@ describe('SkillsService polish validation and repair', () => {
       throw new Error('Expected PromptPolishError');
     }
     expect(error.originalText).toBe(original);
-    expect(error.attempts).toBe(2);
+    expect(error.attempts).toBe(3);
     expect(error.issues.length).toBeGreaterThan(0);
-    expect(llm.calls).toHaveLength(2);
+    expect(error.message).toContain('after 2 repairs');
+    expect(llm.calls).toHaveLength(3);
   });
 
   test('rejects a local path supplied as a reference label before any request', async () => {

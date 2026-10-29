@@ -85,7 +85,7 @@ export class PromptPolishError extends Error {
     issues: readonly string[],
   ) {
     super(
-      `H3 prompt still violates the output contract after one repair: ${issues.join('; ')}`,
+      `H3 prompt still violates the output contract after 2 repairs: ${issues.join('; ')}`,
     );
     this.name = 'PromptPolishError';
     this.issues = [...issues];
@@ -511,7 +511,7 @@ export class SkillsService {
       completeSilence,
     );
 
-    if (issues.length > 0) {
+    while (issues.length > 0 && attempts < 3) {
       const repairMessages: LlmChatMessage[] = [
         ...messages,
         {
@@ -522,7 +522,7 @@ export class SkillsService {
             `Do not repeat the previous invalid draft. Problems: ${issues.join('; ')}`,
         },
       ];
-      attempts = 2;
+      attempts += 1;
       text = (
         await this.llm.chatCompletion(profile, repairMessages, GENERATION_MAX_TOKENS)
       ).trim();
@@ -533,9 +533,10 @@ export class SkillsService {
         request.text,
         completeSilence,
       );
-      if (issues.length > 0) {
-        throw new PromptPolishError(request.text, attempts, issues);
-      }
+    }
+
+    if (issues.length > 0) {
+      throw new PromptPolishError(request.text, attempts, issues);
     }
 
     return { text, skill, mode, attempts };
