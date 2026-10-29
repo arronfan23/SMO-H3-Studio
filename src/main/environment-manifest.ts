@@ -11,6 +11,7 @@ const BYTES_PER_GIB = 1024 ** 3;
 const MINIMUM_VRAM_GIB = 8;
 const MINIMUM_RAM_GIB = 32;
 export const ENVIRONMENT_VERIFICATION_TEMP_BYTES = 5 * BYTES_PER_GIB;
+const WINDOWS_DEVICE_NAME_PATTERN = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:[ .]|$)/i;
 
 const httpsUrlSchema = z.string().min(1).refine(
   (value) => {
@@ -34,15 +35,22 @@ const relativePathSchema = z.string().refine(
       value.trim() !== value ||
       value.includes('\0') ||
       value.includes('\\') ||
-      value.startsWith('/') ||
-      /^[a-zA-Z]:/.test(value)
+      value.includes(':') ||
+      value.startsWith('/')
     ) {
       return false;
     }
 
     return value
       .split('/')
-      .every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+      .every(
+        (segment) =>
+          segment.length > 0 &&
+          segment !== '.' &&
+          segment !== '..' &&
+          !/[. ]$/.test(segment) &&
+          !WINDOWS_DEVICE_NAME_PATTERN.test(segment),
+      );
   },
   { message: 'Path must be a safe relative path without traversal' },
 );
@@ -155,7 +163,7 @@ function selectRuntimeId(hardware: HardwareInfo): EnvironmentRuntimeId {
 
   const capability = hardware.cudaComputeCapability;
   if (capability === '8.6' || capability === '8.9') return 'sm89';
-  if (/^12\.\d+$/.test(capability)) return 'sm120';
+  if (capability === '12.0') return 'sm120';
 
   throw new Error(`unsupported CUDA architecture (compute capability ${capability})`);
 }

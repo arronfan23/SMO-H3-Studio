@@ -170,6 +170,12 @@ describe('environment manifest', () => {
         manifest.runtimes.sm89.launchScript = value;
       },
     },
+    {
+      name: 'ZIP ffprobe path',
+      mutate: (manifest, value) => {
+        manifest.runtimes.sm89.ffprobePath = value;
+      },
+    },
   ];
   const unsafePaths = [
     '/absolute/path',
@@ -180,6 +186,25 @@ describe('environment manifest', () => {
     '../escape',
     '..\\escape',
     'models/../../escape',
+    'file.txt:stream',
+    'models/file.txt:stream',
+    'models./file.safetensors',
+    'models/file.',
+    'models /file.safetensors',
+    'models/file ',
+    'CON',
+    'con',
+    'models/PRN.safetensors',
+    'models/AUX',
+    'models/NUL.txt',
+    'models/nul.txt',
+    'models/COM1',
+    'models/com9.safetensors',
+    'models/LPT1',
+    'models/lpt9.safetensors',
+    'models/NUL .txt',
+    'models/NUL..txt',
+    'models/CON ./file',
   ];
   const pathCases = pathTargets.flatMap((target) =>
     unsafePaths.map((path) => ({ ...target, path })),
@@ -236,7 +261,6 @@ describe('hardware-aware environment selection', () => {
     { gpu: 'NVIDIA GeForce RTX 3060', cc: '8.6', runtime: 'sm89' },
     { gpu: 'NVIDIA GeForce RTX 4090', cc: '8.9', runtime: 'sm89' },
     { gpu: 'NVIDIA GeForce RTX 5090', cc: '12.0', runtime: 'sm120' },
-    { gpu: 'NVIDIA GeForce RTX 5090', cc: '12.8', runtime: 'sm120' },
   ])('selects $runtime for $gpu with CC $cc', ({ gpu, cc, runtime }) => {
     const selection = selectEnvironmentProfile(
       rawManifest,
@@ -246,7 +270,20 @@ describe('hardware-aware environment selection', () => {
     expect(selection.runtime.id).toBe(runtime);
   });
 
-  test.each(['7.5', '8.0', '8.7', '8.60', '9.0', '11.0', '13.0', '12', '12.x'])(
+  test.each([
+    '7.5',
+    '8.0',
+    '8.7',
+    '8.60',
+    '9.0',
+    '11.0',
+    '12',
+    '12.x',
+    '12.1',
+    '12.8',
+    '12.9',
+    '13.0',
+  ])(
     'rejects unsupported CUDA compute capability %s',
     (cudaComputeCapability) => {
       expect(() =>
