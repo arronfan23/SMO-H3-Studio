@@ -57,6 +57,7 @@ video:focus-visible {
 .app-frame {
   display: flex;
   flex-direction: column;
+  position: relative;
   height: 100dvh;
   overflow: hidden;
   background: #f2f5f2;
@@ -65,6 +66,83 @@ video:focus-visible {
 
 body[data-window-maximized='true'] .app-frame {
   border-radius: 0;
+}
+
+.window-resize-handle {
+  position: absolute;
+  z-index: 40;
+  background: transparent;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  touch-action: none;
+}
+
+body[data-window-maximized='true'] .window-resize-handle {
+  display: none;
+}
+
+.window-resize-n {
+  top: 0;
+  left: 16px;
+  right: 16px;
+  height: 8px;
+  cursor: n-resize;
+}
+
+.window-resize-s {
+  bottom: 0;
+  left: 16px;
+  right: 16px;
+  height: 8px;
+  cursor: s-resize;
+}
+
+.window-resize-e {
+  top: 16px;
+  bottom: 16px;
+  right: 0;
+  width: 8px;
+  cursor: e-resize;
+}
+
+.window-resize-w {
+  top: 16px;
+  bottom: 16px;
+  left: 0;
+  width: 8px;
+  cursor: w-resize;
+}
+
+.window-resize-ne {
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  cursor: ne-resize;
+}
+
+.window-resize-nw {
+  top: 0;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nw-resize;
+}
+
+.window-resize-se {
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: se-resize;
+}
+
+.window-resize-sw {
+  bottom: 0;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  cursor: sw-resize;
 }
 
 .window-titlebar {
@@ -105,6 +183,8 @@ body[data-window-maximized='true'] .app-frame {
 
 .titlebar-controls {
   display: flex;
+  position: relative;
+  z-index: 50;
   flex: 0 0 auto;
 }
 

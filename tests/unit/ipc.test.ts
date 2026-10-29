@@ -1185,9 +1185,12 @@ describe('preload API', () => {
       'selectImage',
     ]);
     expect(Object.keys(api.window).sort()).toEqual([
+      'beginResize',
       'close',
+      'endResize',
       'isMaximized',
       'minimize',
+      'resize',
       'toggleMaximize',
     ]);
 
@@ -1375,6 +1378,21 @@ describe('preload API', () => {
       channel: 'window:is-maximized',
       payload: {},
       call: (smo: SmoApi) => smo.window.isMaximized(),
+    },
+    {
+      channel: 'window:begin-resize',
+      payload: { direction: 'se' },
+      call: (smo: SmoApi) => smo.window.beginResize('se'),
+    },
+    {
+      channel: 'window:resize',
+      payload: { direction: 'n' },
+      call: (smo: SmoApi) => smo.window.resize('n'),
+    },
+    {
+      channel: 'window:end-resize',
+      payload: {},
+      call: (smo: SmoApi) => smo.window.endResize(),
     },
   ])('maps $channel without exposing a generic invoke method', async ({ channel, payload, call }) => {
     await call(api);

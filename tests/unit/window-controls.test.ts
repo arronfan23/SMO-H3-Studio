@@ -10,7 +10,10 @@ const { ipcMainHandle, ipcMainRemoveHandler } = vi.hoisted(() => ({
 vi.mock('electron', () => ({
   ipcMain: { handle: ipcMainHandle, removeHandler: ipcMainRemoveHandler },
   screen: {
-    getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }),
+    getPrimaryDisplay: () => ({
+      workArea: { x: 0, y: 0, width: 1920, height: 1080 },
+    }),
+    getCursorScreenPoint: () => ({ x: 0, y: 0 }),
   },
 }));
 
@@ -47,6 +50,7 @@ function createWindowStub() {
     setBounds: vi.fn((bounds: WindowBounds) => {
       state.bounds = { ...bounds };
     }),
+    getMinimumSize: vi.fn(() => [960, 640]),
     once: vi.fn((event: string, listener: () => void) => {
       listeners.set(event, [...(listeners.get(event) ?? []), listener]);
     }),
@@ -80,22 +84,37 @@ function createHarness(options: WindowControlsOptions = {}) {
   return { windowStub, handlers, invoke };
 }
 
+function createScreenMock() {
+  const state = {
+    cursor: { x: 0, y: 0 },
+    workArea: { x: 0, y: 0, width: 2194, height: 1176 },
+  };
+  return {
+    state,
+    getPrimaryDisplay: vi.fn(() => ({ workArea: state.workArea })),
+    getCursorScreenPoint: vi.fn(() => ({ ...state.cursor })),
+  };
+}
+
 beforeEach(() => {
   ipcMainHandle.mockClear();
   ipcMainRemoveHandler.mockClear();
 });
 
 describe('window controls IPC', () => {
-  test('registers exactly the four whitelisted channels', () => {
+  test('registers exactly the seven whitelisted channels', () => {
     const { handlers } = createHarness();
 
     expect([...handlers.keys()].sort()).toEqual(
       [...WINDOW_CONTROL_CHANNELS].sort(),
     );
     expect([...WINDOW_CONTROL_CHANNELS].sort()).toEqual([
+      'window:begin-resize',
       'window:close',
+      'window:end-resize',
       'window:is-maximized',
       'window:minimize',
+      'window:resize',
       'window:toggle-maximize',
     ]);
   });
@@ -173,9 +192,168 @@ describe('window controls IPC', () => {
   });
 });
 
+describe('window resize sessions', () => {
+  test('rejects invalid directions and extra payload fields', async () => {
+    const { invoke } = createHarness({ screen: createScreenMock() });
+
+    await expect(
+      invoke('window:begin-resize', { direction: 'diagonal' }),
+    ).rejects.toThrow();
+    await expect(
+      invoke('window:begin-resize', { direction: 'e', speed: 2 }),
+    ).rejects.toThrow();
+    await expect(invoke('window:resize', { direction: '' })).rejects.toThrow();
+    await expect(invoke('window:end-resize', { force: true })).rejects.toThrow();
+  });
+
+  test('rejects resize channels from a foreign webContents', async () => {
+    const { invoke } = createHarness({ screen: createScreenMock() });
+
+    for (const [channel, payload] of [
+      ['window:begin-resize', { direction: 'e' }],
+      ['window:resize', { direction: 'e' }],
+      ['window:end-resize', {}],
+    ] as const) {
+      await expect(invoke(channel, payload, { id: 999 })).rejects.toThrow(
+        /unauthorized|sender/i,
+      );
+    }
+  });
+
+  test.each([
+    {
+      direction: 'e',
+      cursor: { x: 560, y: 410 },
+      expected: { x: 120, y: 80, width: 1340, height: 820 },
+    },
+    {
+      direction: 'w',
+      cursor: { x: 560, y: 410 },
+      expected: { x: 180, y: 80, width: 1220, height: 820 },
+    },
+    {
+      direction: 'n',
+      cursor: { x: 500, y: 450 },
+      expected: { x: 120, y: 130, width: 1280, height: 770 },
+    },
+    {
+      direction: 'se',
+      cursor: { x: 600, y: 450 },
+      expected: { x: 120, y: 80, width: 1380, height: 870 },
+    },
+  ])(
+    'resizes from the $direction edge using physical cursor deltas',
+    async ({ direction, cursor, expected }) => {
+      const screen = createScreenMock();
+      const { windowStub, invoke } = createHarness({ screen });
+
+      screen.state.cursor = { x: 500, y: 400 };
+      await expect(
+        invoke('window:begin-resize', { direction }),
+      ).resolves.toBe(true);
+
+      screen.state.cursor = cursor;
+      await expect(invoke('window:resize', { direction })).resolves.toBeUndefined();
+      expect(windowStub.setBounds).toHaveBeenLastCalledWith(expected);
+
+      await invoke('window:end-resize');
+    },
+  );
+
+  test('clamps the west edge to the minimum width and anchors the right edge', async () => {
+    const screen = createScreenMock();
+    const { windowStub, invoke } = createHarness({ screen });
+
+    screen.state.cursor = { x: 500, y: 400 };
+    await invoke('window:begin-resize', { direction: 'w' });
+
+    // Dragging 500px right would shrink 1280 below the 960 minimum.
+    screen.state.cursor = { x: 1000, y: 400 };
+    await invoke('window:resize', { direction: 'w' });
+
+    expect(windowStub.setBounds).toHaveBeenLastCalledWith({
+      x: 440,
+      y: 80,
+      width: 960,
+      height: 820,
+    });
+    // Right edge stays at 120 + 1280 = 1400.
+    expect(440 + 960).toBe(1400);
+  });
+
+  test('clamps the north edge to the minimum height and anchors the bottom edge', async () => {
+    const screen = createScreenMock();
+    const { windowStub, invoke } = createHarness({ screen });
+
+    screen.state.cursor = { x: 500, y: 400 };
+    await invoke('window:begin-resize', { direction: 'n' });
+
+    screen.state.cursor = { x: 500, y: 700 };
+    await invoke('window:resize', { direction: 'n' });
+
+    expect(windowStub.setBounds).toHaveBeenLastCalledWith({
+      x: 120,
+      y: 260,
+      width: 1280,
+      height: 640,
+    });
+    // Bottom edge stays at 80 + 820 = 900.
+    expect(260 + 640).toBe(900);
+  });
+
+  test('refuses to begin a resize while maximized', async () => {
+    const screen = createScreenMock();
+    const { invoke } = createHarness({ screen });
+
+    await invoke('window:toggle-maximize');
+    await expect(
+      invoke('window:begin-resize', { direction: 'se' }),
+    ).resolves.toBe(false);
+  });
+
+  test('refuses a second session and frees the session on end-resize', async () => {
+    const screen = createScreenMock();
+    const { invoke } = createHarness({ screen });
+
+    await expect(
+      invoke('window:begin-resize', { direction: 'e' }),
+    ).resolves.toBe(true);
+    await expect(
+      invoke('window:begin-resize', { direction: 'w' }),
+    ).resolves.toBe(false);
+
+    await invoke('window:end-resize');
+    await expect(
+      invoke('window:begin-resize', { direction: 'w' }),
+    ).resolves.toBe(true);
+  });
+
+  test('resize without an active session is a no-op', async () => {
+    const screen = createScreenMock();
+    const { windowStub, invoke } = createHarness({ screen });
+
+    await expect(
+      invoke('window:resize', { direction: 'e' }),
+    ).resolves.toBeUndefined();
+    expect(windowStub.setBounds).not.toHaveBeenCalled();
+  });
+
+  test('clears the session when the window is closed', async () => {
+    const screen = createScreenMock();
+    const { windowStub, invoke } = createHarness({ screen });
+
+    await invoke('window:begin-resize', { direction: 'e' });
+    windowStub.emitClosed();
+
+    expect(
+      ipcMainRemoveHandler.mock.calls.map(([channel]) => channel).sort(),
+    ).toEqual([...WINDOW_CONTROL_CHANNELS].sort());
+  });
+});
+
 describe('transparent window work-area maximization', () => {
-  const workArea: WindowBounds = { x: 0, y: 0, width: 2194, height: 1176 };
-  const screen = { getPrimaryDisplay: vi.fn(() => ({ workArea })) };
+  const screen = createScreenMock();
+  const workArea = screen.state.workArea;
   const options: WindowControlsOptions = { transparent: true, screen };
 
   beforeEach(() => {

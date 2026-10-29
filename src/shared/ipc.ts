@@ -18,6 +18,18 @@ import type {
 
 export { SKILL_NAMES } from './skills';
 
+export const WINDOW_RESIZE_DIRECTIONS = [
+  'n',
+  's',
+  'e',
+  'w',
+  'ne',
+  'nw',
+  'se',
+  'sw',
+] as const;
+export type WindowResizeDirection = (typeof WINDOW_RESIZE_DIRECTIONS)[number];
+
 export const IPC_CHANNELS = [
   'jobs:start',
   'jobs:retry',
@@ -327,5 +339,8 @@ export interface SmoApi {
     toggleMaximize(): Promise<boolean>;
     close(): Promise<void>;
     isMaximized(): Promise<boolean>;
+    beginResize(direction: WindowResizeDirection): Promise<boolean>;
+    resize(direction: WindowResizeDirection): Promise<void>;
+    endResize(): Promise<void>;
   };
 }

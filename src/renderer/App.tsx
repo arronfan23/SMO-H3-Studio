@@ -5,6 +5,7 @@ import type { Avatar } from '../shared/types';
 import { AvatarsPage } from './AvatarsPage';
 import { SettingsPage } from './SettingsPage';
 import { StudioPage } from './StudioPage';
+import { WindowResizeHandles } from './WindowResizeHandles';
 import { WindowTitlebar } from './WindowTitlebar';
 import { WorksPage } from './WorksPage';
 import { errorMessage } from './ui';
@@ -74,6 +75,7 @@ export function App() {
   return (
     <div className="app-frame">
       <WindowTitlebar />
+      <WindowResizeHandles />
       <div className="app-shell">
         <aside className="sidebar">
           <div className="brand-lockup">

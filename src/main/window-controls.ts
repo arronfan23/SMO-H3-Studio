@@ -1,14 +1,26 @@
 import { ipcMain, screen as electronScreen } from 'electron';
 import { z } from 'zod';
+import {
+  WINDOW_RESIZE_DIRECTIONS,
+  type WindowResizeDirection,
+} from '../shared/ipc';
 
 export const WINDOW_CONTROL_CHANNELS = [
   'window:minimize',
   'window:toggle-maximize',
   'window:close',
   'window:is-maximized',
+  'window:begin-resize',
+  'window:resize',
+  'window:end-resize',
 ] as const;
 
 type WindowControlChannel = (typeof WINDOW_CONTROL_CHANNELS)[number];
+
+export interface WindowPoint {
+  x: number;
+  y: number;
+}
 
 export interface WindowBounds {
   x: number;
@@ -28,11 +40,13 @@ export interface WindowControlsTarget {
   isDestroyed(): boolean;
   getBounds(): WindowBounds;
   setBounds(bounds: WindowBounds): void;
+  getMinimumSize(): number[];
   once(event: 'closed', listener: () => void): unknown;
 }
 
 export interface WindowControlsScreen {
   getPrimaryDisplay(): { workArea: WindowBounds };
+  getCursorScreenPoint(): WindowPoint;
 }
 
 export interface WindowControlsOptions {
@@ -41,6 +55,15 @@ export interface WindowControlsOptions {
 }
 
 const emptyPayload = z.object({}).strict();
+const resizePayload = z
+  .object({ direction: z.enum(WINDOW_RESIZE_DIRECTIONS) })
+  .strict();
+
+interface ResizeSession {
+  direction: WindowResizeDirection;
+  startCursor: WindowPoint;
+  startBounds: WindowBounds;
+}
 
 export function registerWindowControls(
   window: WindowControlsTarget,
@@ -54,6 +77,7 @@ export function registerWindowControls(
   const screen = options.screen ?? electronScreen;
   let customMaximized = false;
   let savedBounds: WindowBounds | null = null;
+  let resizeSession: ResizeSession | null = null;
 
   const isMaximized = (): boolean =>
     useWorkAreaMaximize ? customMaximized : window.isMaximized();
@@ -81,30 +105,78 @@ export function registerWindowControls(
     return customMaximized;
   };
 
-  const register = (
+  const register = <P>(
     channel: WindowControlChannel,
-    action: () => unknown,
+    schema: z.ZodType<P>,
+    action: (payload: P) => unknown,
   ): void => {
-    ipcMain.handle(channel, (event, payload: unknown) => {
+    ipcMain.handle(channel, (event, rawPayload: unknown) => {
       if (event.sender !== window.webContents) {
         throw new Error(`Rejected ${channel} from an unauthorized sender`);
       }
-      emptyPayload.parse(payload);
+      const payload = schema.parse(rawPayload);
       if (window.isDestroyed()) {
         throw new Error('Window is already destroyed');
       }
-      return action();
+      return action(payload);
     });
   };
 
-  register('window:minimize', () => window.minimize());
-  register('window:toggle-maximize', toggleMaximize);
-  register('window:close', () => window.close());
-  register('window:is-maximized', isMaximized);
+  register('window:minimize', emptyPayload, () => window.minimize());
+  register('window:toggle-maximize', emptyPayload, toggleMaximize);
+  register('window:close', emptyPayload, () => window.close());
+  register('window:is-maximized', emptyPayload, isMaximized);
+
+  register('window:begin-resize', resizePayload, ({ direction }) => {
+    if (resizeSession !== null || isMaximized()) {
+      return false;
+    }
+    resizeSession = {
+      direction,
+      startCursor: screen.getCursorScreenPoint(),
+      startBounds: window.getBounds(),
+    };
+    return true;
+  });
+
+  register('window:resize', resizePayload, () => {
+    if (resizeSession === null) {
+      return undefined;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const dx = cursor.x - resizeSession.startCursor.x;
+    const dy = cursor.y - resizeSession.startCursor.y;
+    const [minWidth, minHeight] = window.getMinimumSize();
+    const start = resizeSession.startBounds;
+    const next: WindowBounds = { ...start };
+    const direction = resizeSession.direction;
+    if (direction.includes('e')) {
+      next.width = Math.max(minWidth, start.width + dx);
+    }
+    if (direction.includes('s')) {
+      next.height = Math.max(minHeight, start.height + dy);
+    }
+    if (direction.includes('w')) {
+      // Anchor the right edge: width clamps first, then x follows.
+      next.width = Math.max(minWidth, start.width - dx);
+      next.x = start.x + (start.width - next.width);
+    }
+    if (direction.includes('n')) {
+      next.height = Math.max(minHeight, start.height - dy);
+      next.y = start.y + (start.height - next.height);
+    }
+    window.setBounds(next);
+    return undefined;
+  });
+
+  register('window:end-resize', emptyPayload, () => {
+    resizeSession = null;
+  });
 
   window.once('closed', () => {
     customMaximized = false;
     savedBounds = null;
+    resizeSession = null;
     for (const channel of WINDOW_CONTROL_CHANNELS) {
       ipcMain.removeHandler(channel);
     }
