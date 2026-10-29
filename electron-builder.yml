@@ -2,6 +2,7 @@ appId: com.smo.h3studio
 productName: SMO.H3 Studio
 directories:
   output: release
+npmRebuild: false
 files:
   - dist/**
 extraResources:
