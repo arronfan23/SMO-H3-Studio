@@ -183,7 +183,7 @@ describe('window controls IPC', () => {
     expect(windowStub.setBounds).not.toHaveBeenCalled();
   });
 
-  test('removes all four handlers once the window is closed', () => {
+  test('removes all seven handlers once the window is closed', () => {
     const { windowStub } = createHarness();
 
     windowStub.emitClosed();

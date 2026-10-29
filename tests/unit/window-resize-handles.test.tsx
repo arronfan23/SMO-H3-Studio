@@ -175,4 +175,81 @@ describe('WindowResizeHandles', () => {
     expect(bridge.resize).not.toHaveBeenCalled();
     expect(bridge.endResize).toHaveBeenCalledTimes(1);
   });
+
+  test('ignores a second pointer while the first owns the session', async () => {
+    const { container } = render(<WindowResizeHandles />);
+    const se = container.querySelector('.window-resize-se')!;
+    const nw = container.querySelector('.window-resize-nw')!;
+
+    fireEvent.pointerDown(se, {
+      pointerId: 1,
+      button: 0,
+      screenX: 10,
+      screenY: 10,
+    });
+    await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(1));
+
+    // The second pointer never begins, resizes, or ends anything.
+    fireEvent.pointerDown(nw, {
+      pointerId: 2,
+      button: 0,
+      screenX: 20,
+      screenY: 20,
+    });
+    fireEvent.pointerMove(nw, { pointerId: 2, screenX: 30, screenY: 30 });
+    fireEvent.pointerUp(nw, { pointerId: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.beginResize).toHaveBeenCalledTimes(1);
+    expect(bridge.resize).not.toHaveBeenCalled();
+    expect(bridge.endResize).not.toHaveBeenCalled();
+
+    // The owner still drags and ends normally.
+    fireEvent.pointerMove(se, { pointerId: 1, screenX: 40, screenY: 50 });
+    await waitFor(() =>
+      expect(bridge.resize).toHaveBeenCalledWith('se', { x: 40, y: 50 }),
+    );
+    fireEvent.pointerUp(se, { pointerId: 1 });
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+  });
+
+  test('a stale begin resolve never cancels the newer session', async () => {
+    const resolvers: Array<(begun: boolean) => void> = [];
+    bridge.beginResize.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const { container } = render(<WindowResizeHandles />);
+    const handle = container.querySelector('.window-resize-se')!;
+
+    // First operation: released while its begin is still pending.
+    fireEvent.pointerDown(handle, { pointerId: 1, button: 0 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+
+    // Second operation starts before the first begin resolves.
+    fireEvent.pointerDown(handle, { pointerId: 2, button: 0 });
+    await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(2));
+
+    // The stale resolve must neither end the new session nor arm dragging.
+    resolvers[0](true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.endResize).toHaveBeenCalledTimes(1);
+    fireEvent.pointerMove(handle, { pointerId: 2, screenX: 30, screenY: 40 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.resize).not.toHaveBeenCalled();
+
+    // The current begin resolves; pointer 2 now owns a live session that
+    // drags and ends exactly once.
+    resolvers[1](true);
+    // Flush the resolve microtask so the session is armed before moving.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.pointerMove(handle, { pointerId: 2, screenX: 50, screenY: 60 });
+    await waitFor(() =>
+      expect(bridge.resize).toHaveBeenCalledWith('se', { x: 50, y: 60 }),
+    );
+    fireEvent.pointerUp(handle, { pointerId: 2 });
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(2));
+  });
 });
