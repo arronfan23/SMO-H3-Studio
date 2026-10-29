@@ -481,6 +481,12 @@ export class ComfyClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ delete: [promptId] }),
       });
+      // Close the check-then-act window: the delete may race a promotion to
+      // running, which would otherwise leave an orphaned execution.
+      const afterDelete = parseQueueIds(await this.requestJson('queue'));
+      if (afterDelete.running.includes(promptId)) {
+        await this.request('interrupt', { method: 'POST' });
+      }
       return;
     }
     if (snapshot.running.includes(promptId)) {
@@ -527,6 +533,7 @@ export class ComfyClient {
       let lastUpdate: ComfyExecutionUpdate | undefined;
       let lastFrame: ComfyProgress | undefined;
       let missingReconciliations = 0;
+      let reconcileFailures = 0;
       let cleanupPromise: Promise<void> | undefined;
 
       const onAbort = () => {
@@ -622,6 +629,8 @@ export class ComfyClient {
           if (settled) {
             return;
           }
+          // Both snapshots parsed: the transient failure streak is over.
+          reconcileFailures = 0;
           if (completion?.kind === 'success') {
             emitUpdate({ stage: 'finalizing' });
             finish();
@@ -667,12 +676,18 @@ export class ComfyClient {
             return;
           }
         } catch (error) {
-          finish(
-            error instanceof Error
-              ? error
-              : new Error('Could not reconcile ComfyUI execution state'),
-          );
-          return;
+          // A single timed-out or 500-ing poll must not kill a healthy run:
+          // only the third consecutive reconciliation failure settles.
+          // Failed polls never refresh the inactivity budget.
+          reconcileFailures += 1;
+          if (reconcileFailures >= 3) {
+            finish(
+              error instanceof Error
+                ? error
+                : new Error('Could not reconcile ComfyUI execution state'),
+            );
+            return;
+          }
         }
         if (!stopped && !settled) {
           reconcileTimer = setTimeout(() => {
@@ -716,6 +731,8 @@ export class ComfyClient {
             if (payload.prompt_id !== promptId) {
               return;
             }
+            // Live frames prove the prompt still exists; drop any miss strikes.
+            missingReconciliations = 0;
             if (
               typeof payload.value !== 'number' ||
               !Number.isFinite(payload.value) ||
@@ -749,6 +766,7 @@ export class ComfyClient {
           case 'execution_start':
           case 'executing':
             if (isRecord(payload) && payload.prompt_id === promptId) {
+              missingReconciliations = 0;
               emitUpdate({ stage: 'executing', queuePosition: 0 });
             }
             return;
@@ -784,6 +802,7 @@ export class ComfyClient {
             }
             const completion = parseHistoryCompletion(value, promptId);
             if (completion?.kind === 'success') {
+              emitUpdate({ stage: 'finalizing' });
               finish();
             } else if (completion?.kind === 'failure') {
               finish(completion.error);
