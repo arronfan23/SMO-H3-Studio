@@ -3,6 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import {
   WINDOW_RESIZE_DIRECTIONS,
   type WindowResizeDirection,
+  type WindowScreenPoint,
 } from '../shared/ipc';
 
 function windowBridge(): Window['smo']['window'] | undefined {
@@ -34,11 +35,13 @@ function releasePointer(target: Element | null, pointerId: number): void {
   }
 }
 
-// Invisible edge hot zones driving main-process resizing. Physical cursor
-// positions come from screen.getCursorScreenPoint() in the main process, so
-// fractional-DPI drift in React clientX/Y never reaches the window bounds.
+// Invisible edge hot zones driving main-process resizing. Each pointer event
+// reports screenX/screenY (screen DIPs, the same space as Electron window
+// bounds), so fractional-DPI drift in clientX/Y never reaches the bounds and
+// synthetic input works without moving the real OS cursor.
 export function WindowResizeHandles() {
   const activeDirection = useRef<WindowResizeDirection | null>(null);
+  const latestCursor = useRef<WindowScreenPoint | null>(null);
   const framePending = useRef(false);
 
   const handlePointerDown =
@@ -53,8 +56,9 @@ export function WindowResizeHandles() {
       }
       const target = event.currentTarget;
       capturePointer(target, event.pointerId);
+      latestCursor.current = { x: event.screenX, y: event.screenY };
       void bridge
-        .beginResize(direction)
+        .beginResize(direction, latestCursor.current)
         .then((begun) => {
           if (begun) {
             activeDirection.current = direction;
@@ -67,7 +71,10 @@ export function WindowResizeHandles() {
         });
     };
 
-  const handlePointerMove = (): void => {
+  const handlePointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ): void => {
+    latestCursor.current = { x: event.screenX, y: event.screenY };
     if (activeDirection.current === null || framePending.current) {
       return;
     }
@@ -76,7 +83,9 @@ export function WindowResizeHandles() {
       framePending.current = false;
       const direction = activeDirection.current;
       if (direction !== null) {
-        void windowBridge()?.resize(direction).catch(() => undefined);
+        void windowBridge()
+          ?.resize(direction, latestCursor.current ?? undefined)
+          .catch(() => undefined);
       }
     });
   };
@@ -86,6 +95,7 @@ export function WindowResizeHandles() {
       return;
     }
     activeDirection.current = null;
+    latestCursor.current = null;
     releasePointer(event.currentTarget, event.pointerId);
     void windowBridge()?.endResize().catch(() => undefined);
   };

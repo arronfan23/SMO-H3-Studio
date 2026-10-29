@@ -30,6 +30,13 @@ export const WINDOW_RESIZE_DIRECTIONS = [
 ] as const;
 export type WindowResizeDirection = (typeof WINDOW_RESIZE_DIRECTIONS)[number];
 
+// Pointer position in screen DIPs, reported by the renderer during a resize
+// drag. Matches the coordinate space Electron uses for window bounds.
+export interface WindowScreenPoint {
+  x: number;
+  y: number;
+}
+
 export const IPC_CHANNELS = [
   'jobs:start',
   'jobs:retry',
@@ -339,8 +346,14 @@ export interface SmoApi {
     toggleMaximize(): Promise<boolean>;
     close(): Promise<void>;
     isMaximized(): Promise<boolean>;
-    beginResize(direction: WindowResizeDirection): Promise<boolean>;
-    resize(direction: WindowResizeDirection): Promise<void>;
+    beginResize(
+      direction: WindowResizeDirection,
+      cursor?: WindowScreenPoint,
+    ): Promise<boolean>;
+    resize(
+      direction: WindowResizeDirection,
+      cursor?: WindowScreenPoint,
+    ): Promise<void>;
     endResize(): Promise<void>;
   };
 }

@@ -918,4 +918,62 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     });
     await expect(page!.locator('.app-shell')).toBeVisible();
   });
+
+  test('window resize handle grows the transparent window', async () => {
+    await expect(page!.locator('.app-shell')).toBeVisible();
+    await setViewport(app!, page!, 1280, 820);
+
+    const handle = page!.locator('.window-resize-se');
+    await expect(handle).toBeVisible();
+    const box = await handle.boundingBox();
+    expect(box).not.toBeNull();
+
+    const readBounds = () =>
+      app!.evaluate(({ BrowserWindow }) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        if (!win) {
+          throw new Error('No BrowserWindow found');
+        }
+        return win.getBounds();
+      });
+
+    const startBounds = await readBounds();
+    const centerX = box!.x + box!.width / 2;
+    const centerY = box!.y + box!.height / 2;
+
+    // Drag the south-east hot zone at least 30 px along both axes.
+    await page!.mouse.move(centerX, centerY);
+    await page!.mouse.down();
+    await page!.mouse.move(centerX + 15, centerY + 15, { steps: 3 });
+    await page!.mouse.move(centerX + 45, centerY + 45, { steps: 6 });
+    await page!.mouse.up();
+
+    // The resize IPC is rAF-throttled; poll until the main process applies it.
+    let resizedBounds = startBounds;
+    await expect
+      .poll(
+        async () => {
+          resizedBounds = await readBounds();
+          return Math.min(
+            resizedBounds.width - startBounds.width,
+            resizedBounds.height - startBounds.height,
+          );
+        },
+        { timeout: 5_000 },
+      )
+      .toBeGreaterThanOrEqual(20);
+
+    // Directional assertion only (fractional-DPI displays round to device
+    // pixels): se grows width/height while the top-left corner stays put.
+    expect(resizedBounds.width - startBounds.width).toBeGreaterThanOrEqual(20);
+    expect(resizedBounds.height - startBounds.height).toBeGreaterThanOrEqual(20);
+    expect(Math.abs(resizedBounds.x - startBounds.x)).toBeLessThanOrEqual(2);
+    expect(Math.abs(resizedBounds.y - startBounds.y)).toBeLessThanOrEqual(2);
+
+    // The session ended on pointerup: further hovers must not resize.
+    await page!.mouse.move(centerX + 80, centerY + 80, { steps: 5 });
+    await page!.waitForTimeout(250);
+    expect(await readBounds()).toEqual(resizedBounds);
+    await expect(page!.locator('.app-shell')).toBeVisible();
+  });
 });

@@ -46,9 +46,16 @@ const api: SmoApi = {
     toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize', {}),
     close: () => ipcRenderer.invoke('window:close', {}),
     isMaximized: () => ipcRenderer.invoke('window:is-maximized', {}),
-    beginResize: (direction) =>
-      ipcRenderer.invoke('window:begin-resize', { direction }),
-    resize: (direction) => ipcRenderer.invoke('window:resize', { direction }),
+    beginResize: (direction, cursor) =>
+      ipcRenderer.invoke(
+        'window:begin-resize',
+        cursor ? { direction, cursor } : { direction },
+      ),
+    resize: (direction, cursor) =>
+      ipcRenderer.invoke(
+        'window:resize',
+        cursor ? { direction, cursor } : { direction },
+      ),
     endResize: () => ipcRenderer.invoke('window:end-resize', {}),
   },
 };

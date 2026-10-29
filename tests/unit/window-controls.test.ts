@@ -260,6 +260,34 @@ describe('window resize sessions', () => {
     },
   );
 
+  test('prefers renderer-reported cursor positions over the OS cursor', async () => {
+    const screen = createScreenMock();
+    const { windowStub, invoke } = createHarness({ screen });
+
+    // Synthetic input (and a frozen OS cursor) still resizes when the
+    // renderer reports its own pointer coordinates in screen DIPs.
+    await expect(
+      invoke('window:begin-resize', {
+        direction: 'se',
+        cursor: { x: 500, y: 400 },
+      }),
+    ).resolves.toBe(true);
+
+    await invoke('window:resize', {
+      direction: 'se',
+      cursor: { x: 545, y: 445 },
+    });
+    expect(windowStub.setBounds).toHaveBeenLastCalledWith({
+      x: 120,
+      y: 80,
+      width: 1325,
+      height: 865,
+    });
+    expect(screen.getCursorScreenPoint).not.toHaveBeenCalled();
+
+    await invoke('window:end-resize');
+  });
+
   test('clamps the west edge to the minimum width and anchors the right edge', async () => {
     const screen = createScreenMock();
     const { windowStub, invoke } = createHarness({ screen });

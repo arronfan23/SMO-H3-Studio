@@ -56,7 +56,13 @@ export interface WindowControlsOptions {
 
 const emptyPayload = z.object({}).strict();
 const resizePayload = z
-  .object({ direction: z.enum(WINDOW_RESIZE_DIRECTIONS) })
+  .object({
+    direction: z.enum(WINDOW_RESIZE_DIRECTIONS),
+    // Renderer-reported pointer position in screen DIPs (same coordinate
+    // space as window bounds). Synthetic input never moves the OS cursor,
+    // so prefer this over screen.getCursorScreenPoint() when present.
+    cursor: z.object({ x: z.number(), y: z.number() }).strict().optional(),
+  })
   .strict();
 
 interface ResizeSession {
@@ -127,25 +133,25 @@ export function registerWindowControls(
   register('window:close', emptyPayload, () => window.close());
   register('window:is-maximized', emptyPayload, isMaximized);
 
-  register('window:begin-resize', resizePayload, ({ direction }) => {
+  register('window:begin-resize', resizePayload, ({ direction, cursor }) => {
     if (resizeSession !== null || isMaximized()) {
       return false;
     }
     resizeSession = {
       direction,
-      startCursor: screen.getCursorScreenPoint(),
+      startCursor: cursor ?? screen.getCursorScreenPoint(),
       startBounds: window.getBounds(),
     };
     return true;
   });
 
-  register('window:resize', resizePayload, () => {
+  register('window:resize', resizePayload, ({ cursor }) => {
     if (resizeSession === null) {
       return undefined;
     }
-    const cursor = screen.getCursorScreenPoint();
-    const dx = cursor.x - resizeSession.startCursor.x;
-    const dy = cursor.y - resizeSession.startCursor.y;
+    const point = cursor ?? screen.getCursorScreenPoint();
+    const dx = point.x - resizeSession.startCursor.x;
+    const dy = point.y - resizeSession.startCursor.y;
     const [minWidth, minHeight] = window.getMinimumSize();
     const start = resizeSession.startBounds;
     const next: WindowBounds = { ...start };
