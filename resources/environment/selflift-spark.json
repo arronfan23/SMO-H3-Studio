@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "runtimes": {
+    "sm89": {
+      "id": "sm89",
+      "displayName": "SM89 compatibility candidate (NVIDIA RTX 30/40 series)",
+      "archiveParts": [
+        {
+          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part1",
+          "path": "ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part1",
+          "size": 1900000000,
+          "sha256": "AEBC84D5367ECE8E241AE291C0F8CAEBF07E9E98E9B65855EE910AB08C739433"
+        },
+        {
+          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part2",
+          "path": "ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part2",
+          "size": 1900000000,
+          "sha256": "E39EE6FB3E3FCC518B3E895D505047DA16241FC420848662F526B0B3D72070FC"
+        },
+        {
+          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part3",
+          "path": "ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part3",
+          "size": 754044560,
+          "sha256": "0BBAA7EF01B1E8B385729BBCFECDDDBA023EEA23C343FDA17D1596451F062078"
+        }
+      ],
+      "archiveSize": 4554044560,
+      "archiveSha256": "FF8FAB23177C10016D7DDABDBDA9F8F22C980C284081D6B9EE1D92B97AEA9242",
+      "estimatedExtractedBytes": 7734935963,
+      "pythonPath": "ComfyUI_SelfLift_Spark_SM89_CUDA130/python_embeded/python.exe",
+      "launchScript": "ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/launch.py",
+      "ffprobePath": "ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/ffmpeg/ffprobe.exe"
+    },
+    "sm120": {
+      "id": "sm120",
+      "displayName": "SM120 (NVIDIA RTX 50 series)",
+      "archiveParts": [
+        {
+          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part1",
+          "path": "ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part1",
+          "size": 1900000000,
+          "sha256": "8C73DEEB98EFC0498903C88C2776E474EC88EA19E26D16B373B1220FDF050BB3"
+        },
+        {
+          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part2",
+          "path": "ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part2",
+          "size": 1900000000,
+          "sha256": "5B096872BF1FB33DB3640D0DF0016CBF6A45DEB7041ED1135D071C5BF5F27C9B"
+        },
+        {
+          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part3",
+          "path": "ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part3",
+          "size": 753973576,
+          "sha256": "CD32CA3D6CDACD0AF25963943B761C6289737570C845E1240BA5B53E0F4CB10A"
+        }
+      ],
+      "archiveSize": 4553973576,
+      "archiveSha256": "8DF4508E381A17FF2DCB3DEE7C9FC459D09253120C2A540CDB2DD7E4EA1BF337",
+      "estimatedExtractedBytes": 7734750246,
+      "pythonPath": "ComfyUI_SelfLift_Spark_SM120_CUDA130/python_embeded/python.exe",
+      "launchScript": "ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/launch.py",
+      "ffprobePath": "ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffprobe.exe"
+    }
+  },
+  "modelFiles": [
+    {
+      "url": "https://huggingface.co/speedyrulz/mini/resolve/main/minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors",
+      "path": "diffusion_models/minimax_h3_hybrid_fl2va_ref2va_b30-49-int8.safetensors",
+      "size": 20970379632,
+      "sha256": "64f57f77ed85df04f7c0989ab84a5c3c110fb43a40dbc9badfe8ab2d5baafbca",
+      "source": "speedyrulz/mini"
+    },
+    {
+      "url": "https://huggingface.co/p3cyc/minimax/resolve/main/qwen3vl_32b_minimax_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+      "path": "text_encoders/MiniMax-H3/qwen3vl_32b_minimax_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+      "size": 26363476151,
+      "sha256": "d84547412144b7c50a6ec77437a889b869d3ace88da77ef1775d3d2a4901c192",
+      "source": "p3cyc/minimax"
+    },
+    {
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "path": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "size": 2811065184,
+      "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e",
+      "source": "Comfy-Org/MiniMax-H3"
+    },
+    {
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "size": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "source": "Comfy-Org/MiniMax-H3"
+    },
+    {
+      "url": "https://huggingface.co/DarkRomeo88/MiniMax-H3-turbo-lora-comfyui/resolve/main/dmad_minimax_h3_4step_full_critic_comfy.safetensors",
+      "path": "loras/dmad_minimax_h3_4step_full_critic_comfy.safetensors",
+      "size": 1956171816,
+      "sha256": "689d5307f86b0c561f31644b236b48590cda4ea79b6c95273f673ce55aaf4823",
+      "source": "DarkRomeo88/MiniMax-H3-turbo-lora-comfyui"
+    },
+    {
+      "url": "https://huggingface.co/RunningHubAI/rh-h3-speed-slider-1.1-lora/resolve/main/H3_speed_slider_1.1.safetensors",
+      "path": "loras/H3_speed_slider_1.1.safetensors",
+      "size": 10093356,
+      "sha256": "593b074e8eb17bf9f858c3586fc12f53038dbfdd9634e146fe34a17e2661ca40",
+      "source": "RunningHubAI/rh-h3-speed-slider-1.1-lora"
+    },
+    {
+      "url": "https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI/resolve/main/latent_upscaler/h3_upscaler_lms_v0.1_fp32.safetensors",
+      "path": "latent_upscale_models/h3_upscaler_lms_v0.1_fp32.safetensors",
+      "size": 1381153616,
+      "sha256": "7b70711ebf13051bac4b637247f2e6f0db5e1c6da88af3f28ad0165c6483c8c4",
+      "source": "Alissonerdx/Minimax-H3-ComfyUI"
+    },
+    {
+      "url": "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
+      "path": "latent_upscale_models/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",
+      "size": 690592992,
+      "sha256": "4f57821f5837f32f7142b67d815606dbd7550f194e5c769f7d6c3f83b146a5e6",
+      "source": "LBH-123-AI/Minimax_h3_latent_Upscaler"
+    },
+    {
+      "url": "https://huggingface.co/speedyrulz/mini/resolve/main/taeh3.safetensors",
+      "path": "vae_approx/taeh3.safetensors",
+      "size": 9791388,
+      "sha256": "f0f60fa072089997f817402098c2fd90777cb2660dd79cf5df42fc1e3e08e527",
+      "source": "speedyrulz/mini"
+    },
+    {
+      "url": "https://huggingface.co/Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview/resolve/main/minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors",
+      "path": "veda/minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors",
+      "size": 275415648,
+      "sha256": "2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a",
+      "source": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview"
+    }
+  ]
+}
