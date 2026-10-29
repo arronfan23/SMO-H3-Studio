@@ -5,6 +5,7 @@ import type { Avatar } from '../shared/types';
 import { AvatarsPage } from './AvatarsPage';
 import { SettingsPage } from './SettingsPage';
 import { StudioPage } from './StudioPage';
+import { WindowTitlebar } from './WindowTitlebar';
 import { WorksPage } from './WorksPage';
 import { errorMessage } from './ui';
 
@@ -71,59 +72,62 @@ export function App() {
   const selectedAvatar = avatars.find((avatar) => avatar.id === selectedAvatarId) ?? null;
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand-lockup">
-          <img src="./brand/icon.png" alt="SMO.H3 Studio 标志" width="42" height="42" />
-          <div>
-            <h1>SMO.H3 Studio</h1>
-            <span>数字人制作台</span>
+    <div className="app-frame">
+      <WindowTitlebar />
+      <div className="app-shell">
+        <aside className="sidebar">
+          <div className="brand-lockup">
+            <img src="./brand/icon.png" alt="SMO.H3 Studio 标志" width="42" height="42" />
+            <div>
+              <h1>SMO.H3 Studio</h1>
+              <span>数字人制作台</span>
+            </div>
           </div>
-        </div>
-        <nav className="main-nav" aria-label="主导航">
-          {NAVIGATION.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              type="button"
-              className={page === id ? 'nav-item nav-item-active' : 'nav-item'}
-              aria-current={page === id ? 'page' : undefined}
-              onClick={() => setPage(id)}
-            >
-              <Icon size={18} aria-hidden="true" />
-              <span>{label}</span>
-            </button>
-          ))}
-        </nav>
-      </aside>
-      <main className="main-content">
-        <div hidden={page !== 'studio'}>
-          <StudioPage
-            avatar={selectedAvatar}
-            loading={avatarsLoading}
-            error={avatarsError}
-            modelDirectory={modelDirectory}
-            onCreateAvatar={() => setPage('avatars')}
-            pageActive={page === 'studio'}
-          />
-        </div>
-        {page === 'avatars' && (
-          <AvatarsPage
-            avatars={avatars}
-            selectedAvatarId={selectedAvatarId}
-            error={avatarsError}
-            onSelect={setSelectedAvatarId}
-            onCreated={avatarCreated}
-            onChanged={refreshAvatars}
-          />
-        )}
-        {page === 'works' && <WorksPage avatars={avatars} />}
-        {page === 'settings' && (
-          <SettingsPage
-            modelDirectory={modelDirectory}
-            onModelDirectoryChange={setModelDirectory}
-          />
-        )}
-      </main>
+          <nav className="main-nav" aria-label="主导航">
+            {NAVIGATION.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                className={page === id ? 'nav-item nav-item-active' : 'nav-item'}
+                aria-current={page === id ? 'page' : undefined}
+                onClick={() => setPage(id)}
+              >
+                <Icon size={18} aria-hidden="true" />
+                <span>{label}</span>
+              </button>
+            ))}
+          </nav>
+        </aside>
+        <main className="main-content">
+          <div hidden={page !== 'studio'}>
+            <StudioPage
+              avatar={selectedAvatar}
+              loading={avatarsLoading}
+              error={avatarsError}
+              modelDirectory={modelDirectory}
+              onCreateAvatar={() => setPage('avatars')}
+              pageActive={page === 'studio'}
+            />
+          </div>
+          {page === 'avatars' && (
+            <AvatarsPage
+              avatars={avatars}
+              selectedAvatarId={selectedAvatarId}
+              error={avatarsError}
+              onSelect={setSelectedAvatarId}
+              onCreated={avatarCreated}
+              onChanged={refreshAvatars}
+            />
+          )}
+          {page === 'works' && <WorksPage avatars={avatars} />}
+          {page === 'settings' && (
+            <SettingsPage
+              modelDirectory={modelDirectory}
+              onModelDirectoryChange={setModelDirectory}
+            />
+          )}
+        </main>
+      </div>
     </div>
   );
 }

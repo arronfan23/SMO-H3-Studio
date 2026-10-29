@@ -51,6 +51,7 @@ test('Electron app starts with isolated env and exposes window.smo domains', asy
       hardware: ['detect', 'recommend', 'reset', 'apply'],
       works: ['delete', 'list'],
       files: ['selectImage', 'selectAudio', 'mediaUrl', 'openFolder'],
+      window: ['minimize', 'toggleMaximize', 'close', 'isMaximized'],
     };
 
     for (const [domain, methods] of Object.entries(expectedDomains)) {

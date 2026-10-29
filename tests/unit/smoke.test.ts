@@ -136,6 +136,9 @@ describe('desktop shell manifest', () => {
       height: 820,
       minWidth: 960,
       minHeight: 640,
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,

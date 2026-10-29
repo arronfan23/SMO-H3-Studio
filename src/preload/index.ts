@@ -41,6 +41,12 @@ const api: SmoApi = {
     delete: (id) => ipcRenderer.invoke('works:delete', { id }),
     list: () => ipcRenderer.invoke('works:list', {}),
   },
+  window: {
+    minimize: () => ipcRenderer.invoke('window:minimize', {}),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize', {}),
+    close: () => ipcRenderer.invoke('window:close', {}),
+    isMaximized: () => ipcRenderer.invoke('window:is-maximized', {}),
+  },
 };
 
 for (const domain of Object.values(api)) {

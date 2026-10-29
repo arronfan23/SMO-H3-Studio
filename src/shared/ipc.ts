@@ -322,4 +322,10 @@ export interface SmoApi {
     list(): Promise<Work[]>;
     delete(id: string): Promise<void>;
   };
+  readonly window: {
+    minimize(): Promise<void>;
+    toggleMaximize(): Promise<boolean>;
+    close(): Promise<void>;
+    isMaximized(): Promise<boolean>;
+  };
 }

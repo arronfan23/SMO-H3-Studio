@@ -22,6 +22,9 @@ export function createWindowOptions({
     height: 820,
     minWidth: 960,
     minHeight: 640,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
     icon,
     webPreferences: {
       preload: join(moduleDirectory, '../preload/index.cjs'),

@@ -265,7 +265,15 @@ async function assertViewLayout(
           return results;
         }
         const rect = element.getBoundingClientRect();
-        if (rect.left < 0 || rect.right > viewport.width || rect.top < 0 || rect.bottom > viewport.height) {
+        // Fractional-DPI displays (1.75 scale) snap scroll positions to device
+        // pixels (~0.57 px), so allow the same 0-2 px rounding setViewport uses.
+        const tolerance = 2;
+        if (
+          rect.left < -tolerance ||
+          rect.right > viewport.width + tolerance ||
+          rect.top < -tolerance ||
+          rect.bottom > viewport.height + tolerance
+        ) {
           results.push({
             view,
             type: 'out-of-viewport',
@@ -723,6 +731,16 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   test('no layout regressions on main views', async () => {
     const testInfo = test.info();
     await expect(page!.locator('.app-shell')).toBeVisible();
+    await expect(page!.locator('.window-titlebar')).toBeVisible();
+    await expect(
+      page!.getByRole('button', { name: '最小化', exact: true }),
+    ).toBeVisible();
+    await expect(
+      page!.getByRole('button', { name: /^(最大化|还原)$/ }),
+    ).toBeVisible();
+    await expect(
+      page!.getByRole('button', { name: '关闭', exact: true }),
+    ).toBeVisible();
     await createAvatar(page!, 'E2E Layout Avatar');
 
     const viewports = [
@@ -732,6 +750,33 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     for (const viewport of viewports) {
       await setViewport(app!, page!, viewport.width, viewport.height);
+
+      // The rounded frame fills the viewport; tolerate the same fractional-DPI
+      // rounding (0-2 px) that setViewport observes on a 1.75 scale display.
+      const frameRect = await page!.evaluate(() => {
+        const element = document.querySelector('.app-frame');
+        if (!element) {
+          return null;
+        }
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
+        };
+      });
+      expect(frameRect).not.toBeNull();
+      expect(frameRect!.left).toBe(0);
+      expect(frameRect!.top).toBe(0);
+      expect(
+        Math.abs(frameRect!.right - frameRect!.innerWidth),
+      ).toBeLessThanOrEqual(2);
+      expect(
+        Math.abs(frameRect!.bottom - frameRect!.innerHeight),
+      ).toBeLessThanOrEqual(2);
 
       await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
       // The studio preserves the previously selected mode, so switch back to

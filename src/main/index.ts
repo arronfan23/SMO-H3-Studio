@@ -7,6 +7,7 @@ import {
   selectRendererTarget,
 } from './renderer';
 import { createWindowOptions } from './window-options';
+import { registerWindowControls } from './window-controls';
 
 registerPrivilegedMediaScheme(protocol);
 
@@ -26,6 +27,7 @@ async function createMainWindow(): Promise<void> {
       moduleDirectory: import.meta.dirname,
     }),
   );
+  registerWindowControls(window);
 
   const target = selectRendererTarget({
     isPackaged: app.isPackaged,

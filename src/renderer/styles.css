@@ -2,7 +2,7 @@
   --radius-panel: 12px;
   --radius-control: 8px;
   color: #202723;
-  background: #f2f5f2;
+  background: transparent;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
   letter-spacing: 0;
@@ -18,11 +18,12 @@ body,
 #root {
   margin: 0;
   min-width: 320px;
-  min-height: 100%;
+  height: 100%;
 }
 
 body {
   overflow: hidden;
+  background: transparent;
 }
 
 button,
@@ -53,11 +54,90 @@ video:focus-visible {
   outline-offset: 2px;
 }
 
+.app-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+  background: #f2f5f2;
+  border-radius: 12px;
+}
+
+body[data-window-maximized='true'] .app-frame {
+  border-radius: 0;
+}
+
+.window-titlebar {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  height: 36px;
+  color: #edf4ef;
+  background: #272d29;
+  user-select: none;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.titlebar-drag {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  padding: 0 12px;
+}
+
+.titlebar-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.titlebar-brand {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-controls {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.titlebar-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  padding: 0;
+  color: #c6d0c9;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.titlebar-button:hover {
+  color: #edf4ef;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.titlebar-button-close:hover {
+  color: #ffffff;
+  background: #c42b1c;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 184px minmax(0, 1fr);
-  height: 100dvh;
-  min-height: 640px;
+  flex: 1;
+  min-height: 0;
+  height: auto;
   overflow: hidden;
 }
 
@@ -865,6 +945,12 @@ video:focus-visible {
     overflow: auto;
   }
 
+  .app-frame {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
   .app-shell {
     grid-template-columns: 140px minmax(0, 1fr);
     height: auto;
@@ -894,6 +980,12 @@ video:focus-visible {
 @media (max-height: 639px) {
   body {
     overflow: auto;
+  }
+
+  .app-frame {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
   }
 
   .app-shell {
@@ -1035,9 +1127,6 @@ video:focus-visible {
 }
 
 @media (max-height: 700px) {
-  .app-shell {
-    min-height: 100dvh;
-  }
   .main-content {
     padding: 12px;
   }

@@ -1163,6 +1163,7 @@ describe('preload API', () => {
       'hardware',
       'jobs',
       'llm',
+      'window',
       'works',
     ]);
     expect(Object.keys(api.avatars).sort()).toEqual(['create', 'delete', 'list', 'update']);
@@ -1182,6 +1183,12 @@ describe('preload API', () => {
       'openFolder',
       'selectAudio',
       'selectImage',
+    ]);
+    expect(Object.keys(api.window).sort()).toEqual([
+      'close',
+      'isMaximized',
+      'minimize',
+      'toggleMaximize',
     ]);
 
     const exposedMethods = Object.values(api).flatMap((domain) => Object.keys(domain));
@@ -1348,6 +1355,26 @@ describe('preload API', () => {
       channel: 'works:delete',
       payload: { id: 'work-1' },
       call: (smo: SmoApi) => smo.works.delete('work-1'),
+    },
+    {
+      channel: 'window:minimize',
+      payload: {},
+      call: (smo: SmoApi) => smo.window.minimize(),
+    },
+    {
+      channel: 'window:toggle-maximize',
+      payload: {},
+      call: (smo: SmoApi) => smo.window.toggleMaximize(),
+    },
+    {
+      channel: 'window:close',
+      payload: {},
+      call: (smo: SmoApi) => smo.window.close(),
+    },
+    {
+      channel: 'window:is-maximized',
+      payload: {},
+      call: (smo: SmoApi) => smo.window.isMaximized(),
     },
   ])('maps $channel without exposing a generic invoke method', async ({ channel, payload, call }) => {
     await call(api);
