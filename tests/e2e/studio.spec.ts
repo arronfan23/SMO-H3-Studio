@@ -871,4 +871,51 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     });
     expect(violations).toEqual([]);
   });
+
+  test('window maximize round trip toggles the rounded frame', async () => {
+    await expect(page!.locator('.app-shell')).toBeVisible();
+
+    const readMaximized = () =>
+      page!.evaluate(() =>
+        (
+          window as unknown as {
+            smo: { window: { isMaximized(): Promise<boolean> } };
+          }
+        ).smo.window.isMaximized(),
+      );
+    const readChromeState = () =>
+      page!.evaluate(() => ({
+        maximizedDataset: document.body.dataset.windowMaximized ?? null,
+        radius: getComputedStyle(document.querySelector('.app-frame')!)
+          .borderTopLeftRadius,
+      }));
+
+    // Initial state: restored window with rounded corners.
+    await expect.poll(readMaximized).toBe(false);
+    expect((await readChromeState()).radius).toBe('12px');
+
+    // Maximize through the titlebar button.
+    await page!.getByRole('button', { name: '最大化', exact: true }).click();
+    await expect.poll(readMaximized).toBe(true);
+    await expect(
+      page!.getByRole('button', { name: '还原', exact: true }),
+    ).toBeVisible();
+    await expect.poll(readChromeState).toEqual({
+      maximizedDataset: 'true',
+      radius: '0px',
+    });
+    await expect(page!.locator('.app-shell')).toBeVisible();
+
+    // Restore through the titlebar button.
+    await page!.getByRole('button', { name: '还原', exact: true }).click();
+    await expect.poll(readMaximized).toBe(false);
+    await expect(
+      page!.getByRole('button', { name: '最大化', exact: true }),
+    ).toBeVisible();
+    await expect.poll(readChromeState).toEqual({
+      maximizedDataset: 'false',
+      radius: '12px',
+    });
+    await expect(page!.locator('.app-shell')).toBeVisible();
+  });
 });

@@ -27,7 +27,7 @@ async function createMainWindow(): Promise<void> {
       moduleDirectory: import.meta.dirname,
     }),
   );
-  registerWindowControls(window);
+  registerWindowControls(window, { transparent: true });
 
   const target = selectRendererTarget({
     isPackaged: app.isPackaged,
