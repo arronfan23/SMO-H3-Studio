@@ -40,4 +40,26 @@ describe('responsive studio CSS contracts', () => {
     expect(mediaRule).toContain('border-radius: var(--radius-panel)');
     expect(mediaRule).not.toContain('var(--radius-control)');
   });
+
+  test('insets the main-content scrollbar clear of the east resize hot zone', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+
+    const frameRule = css.match(/\.app-frame\s*\{([^}]*)\}/)?.[1];
+    expect(frameRule).toBeDefined();
+    expect(frameRule).toContain('overflow: hidden');
+
+    const eastRule = css.match(/\.window-resize-e\s*\{([^}]*)\}/)?.[1];
+    expect(eastRule).toBeDefined();
+    expect(eastRule).toContain('right: 0');
+    const eastWidth = Number(eastRule!.match(/width:\s*(\d+)px/)?.[1]);
+    expect(eastWidth).toBeGreaterThanOrEqual(8);
+
+    // The main-content right edge (where its scrollbar lives) must sit at
+    // least the hot-zone width inside the app frame, so an east/west resize
+    // drag never covers scrolling and no horizontal overflow appears.
+    const mainRule = css.match(/\.main-content\s*\{([^}]*)\}/)?.[1];
+    expect(mainRule).toBeDefined();
+    const inset = Number(mainRule!.match(/margin-right:\s*(\d+)px/)?.[1]);
+    expect(inset).toBeGreaterThanOrEqual(eastWidth);
+  });
 });

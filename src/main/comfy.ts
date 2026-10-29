@@ -8,6 +8,9 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_COMPLETION_TIMEOUT_MS = 7_200_000;
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 1_800_000;
 const DEFAULT_RECONCILE_INTERVAL_MS = 5_000;
+// After a cancel wake-up, a vanished prompt is confirmed quickly instead of
+// waiting a full reconcile interval for the second consecutive miss.
+const WOKEN_MISS_CONFIRM_INTERVAL_MS = 250;
 const MAX_ERROR_BODY_LENGTH = 800;
 
 const UPLOAD_EXTENSIONS = {
@@ -353,6 +356,7 @@ export class ComfyClient {
   private readonly clientId: string;
   private readonly abortController: AbortController;
   private activeSocket?: WebSocket;
+  private readonly reconcileWakers = new Map<string, () => void>();
   private closed = false;
 
   constructor(baseUrl = DEFAULT_BASE_URL, options: ComfyClientOptions = {}) {
@@ -470,6 +474,7 @@ export class ComfyClient {
   async cancel(promptId?: string): Promise<void> {
     if (promptId === undefined) {
       await this.request('interrupt', { method: 'POST' });
+      this.wakeReconcilers();
       return;
     }
     // Targeted cleanup: only touch the requested prompt, never whatever
@@ -487,10 +492,24 @@ export class ComfyClient {
       if (afterDelete.running.includes(promptId)) {
         await this.request('interrupt', { method: 'POST' });
       }
+      this.wakeReconciler(promptId);
       return;
     }
     if (snapshot.running.includes(promptId)) {
       await this.request('interrupt', { method: 'POST' });
+      this.wakeReconciler(promptId);
+    }
+  }
+
+  // A cancellation changes the backend state immediately; waking the waiter
+  // lets it reconcile now instead of after a full poll interval.
+  private wakeReconciler(promptId: string): void {
+    this.reconcileWakers.get(promptId)?.();
+  }
+
+  private wakeReconcilers(): void {
+    for (const wake of this.reconcileWakers.values()) {
+      wake();
     }
   }
 
@@ -534,6 +553,8 @@ export class ComfyClient {
       let lastFrame: ComfyProgress | undefined;
       let missingReconciliations = 0;
       let reconcileFailures = 0;
+      let reconcileRunning = false;
+      let reconcilePending = false;
       let cleanupPromise: Promise<void> | undefined;
 
       const onAbort = () => {
@@ -547,6 +568,10 @@ export class ComfyClient {
         }
         settled = true;
         stopped = true;
+        reconcilePending = false;
+        if (this.reconcileWakers.get(promptId) === requestImmediateReconcile) {
+          this.reconcileWakers.delete(promptId);
+        }
         if (timeout !== undefined) {
           clearTimeout(timeout);
         }
@@ -613,10 +638,11 @@ export class ComfyClient {
         return cleanupPromise;
       };
 
-      const reconcile = async (): Promise<void> => {
+      const reconcile = async (woken: boolean): Promise<void> => {
         if (settled || stopped) {
           return;
         }
+        let nextDelayMs = this.reconcileIntervalMs;
         try {
           const snapshot = parseQueueIds(await this.requestJson('queue'));
           if (settled) {
@@ -663,6 +689,12 @@ export class ComfyClient {
                 );
                 return;
               }
+              if (woken) {
+                // The cancel wake-up already proves the prompt vanished, so
+                // confirm the second miss quickly instead of waiting a full
+                // poll interval.
+                nextDelayMs = Math.min(nextDelayMs, WOKEN_MISS_CONFIRM_INTERVAL_MS);
+              }
             }
           }
           if (Date.now() - lastActivityAt >= this.inactivityTimeoutMs) {
@@ -691,13 +723,54 @@ export class ComfyClient {
         }
         if (!stopped && !settled) {
           reconcileTimer = setTimeout(() => {
-            void reconcile();
-          }, this.reconcileIntervalMs);
+            runReconcile(false);
+          }, nextDelayMs);
         }
       };
+      // Reconciliation passes never overlap: a wake-up during an in-flight
+      // pass sets a pending flag, and exactly one follow-up pass runs when
+      // the current one finishes.
+      const runReconcile = (woken: boolean): void => {
+        if (settled || stopped) {
+          return;
+        }
+        if (reconcileRunning) {
+          reconcilePending = true;
+          return;
+        }
+        reconcileRunning = true;
+        void reconcile(woken).finally(() => {
+          reconcileRunning = false;
+          const rerun = reconcilePending;
+          reconcilePending = false;
+          if (!rerun || settled || stopped) {
+            return;
+          }
+          if (reconcileTimer !== undefined) {
+            clearTimeout(reconcileTimer);
+            reconcileTimer = undefined;
+          }
+          runReconcile(true);
+        });
+      };
+      const requestImmediateReconcile = (): void => {
+        if (settled || stopped) {
+          return;
+        }
+        if (reconcileRunning) {
+          reconcilePending = true;
+          return;
+        }
+        if (reconcileTimer !== undefined) {
+          clearTimeout(reconcileTimer);
+          reconcileTimer = undefined;
+        }
+        runReconcile(true);
+      };
+      this.reconcileWakers.set(promptId, requestImmediateReconcile);
       // Chained timeouts keep reconciliation requests non-overlapping.
       reconcileTimer = setTimeout(() => {
-        void reconcile();
+        runReconcile(false);
       }, this.reconcileIntervalMs);
 
       socket.on('message', (data, isBinary) => {

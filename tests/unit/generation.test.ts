@@ -63,6 +63,7 @@ class FakeComfyClient {
   promptId = 'prompt-1';
   submitError?: Error;
   completionError?: Error;
+  cancelError?: Error;
   historyError?: Error;
   completionGate?: Deferred<void>;
   uploadGate?: Deferred<void>;
@@ -152,7 +153,9 @@ class FakeComfyClient {
   async cancel(promptId?: string): Promise<void> {
     this.cancellations += 1;
     this.cancelRequests.push(promptId);
-    this.completionGate?.reject(new Error('ComfyUI execution interrupted'));
+    this.completionGate?.reject(
+      this.cancelError ?? new Error('ComfyUI execution interrupted'),
+    );
   }
 }
 
@@ -1352,7 +1355,7 @@ describe('GenerationHandler failures and cancellation', () => {
     expect(work.error).toMatch(/cancel/i);
   });
 
-  test('cancels the active ComfyUI execution and records the interruption', async () => {
+  test('cancels the active ComfyUI execution and records Generation cancelled', async () => {
     const harness = await createHarness();
     harness.comfy.completionGate = deferred();
 
@@ -1364,7 +1367,28 @@ describe('GenerationHandler failures and cancellation', () => {
     expect(harness.comfy.cancellations).toBe(1);
     expect(work).toMatchObject({
       status: 'failed',
-      error: 'ComfyUI execution interrupted',
+      error: 'Generation cancelled',
+      outputPath: null,
+    });
+  });
+
+  test('records Generation cancelled when the cancelled prompt vanishes from the backend queue', async () => {
+    const harness = await createHarness();
+    harness.comfy.completionGate = deferred();
+    harness.comfy.cancelError = new Error(
+      'ComfyUI prompt is no longer queued and has no recorded result',
+    );
+
+    const result = await harness.startGeneration(harness.textRequest);
+    await vi.waitFor(() => expect(harness.comfy.waits).toEqual(['prompt-1']));
+    await harness.jobCoordinator.cancelActive();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(harness.comfy.cancellations).toBe(1);
+    expect(work).toMatchObject({
+      status: 'failed',
+      promptId: 'prompt-1',
+      error: 'Generation cancelled',
       outputPath: null,
     });
   });

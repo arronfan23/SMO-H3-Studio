@@ -310,6 +310,8 @@ body[data-window-maximized='true'] .window-resize-handle {
   min-width: 0;
   padding: 24px;
   overflow: auto;
+  /* Keep the scrollbar clear of the 8px east window-resize hot zone. */
+  margin-right: 8px;
 }
 
 .studio-page,

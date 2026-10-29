@@ -860,6 +860,212 @@ describe('ComfyClient targeted cancellation', () => {
   });
 });
 
+describe('ComfyClient cancellation wake-ups', () => {
+  function queueSnapshot(ids: { running: string[]; pending: string[] }): unknown {
+    return {
+      queue_running: ids.running.map((id, index) => [index + 1, id]),
+      queue_pending: ids.pending.map((id, index) => [index + 100, id]),
+    };
+  }
+
+  test('settles promptly when a cancelled pending prompt vanishes from the queue', async () => {
+    let deleted = false;
+    let inFlightHistories = 0;
+    let maxInFlightHistories = 0;
+    const upstream = await startComfy(async (request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        json(
+          response,
+          deleted
+            ? queueSnapshot({ running: [], pending: [] })
+            : queueSnapshot({ running: [], pending: ['prompt-1'] }),
+        );
+        return;
+      }
+      if (request.url === '/queue' && request.method === 'POST') {
+        deleted = true;
+        json(response, {});
+        return;
+      }
+      if (request.url === '/interrupt') {
+        response.end();
+        return;
+      }
+      if (request.url === '/history/prompt-1') {
+        inFlightHistories += 1;
+        maxInFlightHistories = Math.max(maxInFlightHistories, inFlightHistories);
+        await delay(15);
+        inFlightHistories -= 1;
+        json(response, {});
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+    // The huge poll interval proves the settle comes from the cancel wake-up,
+    // not from periodic reconciliation.
+    const client = new ComfyClient(upstream.baseUrl, {
+      clientId: 'client-1',
+      inactivityTimeoutMs: 60_000,
+      reconcileIntervalMs: 60_000,
+      completionTimeoutMs: 60_000,
+    });
+
+    const startedAt = Date.now();
+    const completion = client.waitForCompletion('prompt-1');
+    await vi.waitFor(() =>
+      expect(
+        upstream.requests.some((request) => request.url === '/history/prompt-1'),
+      ).toBe(true),
+    );
+
+    await client.cancel('prompt-1');
+    await expectRejection(completion, /no longer queued/i);
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // Reconciliation passes never overlapped while settling the cancellation.
+    expect(maxInFlightHistories).toBe(1);
+
+    // After settling, the wake-up reference is gone: a later cancel must not
+    // trigger new reconciliations for the finished wait.
+    const historyRequests = (): number =>
+      upstream.requests.filter(
+        (request) => request.url === '/history/prompt-1' && request.method === 'GET',
+      ).length;
+    const requestsBeforeRecancel = historyRequests();
+    deleted = false;
+    await client.cancel('prompt-1');
+    await delay(100);
+    expect(historyRequests()).toBe(requestsBeforeRecancel);
+  });
+
+  test('queues a wake-up requested mid-reconciliation instead of overlapping passes', async () => {
+    let inFlightHistories = 0;
+    let maxInFlightHistories = 0;
+    let historyCalls = 0;
+    const upstream = await startComfy(async (request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        json(response, queueSnapshot({ running: [], pending: ['prompt-1'] }));
+        return;
+      }
+      if (request.url === '/interrupt') {
+        response.end();
+        return;
+      }
+      if (request.url === '/history/prompt-1') {
+        historyCalls += 1;
+        inFlightHistories += 1;
+        maxInFlightHistories = Math.max(maxInFlightHistories, inFlightHistories);
+        // Slow enough that the second wake-up lands while this pass is in flight.
+        await delay(80);
+        inFlightHistories -= 1;
+        json(response, {});
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+    const client = new ComfyClient(upstream.baseUrl, {
+      clientId: 'client-1',
+      inactivityTimeoutMs: 60_000,
+      reconcileIntervalMs: 60_000,
+      completionTimeoutMs: 60_000,
+    });
+
+    const completion = client.waitForCompletion('prompt-1');
+    await vi.waitFor(() => expect(historyCalls).toBe(1));
+    // Let the on-open history read finish so only reconciliation passes are
+    // measured for overlap below.
+    await vi.waitFor(() => expect(inFlightHistories).toBe(0));
+
+    // The first wake-up starts a reconciliation that blocks on the slow
+    // history read; the prompt stays queued, so no fast-confirm timer arms.
+    await client.cancel();
+    await vi.waitFor(() => expect(historyCalls).toBe(2));
+    // This wake-up arrives mid-pass and must be deferred, not run concurrently.
+    await client.cancel();
+
+    // The deferred wake-up runs exactly one follow-up pass right after the
+    // in-flight one; without it the next pass would be 60s of polling away.
+    await vi.waitFor(() => expect(historyCalls).toBe(3));
+    expect(maxInFlightHistories).toBe(1);
+
+    const settled = expectRejection(completion, /closed/i);
+    await client.close();
+    await settled;
+  });
+
+  test('settles promptly when a cancelled running prompt is interrupted', async () => {
+    let interrupted = false;
+    const upstream = await startComfy((request, response) => {
+      if (request.url === '/queue' && request.method === 'GET') {
+        json(
+          response,
+          interrupted
+            ? queueSnapshot({ running: [], pending: [] })
+            : queueSnapshot({ running: ['prompt-1'], pending: [] }),
+        );
+        return;
+      }
+      if (request.url === '/interrupt') {
+        interrupted = true;
+        response.end();
+        return;
+      }
+      if (request.url === '/history/prompt-1') {
+        json(
+          response,
+          interrupted
+            ? {
+                'prompt-1': {
+                  outputs: {},
+                  status: {
+                    status_str: 'error',
+                    completed: false,
+                    messages: [
+                      [
+                        'execution_interrupted',
+                        { prompt_id: 'prompt-1', node_id: 'node-9' },
+                      ],
+                    ],
+                  },
+                },
+              }
+            : {},
+        );
+        return;
+      }
+      json(response, { error: 'not found' }, 404);
+    });
+    // The socket stays silent, so only the cancel wake-up can settle the wait.
+    const client = new ComfyClient(upstream.baseUrl, {
+      clientId: 'client-1',
+      inactivityTimeoutMs: 60_000,
+      reconcileIntervalMs: 60_000,
+      completionTimeoutMs: 60_000,
+    });
+
+    const startedAt = Date.now();
+    const completion = client.waitForCompletion('prompt-1');
+    await vi.waitFor(() =>
+      expect(
+        upstream.requests.some((request) => request.url === '/history/prompt-1'),
+      ).toBe(true),
+    );
+
+    await client.cancel('prompt-1');
+    await expectRejection(completion, /execution interrupted.*node-9/i);
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    const interruptPosts = upstream.requests.filter(
+      (request) => request.url === '/interrupt',
+    );
+    const deletePosts = upstream.requests.filter(
+      (request) => request.url === '/queue' && request.method === 'POST',
+    );
+    expect(interruptPosts).toHaveLength(1);
+    expect(deletePosts).toHaveLength(0);
+  });
+});
+
 describe('ComfyClient queue reconciliation', () => {
   function startQueuedComfy(options: {
     queue: () => { running: string[]; pending: string[] };

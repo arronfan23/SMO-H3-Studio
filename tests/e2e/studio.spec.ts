@@ -790,6 +790,22 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         Math.abs(frameRect!.bottom - frameRect!.innerHeight),
       ).toBeLessThanOrEqual(2);
 
+      // The 8px east resize hot zone must never cover the main-content
+      // scrollbar: the content edge stays at least the hot-zone width inside
+      // the frame (same 0-2 px fractional-DPI tolerance as above).
+      const contentInset = await page!.evaluate(() => {
+        const frame = document.querySelector('.app-frame');
+        const main = document.querySelector('.main-content');
+        if (!frame || !main) {
+          return null;
+        }
+        return (
+          frame.getBoundingClientRect().right - main.getBoundingClientRect().right
+        );
+      });
+      expect(contentInset).not.toBeNull();
+      expect(contentInset!).toBeGreaterThanOrEqual(6);
+
       await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
       // The studio preserves the previously selected mode, so switch back to
       // text mode explicitly instead of relying on an implicit reset.

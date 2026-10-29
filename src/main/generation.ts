@@ -573,7 +573,11 @@ export function createGenerationHandler(
         } catch (cancellationError) {
           failure = cancellationError;
         }
-        if (!execution.cancelRequested) {
+        if (execution.cancelRequested) {
+          // A user-requested cancel always settles with the same message,
+          // whichever backend race (queue miss, interruption) surfaced first.
+          failure = new Error('Generation cancelled');
+        } else {
           // Timeout or unexpected failure: never leave the submitted prompt
           // running on the backend while the work is marked failed.
           try {
