@@ -543,6 +543,30 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(work).toBeVisible();
   });
 
+  test('shows real execution stage text and elapsed time during progress', async () => {
+    const avatarName = 'E2E Progress Avatar';
+    await createAvatar(page!, avatarName);
+    await openStudio(page!, avatarName);
+
+    await page!.fill('#original-text', 'Execution stage progress text test.');
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+
+    const jobStatus = page!.locator('#text-mode-panel section[aria-label="任务状态"]');
+    await expect(jobStatus).toContainText(
+      /本地排队中|正在上传素材|等待 ComfyUI|正在加载模型并执行节点|正在采样生成|正在读取输出并收尾/,
+      { timeout: 15_000 },
+    );
+    await expect(jobStatus).toContainText(/已用时间/, { timeout: 15_000 });
+
+    const jobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, jobId, 'done');
+
+    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page!.locator('.works-list article').filter({ hasText: jobId });
+    await expect(work).toContainText('已完成');
+    await expect(work).toContainText('100%');
+  });
+
   test('failed generation is retried successfully', async () => {
     const avatarName = 'E2E Retry Avatar';
     await createAvatar(page!, avatarName);

@@ -5,7 +5,7 @@ import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { WorkProgressBar } from './WorkProgressBar';
 import { useMediaUrl } from './useMediaUrl';
-import { errorMessage, fileName, parentPath, readWorkProgress } from './ui';
+import { errorMessage, fileName, parentPath, readWorkExecution, readWorkProgress } from './ui';
 
 const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -269,6 +269,8 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
               <WorkProgressBar
                 status={work.status}
                 progress={readWorkProgress(work)}
+                execution={readWorkExecution(work)}
+                createdAt={work.createdAt}
                 label={`生成进度 ${work.id}`}
               />
               {work.status === 'failed' && work.error && (

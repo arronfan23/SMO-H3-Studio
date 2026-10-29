@@ -986,6 +986,93 @@ describe('works and settings', () => {
     expect(screen.getByText('50%')).toBeInTheDocument();
   });
 
+  test('shows real execution stages, queue position and elapsed time for active works', async () => {
+    const now = Date.now();
+    const iso = (milliseconds: number) => new Date(milliseconds).toISOString();
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'queued-work',
+        status: 'pending',
+        createdAt: iso(now - 65_000),
+        metadata: {
+          execution: {
+            stage: 'backend-queued',
+            updatedAt: iso(now),
+            lastProgressAt: iso(now),
+            queuePosition: 1,
+          },
+        },
+      }),
+      createWork({
+        id: 'sampling-work',
+        status: 'running',
+        createdAt: iso(now - 30_000),
+        metadata: {
+          progress: { value: 12, max: 24 },
+          execution: {
+            stage: 'sampling',
+            updatedAt: iso(now),
+            lastProgressAt: iso(now),
+          },
+        },
+      }),
+      createWork({
+        id: 'finalizing-work',
+        status: 'running',
+        createdAt: iso(now - 90_000),
+        metadata: {
+          execution: {
+            stage: 'finalizing',
+            updatedAt: iso(now),
+            lastProgressAt: iso(now),
+          },
+        },
+      }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    expect(await screen.findByText('等待 ComfyUI')).toBeInTheDocument();
+    expect(screen.getByText(/前方 1 个任务/)).toBeInTheDocument();
+    expect(screen.getByText(/正在采样生成/)).toBeInTheDocument();
+    expect(screen.getByText('50%')).toBeInTheDocument();
+    expect(screen.getByText('正在读取输出并收尾')).toBeInTheDocument();
+    expect(screen.getAllByText(/已用时间/)).toHaveLength(3);
+    const queuedBar = screen.getByRole('progressbar', { name: '生成进度 queued-work' });
+    expect(queuedBar).not.toHaveAttribute('aria-valuenow');
+    expect(queuedBar).toHaveAttribute('aria-description', expect.stringContaining('等待 ComfyUI'));
+  });
+
+  test('warns about long silence and keeps the legacy display for missing execution', async () => {
+    const now = Date.now();
+    const iso = (milliseconds: number) => new Date(milliseconds).toISOString();
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'stale-work',
+        status: 'running',
+        createdAt: iso(now - 20 * 60 * 1000),
+        metadata: {
+          execution: {
+            stage: 'executing',
+            updatedAt: iso(now - 16 * 60 * 1000),
+            lastProgressAt: iso(now - 16 * 60 * 1000),
+          },
+        },
+      }),
+      createWork({
+        id: 'legacy-work',
+        status: 'running',
+        createdAt: iso(now - 5_000),
+      }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    expect(await screen.findByText('正在加载模型并执行节点')).toBeInTheDocument();
+    expect(screen.getByText(/长时间没有新进展，可继续等待或取消/)).toBeInTheDocument();
+    expect(screen.getByText('正在生成…')).toBeInTheDocument();
+  });
+
   test('shows real ComfyUI health and the configured LLM without exposing credentials', async () => {
     smo.comfy.health.mockResolvedValue({
       system: { os: 'Windows 11' },

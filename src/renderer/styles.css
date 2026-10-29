@@ -485,6 +485,20 @@ video:focus-visible {
   min-width: 0;
 }
 
+.work-progress-container {
+  min-width: 0;
+}
+
+.work-progress-detail {
+  display: block;
+  /* Reserve one line so stage and queue updates never shift the layout. */
+  min-height: 18px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 18px;
+  color: #6a746e;
+}
+
 .work-progress-track {
   position: relative;
   flex: 1 1 auto;

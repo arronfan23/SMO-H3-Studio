@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Work, WorkStatus } from '../shared/types';
-import { errorMessage, readWorkProgress, WORK_STATUS_TEXT } from './ui';
+import { errorMessage, readWorkExecution, readWorkProgress, WORK_STATUS_TEXT } from './ui';
 import { WorkProgressBar } from './WorkProgressBar';
 
 const POLL_INTERVAL_MS = 400;
@@ -100,6 +100,8 @@ export function JobStatus({
       <WorkProgressBar
         status={status}
         progress={readWorkProgress(current?.work)}
+        execution={readWorkExecution(current?.work)}
+        createdAt={current?.work?.createdAt}
         label={`生成进度 ${jobId}`}
       />
       {current?.work?.error && <p className="form-error" role="alert">{current.work.error}</p>}
