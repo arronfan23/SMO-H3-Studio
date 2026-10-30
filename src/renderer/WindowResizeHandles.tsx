@@ -52,6 +52,8 @@ export function WindowResizeHandles() {
   const latestCursor = useRef<WindowScreenPoint | null>(null);
   const endRequested = useRef(false);
   const hasMoved = useRef(false);
+  const captureTarget = useRef<Element | null>(null);
+  const captureLost = useRef(false);
   const framePending = useRef(false);
 
   const sendEndResize = (): void => {
@@ -91,6 +93,8 @@ export function WindowResizeHandles() {
       }
       const target = event.currentTarget;
       capturePointer(target, event.pointerId);
+      captureTarget.current = target;
+      captureLost.current = false;
       ownerPointerId.current = event.pointerId;
       const operation = ++operationId.current;
       latestCursor.current = { x: event.screenX, y: event.screenY };
@@ -128,6 +132,8 @@ export function WindowResizeHandles() {
             endRequested.current = false;
             hasMoved.current = false;
             latestCursor.current = null;
+            captureTarget.current = null;
+            captureLost.current = false;
             releasePointer(target, event.pointerId);
           }
         })
@@ -140,6 +146,8 @@ export function WindowResizeHandles() {
           endRequested.current = false;
           hasMoved.current = false;
           latestCursor.current = null;
+          captureTarget.current = null;
+          captureLost.current = false;
           releasePointer(target, event.pointerId);
         });
     };
@@ -150,6 +158,7 @@ export function WindowResizeHandles() {
     if (event.pointerId !== ownerPointerId.current) {
       return;
     }
+    if (event.buttons === 0) return;
     latestCursor.current = { x: event.screenX, y: event.screenY };
     hasMoved.current = true;
     if (activeDirection.current === null || framePending.current) {
@@ -178,7 +187,15 @@ export function WindowResizeHandles() {
     const shouldFlushFinalMove = sessionOpen.current && hasMoved.current;
     ownerPointerId.current = null;
     activeDirection.current = null;
-    releasePointer(event.currentTarget, event.pointerId);
+    const eventTarget = event.currentTarget;
+    if (!captureLost.current) {
+      releasePointer(
+        eventTarget instanceof Element ? eventTarget : captureTarget.current,
+        event.pointerId,
+      );
+    }
+    captureTarget.current = null;
+    captureLost.current = false;
     if (!sessionOpen.current) {
       latestCursor.current = null;
       hasMoved.current = false;
@@ -197,16 +214,41 @@ export function WindowResizeHandles() {
     sendEndResize();
   };
 
+  const handleLostPointerCapture = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ): void => {
+    if (event.pointerId === ownerPointerId.current) captureLost.current = true;
+  };
+
   useEffect(() => {
+    const handleWindowPointerMove = (event: Event): void => {
+      const pointerEvent = event as PointerEvent;
+      if (pointerEvent.pointerId !== ownerPointerId.current) return;
+      handlePointerMove(pointerEvent as unknown as ReactPointerEvent<HTMLDivElement>);
+    };
     const handleWindowPointerEnd = (event: PointerEvent): void => {
       if (event.pointerId !== ownerPointerId.current) return;
       handlePointerEnd(event as unknown as ReactPointerEvent<HTMLDivElement>);
     };
+    const handleWindowBlur = (): void => {
+      const pointerId = ownerPointerId.current;
+      if (pointerId === null) return;
+      handlePointerEnd({
+        pointerId,
+        currentTarget: captureTarget.current,
+      } as unknown as ReactPointerEvent<HTMLDivElement>);
+    };
+    window.addEventListener('pointermove', handleWindowPointerMove);
+    window.addEventListener('pointerrawupdate', handleWindowPointerMove);
     window.addEventListener('pointerup', handleWindowPointerEnd);
     window.addEventListener('pointercancel', handleWindowPointerEnd);
+    window.addEventListener('blur', handleWindowBlur);
     return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove);
+      window.removeEventListener('pointerrawupdate', handleWindowPointerMove);
       window.removeEventListener('pointerup', handleWindowPointerEnd);
       window.removeEventListener('pointercancel', handleWindowPointerEnd);
+      window.removeEventListener('blur', handleWindowBlur);
     };
   }, []);
 
@@ -221,7 +263,7 @@ export function WindowResizeHandles() {
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerEnd}
           onPointerCancel={handlePointerEnd}
-          onLostPointerCapture={handlePointerEnd}
+          onLostPointerCapture={handleLostPointerCapture}
         />
       ))}
     </>

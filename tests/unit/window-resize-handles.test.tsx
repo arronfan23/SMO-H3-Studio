@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { WindowResizeHandles } from '../../src/renderer/WindowResizeHandles';
 import type { SmoApi } from '../../src/shared/ipc';
@@ -28,6 +28,7 @@ describe('WindowResizeHandles', () => {
   });
 
   afterEach(() => {
+    cleanup();
     delete (window as unknown as { smo?: unknown }).smo;
   });
 
@@ -58,7 +59,7 @@ describe('WindowResizeHandles', () => {
       expect(bridge.beginResize).toHaveBeenCalledWith('se', { x: 100, y: 200 }),
     );
 
-    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 130, screenY: 240 });
+    fireEvent.pointerMove(handle, { pointerId: 1, buttons: 1, screenX: 130, screenY: 240 });
     await waitFor(() =>
       expect(bridge.resize).toHaveBeenCalledWith('se', { x: 130, y: 240 }),
     );
@@ -174,7 +175,7 @@ describe('WindowResizeHandles', () => {
       screenX: 100,
       screenY: 200,
     });
-    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 140, screenY: 150 });
+    fireEvent.pointerMove(handle, { pointerId: 1, buttons: 1, screenX: 140, screenY: 150 });
     fireEvent.pointerUp(window, { pointerId: 1, screenX: 0, screenY: 0 });
 
     expect(bridge.resize).not.toHaveBeenCalled();
@@ -190,7 +191,7 @@ describe('WindowResizeHandles', () => {
     );
   });
 
-  test('flushes the last move on lost capture and allows the next drag to begin', async () => {
+  test('continues tracking raw moves after lost capture and ends only once', async () => {
     const { container } = render(<WindowResizeHandles />);
     const handle = container.querySelector('.window-resize-ne')!;
 
@@ -201,13 +202,28 @@ describe('WindowResizeHandles', () => {
       screenY: 200,
     });
     await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(1));
-    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 145, screenY: 155 });
+    fireEvent.pointerMove(handle, { pointerId: 1, buttons: 1, screenX: 145, screenY: 155 });
     fireEvent.lostPointerCapture(handle, { pointerId: 1, screenX: 0, screenY: 0 });
+    expect(bridge.endResize).not.toHaveBeenCalled();
 
+    const rawMove = new MouseEvent('pointerrawupdate', {
+      bubbles: true,
+      buttons: 1,
+      screenX: 175,
+      screenY: 145,
+    });
+    Object.defineProperty(rawMove, 'pointerId', { value: 1 });
+    fireEvent(window, rawMove);
+    fireEvent.pointerUp(window, { pointerId: 1, screenX: 0, screenY: 0 });
     await waitFor(() =>
-      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 145, y: 155 }),
+      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 175, y: 145 }),
     );
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+    fireEvent.blur(window);
+    fireEvent.pointerUp(window, { pointerId: 1, screenX: 0, screenY: 0 });
+    fireEvent.lostPointerCapture(handle, { pointerId: 1, screenX: 0, screenY: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.endResize).toHaveBeenCalledTimes(1);
 
     fireEvent.pointerDown(handle, {
       pointerId: 2,
@@ -216,13 +232,46 @@ describe('WindowResizeHandles', () => {
       screenY: 250,
     });
     await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(2));
-    fireEvent.pointerMove(handle, { pointerId: 2, screenX: 240, screenY: 280 });
+    fireEvent.pointerMove(handle, { pointerId: 2, buttons: 1, screenX: 240, screenY: 280 });
     fireEvent.pointerUp(handle, { pointerId: 2, screenX: 0, screenY: 0 });
 
     await waitFor(() =>
       expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 240, y: 280 }),
     );
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(2));
+  });
+
+  test('settles a lost-capture drag on blur and permits a fresh begin', async () => {
+    const { container } = render(<WindowResizeHandles />);
+    const handle = container.querySelector('.window-resize-ne')!;
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 1,
+      button: 0,
+      screenX: 100,
+      screenY: 200,
+    });
+    await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(1));
+    fireEvent.pointerMove(handle, { pointerId: 1, buttons: 1, screenX: 150, screenY: 160 });
+    fireEvent.lostPointerCapture(handle, { pointerId: 1, screenX: 0, screenY: 0 });
+    fireEvent.blur(window);
+
+    await waitFor(() =>
+      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 150, y: 160 }),
+    );
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+    fireEvent.blur(window);
+    fireEvent.pointerUp(window, { pointerId: 1, screenX: 0, screenY: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.endResize).toHaveBeenCalledTimes(1);
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 2,
+      button: 0,
+      screenX: 220,
+      screenY: 260,
+    });
+    await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(2));
   });
 
   test('ends exactly once when pointer up follows a resolved begin', async () => {
@@ -272,7 +321,7 @@ describe('WindowResizeHandles', () => {
     expect(bridge.endResize).not.toHaveBeenCalled();
 
     // The owner still drags and ends normally.
-    fireEvent.pointerMove(se, { pointerId: 1, screenX: 40, screenY: 50 });
+    fireEvent.pointerMove(se, { pointerId: 1, buttons: 1, screenX: 40, screenY: 50 });
     await waitFor(() =>
       expect(bridge.resize).toHaveBeenCalledWith('se', { x: 40, y: 50 }),
     );
@@ -313,7 +362,7 @@ describe('WindowResizeHandles', () => {
     resolvers[1](true);
     // Flush the resolve microtask so the session is armed before moving.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    fireEvent.pointerMove(handle, { pointerId: 2, screenX: 50, screenY: 60 });
+    fireEvent.pointerMove(handle, { pointerId: 2, buttons: 1, screenX: 50, screenY: 60 });
     await waitFor(() =>
       expect(bridge.resize).toHaveBeenCalledWith('se', { x: 50, y: 60 }),
     );
