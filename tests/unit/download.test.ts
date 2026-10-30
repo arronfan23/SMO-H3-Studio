@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { access, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import {
   createServer,
   type IncomingMessage,
@@ -163,6 +163,49 @@ describe('downloadFile', () => {
     expect(receipt.bytes).toBe(payload.length);
     expect(receipt.sha256).toBe(sha256(payload));
     expect(await readFile(destination)).toEqual(payload);
+  });
+
+  test('cancels the resumed response body when initial progress reporting throws', async () => {
+    const payload = Buffer.from('prefix-and-remaining-data');
+    const prefix = payload.subarray(0, 7);
+    const destination = join(directory, 'model.bin');
+    const progressError = new Error('progress callback failed');
+    let bodyCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(payload.subarray(prefix.length));
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    });
+    const fetchMock = vi.fn<Fetch>().mockResolvedValue(
+      new Response(body, {
+        status: 206,
+        headers: {
+          'Content-Length': String(payload.length - prefix.length),
+          'Content-Range': `bytes ${prefix.length}-${payload.length - 1}/${payload.length}`,
+        },
+      }),
+    );
+    await writeFile(`${destination}.part`, prefix);
+
+    await expect(
+      downloadFile({
+        url: 'https://download.test/model.bin',
+        destination,
+        expectedSize: payload.length,
+        expectedSha256: sha256(payload),
+        fetch: fetchMock,
+        onProgress: () => {
+          throw progressError;
+        },
+      }),
+    ).rejects.toBe(progressError);
+
+    expect(bodyCancelled).toBe(true);
+    expect(await readFile(`${destination}.part`)).toEqual(prefix);
+    expect(await exists(destination)).toBe(false);
   });
 
   test('rejects a 206 response whose Content-Range starts at the wrong offset', async () => {
@@ -729,6 +772,51 @@ describe('downloadParts', () => {
       paths: ['archive'],
       destinationName: 'archive.part',
     },
+    {
+      label: 'an earlier part final path is an ancestor of a later part',
+      paths: ['a', 'a/b'],
+      destinationName: 'archive.bin',
+    },
+    {
+      label: 'a later part final path is an ancestor of an earlier part',
+      paths: ['a/b', 'a'],
+      destinationName: 'archive.bin',
+    },
+    {
+      label: 'an earlier part temporary path is an ancestor of a later part',
+      paths: ['a', 'a.part/b'],
+      destinationName: 'archive.bin',
+    },
+    {
+      label: 'a later part temporary path is an ancestor of an earlier part',
+      paths: ['a.part/b', 'a'],
+      destinationName: 'archive.bin',
+    },
+    {
+      label: 'the destination is an ancestor of a part',
+      paths: ['a/b'],
+      destinationName: 'a',
+    },
+    {
+      label: 'a part is an ancestor of the destination',
+      paths: ['a'],
+      destinationName: 'a/b',
+    },
+    {
+      label: 'the destination temporary path is an ancestor of a part',
+      paths: ['a.part/b'],
+      destinationName: 'a',
+    },
+    {
+      label: 'a part is an ancestor of the destination temporary path',
+      paths: ['a'],
+      destinationName: 'a.part/b',
+    },
+    {
+      label: 'ancestor path comparison is case-insensitive',
+      paths: ['A', 'a/b'],
+      destinationName: 'archive.bin',
+    },
   ])('rejects $label before any request', async ({ paths, destinationName }) => {
     const data = Buffer.from('aaaaa');
     const parts = paths.map((path) => makePart(path, data));
@@ -753,6 +841,28 @@ describe('downloadParts', () => {
 
     expect(requests).toEqual([]);
     expect(await exists(destination)).toBe(false);
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  test('allows part paths whose names only share a string prefix', async () => {
+    const first = Buffer.from('first');
+    const second = Buffer.from('second');
+    const archive = Buffer.concat([first, second]);
+    const destination = join(directory, 'archive.bin');
+    handler = (request, response) => {
+      serveBuffer(request.url === '/a' ? first : second)(request, response);
+    };
+
+    await downloadParts({
+      parts: [makePart('a', first), makePart('ab', second)],
+      directory,
+      destination,
+      expectedSize: archive.length,
+      expectedSha256: sha256(archive),
+      fetch: transport,
+    });
+
+    expect(await readFile(destination)).toEqual(archive);
   });
 
   test('downloads and merges verified parts in array order with aggregate progress', async () => {
@@ -915,5 +1025,51 @@ describe('downloadParts', () => {
     });
 
     expect(await readFile(destination)).toEqual(payload);
+  });
+
+  test('retains a closed merged part when aborted at merge start and retries without part requests', async () => {
+    const first = Buffer.from('first-part');
+    const second = Buffer.from('second-part');
+    const archive = Buffer.concat([first, second]);
+    const destination = join(directory, 'archive.bin');
+    const mergedPartPath = `${destination}.part`;
+    const controller = new AbortController();
+    const requests: string[] = [];
+    handler = (request, response) => {
+      requests.push(request.url ?? '');
+      serveBuffer(request.url === '/part1.bin' ? first : second)(request, response);
+    };
+    const options = {
+      parts: [makePart('part1.bin', first), makePart('part2.bin', second)],
+      directory,
+      destination,
+      expectedSize: archive.length,
+      expectedSha256: sha256(archive),
+      fetch: transport,
+    };
+
+    await expect(
+      downloadParts({
+        ...options,
+        signal: controller.signal,
+        onProgress: ({ path }) => {
+          if (path === destination) controller.abort();
+        },
+      }),
+    ).rejects.toThrow(/abort|cancel/i);
+
+    expect(requests).toEqual(['/part1.bin', '/part2.bin']);
+    expect(await exists(destination)).toBe(false);
+    expect(await exists(mergedPartPath)).toBe(true);
+    const probePath = `${mergedPartPath}.probe`;
+    await rename(mergedPartPath, probePath);
+    await rename(probePath, mergedPartPath);
+
+    const receipt = await downloadParts(options);
+
+    expect(requests).toEqual(['/part1.bin', '/part2.bin']);
+    expect(receipt.bytes).toBe(archive.length);
+    expect(await readFile(destination)).toEqual(archive);
+    expect(await exists(mergedPartPath)).toBe(false);
   });
 });

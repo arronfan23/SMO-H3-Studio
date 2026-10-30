@@ -174,6 +174,23 @@ function isContainedPath(directory: string, candidate: string): boolean {
   );
 }
 
+function isSameOrAncestorPath(ancestor: string, candidate: string): boolean {
+  const child = win32.relative(ancestor, candidate);
+  return (
+    child === '' ||
+    (child !== '..' &&
+      !child.startsWith(`..${win32.sep}`) &&
+      !win32.isAbsolute(child))
+  );
+}
+
+function pathsCollide(first: string, second: string): boolean {
+  return (
+    isSameOrAncestorPath(first, second) ||
+    isSameOrAncestorPath(second, first)
+  );
+}
+
 async function regularFileStats(path: string): Promise<Stats | null> {
   try {
     const stats = await lstat(path);
@@ -355,11 +372,16 @@ export async function downloadFile(
   }
 
   if (append) {
-    options.onProgress?.({
-      downloadedBytes,
-      totalBytes: expectedSize,
-      path: destination,
-    });
+    try {
+      options.onProgress?.({
+        downloadedBytes,
+        totalBytes: expectedSize,
+        path: destination,
+      });
+    } catch (error) {
+      await discardResponse(response);
+      throw error;
+    }
   }
 
   let handle: FileHandle | undefined;
@@ -460,9 +482,7 @@ export async function downloadParts(
   }
 
   let declaredSize = 0;
-  const occupiedPaths = new Set(
-    [destination, `${destination}.part`].map((path) => path.toLowerCase()),
-  );
+  const occupiedPaths = [destination, `${destination}.part`];
   const parts = options.parts.map((part) => {
     validateHttpsUrl(part.url);
     validateExpectedSize(part.size);
@@ -473,11 +493,10 @@ export async function downloadParts(
       throw new Error('Part path escapes the parts directory');
     }
     for (const path of [resolvedPartPath, `${resolvedPartPath}.part`]) {
-      const normalizedPath = path.toLowerCase();
-      if (occupiedPaths.has(normalizedPath)) {
+      if (occupiedPaths.some((occupiedPath) => pathsCollide(occupiedPath, path))) {
         throw new Error('Part or destination path collision detected');
       }
-      occupiedPaths.add(normalizedPath);
+      occupiedPaths.push(path);
     }
     declaredSize += part.size;
     if (!Number.isSafeInteger(declaredSize)) {
