@@ -1257,7 +1257,7 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
     ).toBe('launch');
   });
 
-  test('replaces a same-path ready runtime when manifestVersion changes', async () => {
+  test('installs a manifest upgrade into a versioned runtime directory', async () => {
     const first = await createHarness();
     await first.service.start({
       profileId: 'high-memory-candidate',
@@ -1268,16 +1268,148 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
     await first.store.save({ ...ready, status: 'installing', manifestVersion: '0' });
     await first.store.markReady();
     const harness = await createHarness({ installRoot: first.installRoot });
+    const versionedRoot = join(
+      harness.installRoot,
+      'runtime',
+      `${TOP_LEVEL}.manifest-v1`,
+    );
 
-    await harness.service.start({
+    const state = await harness.service.start({
       profileId: 'high-memory-candidate',
       installRoot: harness.installRoot,
     });
 
     expect(harness.downloads.parts).toHaveBeenCalledTimes(1);
+    expect(state.config?.runtimeRoot).toBe(versionedRoot);
+    expect((await harness.store.load())?.runtimeRoot).toBe(versionedRoot);
+    expect(harness.backend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeRoot: versionedRoot,
+        pythonPath: join(versionedRoot, 'python_embeded', 'python.exe'),
+        launchScript: join(versionedRoot, 'tools', 'launch.py'),
+        ffprobePath: join(versionedRoot, 'tools', 'ffmpeg', 'ffprobe.exe'),
+      }),
+    );
     expect(
-      await readdir(join(harness.installRoot, '.smo-install', 'quarantine')),
-    ).toHaveLength(1);
+      await readFile(join(versionedRoot, 'tools', 'launch.py'), 'utf8'),
+    ).toBe('launch');
+    expect(
+      await readFile(join(first.runtimeRoot, 'tools', 'launch.py'), 'utf8'),
+    ).toBe('launch');
+    expect(existsSync(join(harness.installRoot, '.smo-install', 'quarantine'))).toBe(false);
+  });
+
+  test('reuses the versioned runtime directory on later runs after an upgrade', async () => {
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const ready = await first.store.load();
+    if (!ready) throw new Error('Expected a ready config');
+    await first.store.save({ ...ready, status: 'installing', manifestVersion: '0' });
+    await first.store.markReady();
+    const upgraded = await createHarness({ installRoot: first.installRoot });
+    await upgraded.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: upgraded.installRoot,
+    });
+    const versionedRoot = join(
+      upgraded.installRoot,
+      'runtime',
+      `${TOP_LEVEL}.manifest-v1`,
+    );
+    const harness = await createHarness({ installRoot: first.installRoot });
+
+    const state = await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(state.config?.runtimeRoot).toBe(versionedRoot);
+    expect(harness.downloads.parts).not.toHaveBeenCalled();
+    expect(harness.networkDownloads).toHaveLength(0);
+    expect(harness.backend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeRoot: versionedRoot,
+        pythonPath: join(versionedRoot, 'python_embeded', 'python.exe'),
+      }),
+    );
+  });
+
+  test('keeps the old ready runtime and config when a manifest upgrade download fails', async () => {
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const ready = await first.store.load();
+    if (!ready) throw new Error('Expected a ready config');
+    await first.store.save({ ...ready, status: 'installing', manifestVersion: '0' });
+    const oldReady = await first.store.markReady();
+    const harness = await createHarness({
+      installRoot: first.installRoot,
+      service: {
+        downloadParts: async () => {
+          throw new Error('network down');
+        },
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/network down/);
+
+    expect(await harness.store.load()).toEqual(oldReady);
+    expect(
+      await readFile(join(first.runtimeRoot, 'tools', 'launch.py'), 'utf8'),
+    ).toBe('launch');
+    expect(existsSync(join(first.runtimeRoot, 'docs', 'file-manifest.sha256'))).toBe(true);
+    expect(existsSync(join(harness.installRoot, '.smo-install', 'quarantine'))).toBe(false);
+  });
+
+  test('keeps the old ready runtime and config when a manifest upgrade backend start fails', async () => {
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const ready = await first.store.load();
+    if (!ready) throw new Error('Expected a ready config');
+    await first.store.save({ ...ready, status: 'installing', manifestVersion: '0' });
+    const oldReady = await first.store.markReady();
+    const harness = await createHarness({
+      installRoot: first.installRoot,
+      service: {
+        startBackend: async () => {
+          throw new Error('backend exploded');
+        },
+      },
+    });
+    const versionedRoot = join(
+      harness.installRoot,
+      'runtime',
+      `${TOP_LEVEL}.manifest-v1`,
+    );
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/backend exploded/);
+
+    expect(await harness.store.load()).toEqual(oldReady);
+    expect(
+      await readFile(join(first.runtimeRoot, 'tools', 'launch.py'), 'utf8'),
+    ).toBe('launch');
+    expect(existsSync(join(harness.installRoot, '.smo-install', 'quarantine'))).toBe(false);
+    expect(
+      await readFile(join(versionedRoot, 'tools', 'launch.py'), 'utf8'),
+    ).toBe('launch');
   });
 
   test('keeps a matching ready runtime in place when its hash is corrupt', async () => {

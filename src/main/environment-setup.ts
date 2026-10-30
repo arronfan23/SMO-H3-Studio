@@ -210,7 +210,7 @@ function validateProfile(profile: EnvironmentProfile, hardware: HardwareInfo): v
   }
 }
 
-function createLayout(installRoot: string, runtime: EnvironmentRuntime): InstallationLayout {
+function runtimeTopLevel(runtime: EnvironmentRuntime): string {
   const runtimeSegments = runtime.pythonPath.split('/');
   const topLevel = runtimeSegments[0];
   if (
@@ -221,15 +221,30 @@ function createLayout(installRoot: string, runtime: EnvironmentRuntime): Install
   ) {
     throw new Error('Runtime entry points must share one top-level directory');
   }
+  return topLevel;
+}
 
+function versionedRuntimeDirName(topLevel: string, manifestVersion: string): string {
+  const safeVersion =
+    manifestVersion.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/[. ]+$/, '') ||
+    'unknown';
+  return `${topLevel}.manifest-v${safeVersion}`;
+}
+
+function createLayout(
+  installRoot: string,
+  runtime: EnvironmentRuntime,
+  runtimeDirName?: string,
+): InstallationLayout {
+  const topLevel = runtimeTopLevel(runtime);
   const workDirectory = win32.join(installRoot, '.smo-install');
   const downloadDirectory = win32.join(workDirectory, 'downloads');
   const stagingDirectory = win32.join(workDirectory, 'staging');
   const runtimeContainer = win32.join(installRoot, 'runtime');
-  const runtimeRoot = win32.join(runtimeContainer, topLevel);
+  const runtimeRoot = win32.join(runtimeContainer, runtimeDirName ?? topLevel);
   const modelRoot = win32.join(installRoot, 'models');
   const resolveRuntimePath = (path: string) =>
-    win32.join(runtimeContainer, ...path.split('/'));
+    win32.join(runtimeRoot, ...path.split('/').slice(1));
 
   return {
     installRoot,
@@ -676,6 +691,37 @@ export class EnvironmentSetupService {
     await rename(layout.runtimeRoot, destination);
   }
 
+  /**
+   * A ready runtime recorded under an older manifest is never moved, reused,
+   * or deleted: upgrades install into a versioned sibling directory so a
+   * failed attempt leaves the working environment untouched. A ready runtime
+   * on the current manifest is reused at its recorded directory, whether that
+   * is the default top-level folder or a versioned one.
+   */
+  private resolveLayout(
+    installRoot: string,
+    runtime: EnvironmentRuntime,
+    previous: EnvironmentConfig | null,
+  ): InstallationLayout {
+    if (previous?.status === 'ready' && previous.runtimeId === runtime.id) {
+      const manifestVersion = String(this.options.manifest.version);
+      if (previous.manifestVersion === manifestVersion) {
+        const container = win32.resolve(win32.join(installRoot, 'runtime'));
+        const recorded = win32.resolve(previous.runtimeRoot);
+        if (win32.dirname(recorded).toLowerCase() === container.toLowerCase()) {
+          return createLayout(installRoot, runtime, win32.basename(recorded));
+        }
+      } else {
+        return createLayout(
+          installRoot,
+          runtime,
+          versionedRuntimeDirName(runtimeTopLevel(runtime), manifestVersion),
+        );
+      }
+    }
+    return createLayout(installRoot, runtime);
+  }
+
   private async execute(input: EnvironmentStartInput): Promise<EnvironmentState> {
     const controller = new AbortController();
     this.controller = controller;
@@ -716,11 +762,10 @@ export class EnvironmentSetupService {
         profile: input.profileId,
       };
       this.state = { ...this.state, selection };
-      layout = createLayout(installRoot, selection.runtime);
-
       previousConfig = this.state.config;
       const previous = previousConfig;
       preserveReady = previous?.status === 'ready';
+      layout = this.resolveLayout(installRoot, selection.runtime, previous);
       const now = new Date().toISOString();
       candidate = {
         schemaVersion: 1,
@@ -760,8 +805,7 @@ export class EnvironmentSetupService {
       let runtimeValid = false;
       let runtimeError: unknown;
       const runtimeExists = await pathExists(layout.runtimeRoot);
-      const staleReadyRuntime = runtimeExists && matchingReadyPaths && !matchingReady;
-      if (runtimeExists && !staleReadyRuntime) {
+      if (runtimeExists) {
         try {
           await verifyRuntimeFiles(layout.runtimeRoot, signal);
           runtimeValid = true;
