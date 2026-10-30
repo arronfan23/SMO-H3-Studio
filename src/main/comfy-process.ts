@@ -97,6 +97,7 @@ export interface ComfyProcessManagerOptions {
   launchDirectory?: string;
   ownedProcess?: boolean;
   killProcessTree?: (pid: number) => Promise<void>;
+  terminatePidTimeoutMs?: number;
   logPath: string;
   startupTimeoutMs?: number;
   staleStartupMs?: number;
@@ -211,6 +212,7 @@ export class ComfyProcessManager {
   private readonly launchDirectory: string;
   private readonly ownedProcess: boolean;
   private readonly killProcessTree: (pid: number) => Promise<void>;
+  private readonly terminatePidTimeoutMs: number;
   private readonly pidPath: string;
   private readonly logPath: string;
   private readonly statusPath: string;
@@ -222,7 +224,9 @@ export class ComfyProcessManager {
   private startPromise: Promise<ComfySystemStats> | null = null;
   private activeStartup: ActiveStartup | null = null;
   private launchedProcess = false;
-  private terminated = false;
+  private terminateRequested = false;
+  private terminationPromise: Promise<void> | null = null;
+  private launchPromise: Promise<string> | null = null;
   private closed = false;
 
   constructor(
@@ -252,6 +256,10 @@ export class ComfyProcessManager {
     this.launchDirectory = options.launchDirectory ?? dirname(options.logPath);
     this.ownedProcess = options.ownedProcess ?? false;
     this.killProcessTree = options.killProcessTree ?? defaultKillProcessTree;
+    this.terminatePidTimeoutMs = validateTimeout(
+      options.terminatePidTimeoutMs ?? 5_000,
+      'terminatePidTimeoutMs',
+    );
     this.pidPath = join(this.launchDirectory, PID_FILE_NAME);
     this.logPath = options.logPath;
     this.statusPath = `${options.logPath}.exit`;
@@ -311,32 +319,57 @@ export class ComfyProcessManager {
 
   /**
    * Owned-mode shutdown for candidates that must not outlive the install
-   * attempt. Kills only a backend this manager actually launched (recorded
-   * PID, no exit record); a reused healthy instance or an already-exited
-   * process is left alone, and non-owned managers are never killed.
+   * attempt. Awaitably idempotent: concurrent and repeated callers share one
+   * termination attempt. The attempt waits for an in-flight launch and for a
+   * late pid file (bounded), then kills only a backend this manager actually
+   * launched with no exit record; a reused healthy instance, a manager that
+   * never launched, and non-owned managers are never killed.
    */
   async terminate(): Promise<void> {
     this.closed = true;
-    if (!this.ownedProcess || !this.launchedProcess || this.terminated) {
+    this.terminateRequested = true;
+    if (!this.ownedProcess) {
       return;
     }
-    // Mark synchronously so concurrent terminate callers cannot both kill.
-    this.terminated = true;
+    this.terminationPromise ??= this.performTerminate();
+    return this.terminationPromise;
+  }
+
+  private async performTerminate(): Promise<void> {
+    // Let an in-flight ShellExecute call settle first so a process that is
+    // starting right now cannot slip past the kill.
+    await this.launchPromise?.catch(() => undefined);
+    if (!this.launchedProcess) {
+      return;
+    }
     if ((await this.readExitCode()) !== null) {
       return;
     }
-    let pid: number | null = null;
-    try {
-      const content = await readFile(this.pidPath, 'utf8');
-      const parsed = Number.parseInt(content.trim(), 10);
-      pid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-    } catch {
-      pid = null;
-    }
+    const pid = await this.waitForPid();
     if (pid === null) {
       return;
     }
     await this.killProcessTree(pid);
+  }
+
+  private async waitForPid(): Promise<number | null> {
+    const deadline = Date.now() + this.terminatePidTimeoutMs;
+    for (;;) {
+      try {
+        const content = await readFile(this.pidPath, 'utf8');
+        const parsed = Number.parseInt(content.trim(), 10);
+        if (Number.isInteger(parsed) && parsed > 0) {
+          return parsed;
+        }
+      } catch {
+        // The worker has not written its pid file yet.
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return null;
+      }
+      await delay(Math.min(50, remaining));
+    }
   }
 
   private async startAndWait(): Promise<ComfySystemStats> {
@@ -434,16 +467,38 @@ export class ComfyProcessManager {
     );
     // A stale exit marker from a previous backend must not poison this start.
     await rm(this.statusPath, { force: true });
+    if (this.ownedProcess) {
+      // A stale pid file must never point terminate() at an old process.
+      await rm(this.pidPath, { force: true });
+    }
     if (this.closed) {
       throw new Error('ComfyProcessManager is closed');
     }
-
-    const failure = await this.openLauncher(hiddenLauncherPath);
+    // From the closed check above to the launchPromise assignment there is
+    // no await, so a concurrent terminate() either lands before it (and the
+    // launch never happens) or after launchPromise is set (and waits on it).
+    // Mark the launch before the call: the process tree may start while the
+    // ShellExecute request is still in flight.
+    this.launchedProcess = true;
+    const openResult = this.openLauncher(hiddenLauncherPath);
+    this.launchPromise = openResult;
+    let failure: string;
+    try {
+      failure = await openResult;
+    } finally {
+      if (this.launchPromise === openResult) {
+        this.launchPromise = null;
+      }
+    }
     if (failure.length > 0) {
       throw new Error(`Failed to start the ComfyUI process: ${failure}`);
     }
+    if (this.terminateRequested) {
+      // terminate() ran while the process was starting: never continue into
+      // the health wait or activate this backend.
+      throw new Error('ComfyProcessManager is closed');
+    }
     this.activeStartup = { startedAt: Date.now() };
-    this.launchedProcess = true;
   }
 
   private async readExitCode(): Promise<number | null> {

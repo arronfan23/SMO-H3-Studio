@@ -445,6 +445,7 @@ describe('createEnvironmentStartBackend', () => {
       startupEvidenceTimeoutMs?: number;
       onCreateManager?: (options: { logPath: string; launchDirectory?: string }) => void;
       openLauncher?: (path: string) => Promise<string>;
+      activeOpenLauncher?: (path: string) => Promise<string>;
       killProcessTree?: (pid: number) => Promise<void>;
     } = {},
   ) {
@@ -459,7 +460,15 @@ describe('createEnvironmentStartBackend', () => {
     const createdManagerTerminateSpies: ReturnType<typeof vi.spyOn>[] = [];
     const kills: number[] = [];
     let activeManager: ComfyProcessManager | undefined = new ComfyProcessManager(
-      { baseUrl, logPath: join(logDirectory, 'old.log') },
+      {
+        baseUrl,
+        logPath: join(logDirectory, 'old.log'),
+        startupTimeoutMs: 2_000,
+        pollIntervalMs: 20,
+        ...(adapterOverrides.activeOpenLauncher
+          ? { openLauncher: adapterOverrides.activeOpenLauncher }
+          : {}),
+      },
       comfy,
     );
     const startBackend = createEnvironmentStartBackend({
@@ -798,6 +807,79 @@ describe('createEnvironmentStartBackend', () => {
     expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
 
     releaseObjectInfo();
+  });
+
+  test('a same-path offline candidate launches into its own chain next to the active manager', async () => {
+    const logDirectory = await useDataDirectory();
+    let healthy = false;
+    const upstream = await startBackendServer({
+      systemStatsResponder: () =>
+        healthy ? { system: { os: 'test' }, devices: [] } : {},
+    });
+    cleanups.push(() => upstream.close());
+    let releaseActiveOpen!: () => void;
+    const activeOpenGate = new Promise<void>((resolve) => {
+      releaseActiveOpen = resolve;
+    });
+    let markActiveOpen!: () => void;
+    const activeOpenCalled = new Promise<void>((resolve) => {
+      markActiveOpen = resolve;
+    });
+    const candidateLaunches: string[] = [];
+    const candidateDirs: string[] = [];
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory, {
+      activeOpenLauncher: async () => {
+        markActiveOpen();
+        await activeOpenGate;
+        return '';
+      },
+      openLauncher: async (path) => {
+        candidateLaunches.push(path);
+        return '';
+      },
+      onCreateManager: (options) => {
+        candidateDirs.push(options.launchDirectory ?? '');
+      },
+    });
+    const oldManager = harness.getActiveManager()!;
+
+    // The active manager starts launching first and blocks inside
+    // openLauncher after writing its launcher files into the log directory.
+    const activePending = oldManager.ensureReady();
+    await activeOpenCalled;
+
+    // The candidate (same runtime root, backend offline) launches while the
+    // active manager's launcher files sit in the shared log directory.
+    const candidatePending = harness.startBackend(
+      makeBackendInput({ runtimeRoot: 'D:\\Env\\runtime\\OldRoot' }),
+    );
+    await vi.waitFor(() => expect(candidateLaunches).toHaveLength(1));
+
+    releaseActiveOpen();
+    healthy = true;
+    await expect(activePending).resolves.toBeDefined();
+    await expect(candidatePending).resolves.toBeDefined();
+
+    // The active manager's chain in the log directory was never overwritten.
+    const activePaths = await readFile(
+      join(logDirectory, 'start-comfyui.paths'),
+      'utf8',
+    );
+    expect(activePaths).toContain(
+      `SMO_COMFY_LOG=${join(logDirectory, 'old.log')}`,
+    );
+    expect(activePaths).not.toContain('environment-');
+
+    // The candidate used its own UUID-isolated launch chain.
+    expect(candidateDirs).toHaveLength(1);
+    expect(candidateDirs[0]).toMatch(/environment-[0-9a-f-]+$/);
+    const candidatePaths = await readFile(
+      join(candidateDirs[0], 'start-comfyui.paths'),
+      'utf8',
+    );
+    expect(candidatePaths).toContain('environment-');
+    expect(candidatePaths).not.toContain('old.log');
+    expect(harness.kills).toEqual([]);
   });
 });
 

@@ -776,4 +776,83 @@ describe('ComfyProcessManager', () => {
     await owned.manager.close();
     expect(killProcessTree).not.toHaveBeenCalled();
   });
+
+  test('terminate waits for a delayed launch and kills once the pid appears', async () => {
+    const health = offlineHealth();
+    let releaseOpen!: () => void;
+    const openGate = new Promise<void>((resolve) => {
+      releaseOpen = resolve;
+    });
+    let markOpenCalled!: () => void;
+    const openCalled = new Promise<void>((resolve) => {
+      markOpenCalled = resolve;
+    });
+    const killProcessTree = vi.fn(async (_pid: number) => undefined);
+    const { manager } = createManager({
+      client: { health },
+      ownedProcess: true,
+      killProcessTree,
+      terminatePidTimeoutMs: 2_000,
+      startupTimeoutMs: 5_000,
+      openLauncher: async () => {
+        markOpenCalled();
+        await openGate;
+        // The worker writes its pid file only after the process tree is
+        // already starting, possibly well after the open call returns.
+        setTimeout(() => {
+          void writeFile(join(tempDir, 'comfy-worker.pid'), '7001', 'utf8');
+        }, 50);
+        return '';
+      },
+    });
+
+    const pending = manager.ensureReady();
+    await openCalled;
+
+    // Terminate while the ShellExecute call is still in flight.
+    const terminating = manager.terminate();
+    const rejection = expect(pending).rejects.toThrow(/closed/i);
+    releaseOpen();
+
+    await terminating;
+    expect(killProcessTree).toHaveBeenCalledWith(7001);
+    // The startup must not proceed once termination was requested.
+    await rejection;
+  });
+
+  test('concurrent and repeated terminate calls share a single kill', async () => {
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) throw new Error('ComfyUI is offline');
+      return STATS;
+    });
+    const killProcessTree = vi.fn(async (_pid: number) => undefined);
+    const { manager, openCalls } = createManager({
+      client: { health },
+      ownedProcess: true,
+      killProcessTree,
+      terminatePidTimeoutMs: 2_000,
+      openLauncher: async () => {
+        await writeFile(join(tempDir, 'comfy-worker.pid'), '7002', 'utf8');
+        return '';
+      },
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    await Promise.all([
+      manager.terminate(),
+      manager.terminate(),
+      manager.terminate(),
+    ]);
+    await manager.terminate();
+    await manager.close();
+    await manager.terminate();
+
+    expect(killProcessTree).toHaveBeenCalledTimes(1);
+    expect(killProcessTree).toHaveBeenCalledWith(7002);
+  });
 });

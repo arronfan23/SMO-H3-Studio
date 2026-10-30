@@ -293,17 +293,20 @@ export function createEnvironmentStartBackend(
       );
     }
 
-    // A new runtime gets its own log AND its own launch directory (inner
-    // launcher, hidden launcher, paths file, pid file) under one UUID: the
-    // old backend and any previous candidate must never share a file with
-    // this attempt's startup chain.
+    // Every candidate gets its own log AND its own launch directory (inner
+    // launcher, hidden launcher, paths file, pid file) under one UUID —
+    // whether or not the runtime is new: any candidate may start a process,
+    // and neither the old backend nor a concurrently launching active
+    // manager may share a file with this attempt's startup chain.
     const candidateId = randomUUID();
-    const candidateLogPath = requiresNewRuntime
-      ? join(dirname(adapter.logPath), `environment-${candidateId}.log`)
-      : adapter.logPath;
-    const candidateLaunchDirectory = requiresNewRuntime
-      ? join(dirname(adapter.logPath), `environment-${candidateId}`)
-      : undefined;
+    const candidateLogPath = join(
+      dirname(adapter.logPath),
+      `environment-${candidateId}.log`,
+    );
+    const candidateLaunchDirectory = join(
+      dirname(adapter.logPath),
+      `environment-${candidateId}`,
+    );
     const candidate = createManager(
       {
         baseUrl: adapter.baseUrl,
@@ -313,9 +316,7 @@ export function createEnvironmentStartBackend(
         outputDirectory: input.outputDirectory,
         lowvram: input.profile !== 'high-memory-candidate',
         logPath: candidateLogPath,
-        ...(candidateLaunchDirectory === undefined
-          ? {}
-          : { launchDirectory: candidateLaunchDirectory }),
+        launchDirectory: candidateLaunchDirectory,
         ownedProcess: true,
         ...(adapter.killProcessTree === undefined
           ? {}
