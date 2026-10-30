@@ -387,12 +387,24 @@ describe('createEnvironmentStartBackend', () => {
 
   async function startBackendServer(
     objectInfoGate?: { requested: Promise<void>; onRequest?: () => void },
+    systemStatsResponder?: (requestCount: number) => unknown,
   ): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+    let systemStatsRequests = 0;
     const server: Server = createServer((request, response) => {
       const sendJson = (value: unknown) => {
         response.writeHead(200, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify(value));
       };
+      if (request.url === '/system_stats') {
+        systemStatsRequests += 1;
+        sendJson(
+          systemStatsResponder?.(systemStatsRequests) ?? {
+            system: { os: 'test' },
+            devices: [],
+          },
+        );
+        return;
+      }
       if (request.url === '/object_info') {
         if (objectInfoGate) {
           objectInfoGate.onRequest?.();
@@ -420,7 +432,15 @@ describe('createEnvironmentStartBackend', () => {
     };
   }
 
-  function createAdapterHarness(baseUrl: string, logDirectory: string) {
+  function createAdapterHarness(
+    baseUrl: string,
+    logDirectory: string,
+    adapterOverrides: {
+      startupEvidenceTimeoutMs?: number;
+      onCreateManager?: (logPath: string) => void;
+      openLauncher?: (path: string) => Promise<string>;
+    } = {},
+  ) {
     const comfy = new ComfyClient(baseUrl);
     const activePaths: EnvironmentPaths = {
       runtimeRoot: 'D:\\Env\\runtime\\OldRoot',
@@ -428,6 +448,7 @@ describe('createEnvironmentStartBackend', () => {
       outputDirectory: 'D:\\Env\\output',
     };
     const createdManagers: ComfyProcessManager[] = [];
+    const createdManagerCloseSpies: ReturnType<typeof vi.spyOn>[] = [];
     let activeManager: ComfyProcessManager | undefined = new ComfyProcessManager(
       { baseUrl, logPath: join(logDirectory, 'old.log') },
       comfy,
@@ -442,15 +463,31 @@ describe('createEnvironmentStartBackend', () => {
         activeManager = manager;
       },
       createManager: (options, client) => {
-        const manager = new ComfyProcessManager(options, client);
+        adapterOverrides.onCreateManager?.(options.logPath);
+        const manager = new ComfyProcessManager(
+          {
+            startupTimeoutMs: 2_000,
+            pollIntervalMs: 20,
+            ...options,
+            ...(adapterOverrides.openLauncher
+              ? { openLauncher: adapterOverrides.openLauncher }
+              : {}),
+          },
+          client,
+        );
         createdManagers.push(manager);
+        createdManagerCloseSpies.push(vi.spyOn(manager, 'close'));
         return manager;
       },
+      ...(adapterOverrides.startupEvidenceTimeoutMs === undefined
+        ? {}
+        : { startupEvidenceTimeoutMs: adapterOverrides.startupEvidenceTimeoutMs }),
     });
     return {
       comfy,
       activePaths,
       createdManagers,
+      createdManagerCloseSpies,
       startBackend,
       getActiveManager: () => activeManager,
     };
@@ -529,6 +566,81 @@ describe('createEnvironmentStartBackend', () => {
     expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
 
     releaseObjectInfo();
+  });
+
+  test('rejects when the old backend answers during a TOCTOU window without startup evidence', async () => {
+    const logDirectory = await useDataDirectory();
+    // Precise race: the pre-check health call fails (backend offline), but
+    // the candidate's first health call inside ensureReady succeeds because
+    // the OLD backend came online in between. The candidate never launches
+    // anything, so its independent log never gains startup evidence.
+    const upstream = await startBackendServer(undefined, (requestCount) =>
+      requestCount === 1 ? {} : { system: { os: 'test' }, devices: [] },
+    );
+    cleanups.push(() => upstream.close());
+    const launches: string[] = [];
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory, {
+      startupEvidenceTimeoutMs: 300,
+      openLauncher: async (path) => {
+        launches.push(path);
+        return '';
+      },
+    });
+    const oldManager = harness.getActiveManager();
+
+    await expect(harness.startBackend(makeBackendInput())).rejects.toThrow(
+      /startup|evidence|confirm/i,
+    );
+
+    // The candidate was closed, never launched a process, and the active
+    // manager and paths still belong to the old runtime.
+    expect(harness.createdManagers).toHaveLength(1);
+    expect(harness.createdManagerCloseSpies[0]).toHaveBeenCalled();
+    expect(launches).toHaveLength(0);
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+  });
+
+  test('accepts a genuinely launched candidate once its own log proves the startup', async () => {
+    const logDirectory = await useDataDirectory();
+    let healthy = false;
+    const upstream = await startBackendServer(undefined, () =>
+      healthy ? { system: { os: 'test' }, devices: [] } : {},
+    );
+    cleanups.push(() => upstream.close());
+    const port = new URL(upstream.baseUrl).port;
+    const candidateLogPaths: string[] = [];
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory, {
+      startupEvidenceTimeoutMs: 2_000,
+      onCreateManager: (logPath) => candidateLogPaths.push(logPath),
+      openLauncher: async () => {
+        // Simulate ComfyUI booting from the candidate runtime: it writes
+        // its own startup lines into the candidate's independent log.
+        healthy = true;
+        const logPath = candidateLogPaths[candidateLogPaths.length - 1];
+        await writeFile(
+          logPath,
+          `Starting server\nTo see the GUI go to: http://127.0.0.1:${port}\n`,
+          'utf8',
+        );
+        return '';
+      },
+    });
+    const oldManager = harness.getActiveManager()!;
+    const oldClose = vi.spyOn(oldManager, 'close');
+
+    const result = (await harness.startBackend(makeBackendInput())) as {
+      systemStats: unknown;
+      objectInfo: Record<string, unknown>;
+    };
+
+    expect(result.objectInfo).toEqual(objectInfoFixture);
+    // A new runtime must use an independent log, never the shared one.
+    expect(candidateLogPaths).toHaveLength(1);
+    expect(candidateLogPaths[0]).toMatch(/environment-[0-9a-f-]+\.log$/);
+    expect(harness.getActiveManager()).not.toBe(oldManager);
+    expect(oldClose).toHaveBeenCalled();
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\NewRoot');
   });
 });
 

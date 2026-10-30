@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
-import { join, win32 } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app, dialog, protocol, shell } from 'electron';
 import type { GenerationHandler, IpcServices } from './ipc';
@@ -154,6 +155,7 @@ export interface EnvironmentStartBackendAdapterOptions {
   activePaths: EnvironmentPaths;
   getActiveManager: () => ComfyProcessManager | undefined;
   setActiveManager: (manager: ComfyProcessManager) => void;
+  startupEvidenceTimeoutMs?: number;
   createManager?: (
     options: ComfyProcessManagerOptions,
     client: Pick<ComfyClient, 'health'>,
@@ -164,6 +166,81 @@ function sameRuntimeRoot(a: string, b: string): boolean {
   return win32.normalize(a).toLowerCase() === win32.normalize(b).toLowerCase();
 }
 
+const STARTUP_EVIDENCE_TIMEOUT_MS = 10_000;
+const STARTUP_EVIDENCE_POLL_MS = 50;
+
+function backendPort(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    if (url.port.length > 0) {
+      return url.port;
+    }
+    return url.protocol === 'https:' ? '443' : '80';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * A freshly started ComfyUI logs its bind line; the port must match the
+ * configured backend so a different process cannot satisfy the check.
+ */
+function hasStartupEvidence(logContent: string, port: string): boolean {
+  if (
+    !logContent.includes('Starting server') ||
+    !logContent.includes('To see the GUI go to:')
+  ) {
+    return false;
+  }
+  const guiLine = logContent
+    .split(/\r?\n/)
+    .find((line) => line.includes('To see the GUI go to:'));
+  if (guiLine === undefined || port.length === 0) {
+    return false;
+  }
+  const match = /:(\d{1,5})(?:\D|$)/.exec(
+    guiLine.slice(guiLine.indexOf('To see the GUI go to:')),
+  );
+  return match?.[1] === port;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Polls the candidate's independent log for proof that THIS ComfyUI bound
+ * the expected port. Never surfaces log content in errors.
+ */
+async function waitForStartupEvidence(input: {
+  logPath: string;
+  port: string;
+  signal: AbortSignal;
+  timeoutMs: number;
+}): Promise<void> {
+  const deadline = Date.now() + input.timeoutMs;
+  for (;;) {
+    input.signal.throwIfAborted();
+    let content = '';
+    try {
+      content = await readFile(input.logPath, 'utf8');
+    } catch {
+      // The launcher creates the log only once ComfyUI starts writing.
+    }
+    if (hasStartupEvidence(content, input.port)) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        'Could not confirm the new ComfyUI runtime started: its log shows ' +
+          'no startup evidence for the expected port; refusing to mark the ' +
+          'environment ready',
+      );
+    }
+    await delay(Math.min(STARTUP_EVIDENCE_POLL_MS, deadline - Date.now()));
+  }
+}
+
 /**
  * Builds the environment setup's backend starter. A candidate manager must
  * prove itself (health + required nodes) before it replaces the active one;
@@ -171,6 +248,9 @@ function sameRuntimeRoot(a: string, b: string): boolean {
  * backend. A healthy backend only vouches for the runtime it was started
  * from: when it serves a different runtime root than the candidate, the
  * install must refuse to proceed instead of impersonating the new runtime.
+ * Because the old backend can race the pre-check and answer the candidate's
+ * first health probe, a new runtime must additionally prove itself through
+ * its own startup log before it is accepted.
  */
 export function createEnvironmentStartBackend(
   adapter: EnvironmentStartBackendAdapterOptions,
@@ -182,6 +262,10 @@ export function createEnvironmentStartBackend(
       client: Pick<ComfyClient, 'health'>,
     ) => new ComfyProcessManager(options, client));
   return async (input: EnvironmentBackendInput) => {
+    const requiresNewRuntime = !sameRuntimeRoot(
+      input.runtimeRoot,
+      adapter.activePaths.runtimeRoot,
+    );
     let backendHealthy = false;
     try {
       await adapter.comfy.health();
@@ -189,10 +273,7 @@ export function createEnvironmentStartBackend(
     } catch {
       backendHealthy = false;
     }
-    if (
-      backendHealthy &&
-      !sameRuntimeRoot(input.runtimeRoot, adapter.activePaths.runtimeRoot)
-    ) {
+    if (backendHealthy && requiresNewRuntime) {
       throw new Error(
         'Another ComfyUI backend is already running from ' +
           `${adapter.activePaths.runtimeRoot}; close it before starting the ` +
@@ -200,6 +281,12 @@ export function createEnvironmentStartBackend(
       );
     }
 
+    // A new runtime gets its own log (and therefore its own exit-status
+    // file): the old backend must never write into the file that serves as
+    // the candidate's startup evidence.
+    const candidateLogPath = requiresNewRuntime
+      ? join(dirname(adapter.logPath), `environment-${randomUUID()}.log`)
+      : adapter.logPath;
     const candidate = createManager(
       {
         baseUrl: adapter.baseUrl,
@@ -208,7 +295,7 @@ export function createEnvironmentStartBackend(
         launchScript: input.launchScript,
         outputDirectory: input.outputDirectory,
         lowvram: input.profile !== 'high-memory-candidate',
-        logPath: adapter.logPath,
+        logPath: candidateLogPath,
       },
       adapter.comfy,
     );
@@ -223,6 +310,18 @@ export function createEnvironmentStartBackend(
         input.signal,
         closeCandidate,
       );
+      if (requiresNewRuntime) {
+        // Health alone is not proof for a new runtime: the old backend may
+        // have answered the probe. Only this candidate's own startup log
+        // closes that window.
+        await waitForStartupEvidence({
+          logPath: candidateLogPath,
+          port: backendPort(adapter.baseUrl),
+          signal: input.signal,
+          timeoutMs:
+            adapter.startupEvidenceTimeoutMs ?? STARTUP_EVIDENCE_TIMEOUT_MS,
+        });
+      }
       objectInfo = await raceWithAbort(
         adapter.comfy.objectInfo(),
         input.signal,
