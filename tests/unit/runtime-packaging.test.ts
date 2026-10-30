@@ -166,7 +166,13 @@ function huggingFaceLocation(modelUrl: string) {
 }
 
 function makeHuggingFaceFetch(
-  options: { wrongSize?: boolean; fail?: boolean; currentLfsField?: boolean } = {},
+  options: {
+    wrongSize?: boolean;
+    wrongSha256?: boolean;
+    fail?: boolean;
+    httpStatus?: number;
+    currentLfsField?: boolean;
+  } = {},
 ) {
   const requestedUrls: string[] = [];
   const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
@@ -179,6 +185,9 @@ function makeHuggingFaceFetch(
     if (!match || url.search !== '?blobs=true') {
       throw new Error(`Unexpected Hugging Face API request: ${requestUrl}`);
     }
+    if (options.httpStatus) {
+      return new Response('simulated HTTP failure', { status: options.httpStatus });
+    }
 
     const siblings = rawManifest.modelFiles
       .filter((model) => {
@@ -190,7 +199,7 @@ function makeHuggingFaceFetch(
         size: model.size + (options.wrongSize && index === 0 ? 1 : 0),
         lfs: options.currentLfsField
           ? { sha256: model.sha256, size: model.size, pointerSize: 136 }
-          : { oid: model.sha256 },
+          : { oid: options.wrongSha256 && index === 0 ? '0'.repeat(64) : model.sha256 },
       }));
     return Response.json({ siblings });
   };
@@ -346,6 +355,33 @@ describe('build-environment-manifest.mjs', () => {
         fetchImpl: huggingFace.fetchImpl,
       }),
     ).rejects.toThrow(/size|metadata/i);
+  });
+
+  test('fails when Hugging Face metadata does not match the reviewed SHA256', async () => {
+    const { buildEnvironmentManifest } = await loadBuilder();
+    const huggingFace = makeHuggingFaceFetch({ wrongSha256: true });
+
+    await expect(
+      buildEnvironmentManifest({
+        packageMetadata,
+        sourceManifest: rawManifest,
+        fetchImpl: huggingFace.fetchImpl,
+      }),
+    ).rejects.toThrow(/SHA256 mismatch/i);
+  });
+
+  test('fails directly when Hugging Face metadata returns a non-2xx response', async () => {
+    const { buildEnvironmentManifest } = await loadBuilder();
+    const huggingFace = makeHuggingFaceFetch({ httpStatus: 503 });
+
+    await expect(
+      buildEnvironmentManifest({
+        packageMetadata,
+        sourceManifest: rawManifest,
+        fetchImpl: huggingFace.fetchImpl,
+      }),
+    ).rejects.toThrow(/HTTP 503/i);
+    expect(huggingFace.requestedUrls).toHaveLength(1);
   });
 
   test('accepts the current Hugging Face lfs.sha256 response representation', async () => {
