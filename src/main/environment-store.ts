@@ -13,6 +13,29 @@ const WINDOWS_ILLEGAL_SEGMENT_CHARACTER_PATTERN = /[<>:"|?*]/;
 const WINDOWS_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F\x7F]/;
 const WINDOWS_DRIVE_ROOT_PATTERN = /^[A-Za-z]:[\\/]$/;
 const WINDOWS_UNC_ROOT_PATTERN = /^[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/]?$/;
+const environmentMutationQueues = new Map<string, Promise<void>>();
+
+async function serializeEnvironmentMutation<T>(
+  path: string,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const key = win32.normalize(path).toLowerCase();
+  const previous = environmentMutationQueues.get(key) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(mutate);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  environmentMutationQueues.set(key, tail);
+
+  try {
+    return await result;
+  } finally {
+    if (environmentMutationQueues.get(key) === tail) {
+      environmentMutationQueues.delete(key);
+    }
+  }
+}
 
 function isSafeWindowsAbsolutePath(value: string): boolean {
   if (
@@ -129,23 +152,25 @@ export class EnvironmentStore {
       );
     }
 
-    await this.writeAtomically(parsed);
+    await serializeEnvironmentMutation(this.path, () => this.writeAtomically(parsed));
   }
 
   async markReady(): Promise<EnvironmentConfig> {
-    const current = await this.load();
-    if (current === null) {
-      throw new Error('No environment configuration exists');
-    }
-    if (current.status === 'ready') return current;
+    return serializeEnvironmentMutation(this.path, async () => {
+      const current = await this.load();
+      if (current === null) {
+        throw new Error('No environment configuration exists');
+      }
+      if (current.status === 'ready') return current;
 
-    const ready: EnvironmentConfig = {
-      ...current,
-      status: 'ready',
-      updatedAt: new Date().toISOString(),
-    };
-    await this.writeAtomically(ready);
-    return ready;
+      const ready: EnvironmentConfig = {
+        ...current,
+        status: 'ready',
+        updatedAt: new Date().toISOString(),
+      };
+      await this.writeAtomically(ready);
+      return ready;
+    });
   }
 
   private async writeAtomically(config: EnvironmentConfig): Promise<void> {

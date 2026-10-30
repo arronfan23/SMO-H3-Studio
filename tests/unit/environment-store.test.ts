@@ -1,9 +1,10 @@
 // @vitest-environment node
 
+import { writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   EnvironmentStore,
   resolveEnvironmentPaths,
@@ -14,6 +15,18 @@ import type {
 } from '../../src/shared/environment';
 
 const directories: string[] = [];
+
+interface AtomicWriter {
+  writeAtomically(config: EnvironmentConfig): Promise<void>;
+}
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function makeConfig(overrides: Partial<EnvironmentConfig> = {}): EnvironmentConfig {
   return {
@@ -348,6 +361,71 @@ describe('EnvironmentStore atomic writes and readiness', () => {
 
     await expect(store.markReady()).rejects.toThrow(/environment configuration/i);
     await expect(readFile(path, 'utf8')).resolves.toBe('{broken');
+  });
+
+  test('serializes the whole markReady read-modify-write before a later save', async () => {
+    const { store, path } = await useStore();
+    const otherStore = new EnvironmentStore(path);
+    await store.save(makeConfig({ manifestVersion: 'old-installing' }));
+
+    const markReadyHasRead = createDeferred();
+    const finishMarkReadyRead = createDeferred();
+    const originalLoad = store.load.bind(store);
+    let pauseNextLoad = true;
+    vi.spyOn(store, 'load').mockImplementation(async () => {
+      const config = await originalLoad();
+      if (pauseNextLoad) {
+        pauseNextLoad = false;
+        markReadyHasRead.resolve();
+        await finishMarkReadyRead.promise;
+      }
+      return config;
+    });
+
+    // Make the later save's write synchronous so the old implementation's
+    // final write order is deterministic; the public operations stay real.
+    const otherWriter = otherStore as unknown as AtomicWriter;
+    vi.spyOn(otherWriter, 'writeAtomically').mockImplementation(async (config) => {
+      writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+    });
+
+    const readyPromise = store.markReady();
+    await markReadyHasRead.promise;
+
+    const latest = makeConfig({
+      manifestVersion: 'new-failed',
+      status: 'failed',
+      updatedAt: '2026-10-30T08:00:00.000Z',
+    });
+    const savePromise = otherStore.save(latest);
+    finishMarkReadyRead.resolve();
+
+    await Promise.all([readyPromise, savePromise]);
+
+    await expect(store.load()).resolves.toEqual(latest);
+  });
+
+  test('runs a later same-path mutation after an earlier mutation fails', async () => {
+    const { store, path } = await useStore();
+    const otherStore = new EnvironmentStore(path);
+    const firstWriteStarted = createDeferred();
+    const failFirstWrite = createDeferred();
+    const firstWriter = store as unknown as AtomicWriter;
+    vi.spyOn(firstWriter, 'writeAtomically').mockImplementation(async () => {
+      firstWriteStarted.resolve();
+      await failFirstWrite.promise;
+      throw new Error('simulated write failure');
+    });
+
+    const failedSave = store.save(makeConfig());
+    await firstWriteStarted.promise;
+    const latest = makeConfig({ status: 'failed' });
+    const latestSave = otherStore.save(latest);
+    failFirstWrite.resolve();
+
+    await expect(failedSave).rejects.toThrow('simulated write failure');
+    await latestSave;
+    await expect(store.load()).resolves.toEqual(latest);
   });
 });
 
