@@ -1,18 +1,23 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app, dialog, protocol, shell } from 'electron';
 import type { GenerationHandler, IpcServices } from './ipc';
 import { createFfprobeDurationReader, type AudioDurationReader } from './audio-duration';
 import { AvatarService } from './avatars';
 import { ComfyClient } from './comfy';
-import { ComfyProcessManager, DEFAULT_COMFY_ROOT } from './comfy-process';
+import {
+  ComfyProcessManager,
+  DEFAULT_COMFY_ROOT,
+  type ComfyProcessManagerOptions,
+} from './comfy-process';
 import { parseEnvironmentManifest } from './environment-manifest';
 import {
   EnvironmentSetupService,
   REQUIRED_COMFY_NODES,
   type EnvironmentBackendInput,
+  type EnvironmentStartBackend,
 } from './environment-setup';
 import { EnvironmentStore, resolveEnvironmentPaths } from './environment-store';
 import { FileService, type FileDialog } from './files';
@@ -26,7 +31,7 @@ import { FileLlmConfigStore } from './llm-config';
 import { SkillsService } from './skills';
 import { Store } from './store';
 import { WorkService } from './works';
-import type { EnvironmentConfig } from '../shared/environment';
+import type { EnvironmentConfig, EnvironmentPaths } from '../shared/environment';
 import {
   MediaRegistry,
   registerMediaProtocol,
@@ -142,6 +147,111 @@ function raceWithAbort<T>(
   });
 }
 
+export interface EnvironmentStartBackendAdapterOptions {
+  comfy: ComfyClient;
+  baseUrl: string;
+  logPath: string;
+  activePaths: EnvironmentPaths;
+  getActiveManager: () => ComfyProcessManager | undefined;
+  setActiveManager: (manager: ComfyProcessManager) => void;
+  createManager?: (
+    options: ComfyProcessManagerOptions,
+    client: Pick<ComfyClient, 'health'>,
+  ) => ComfyProcessManager;
+}
+
+function sameRuntimeRoot(a: string, b: string): boolean {
+  return win32.normalize(a).toLowerCase() === win32.normalize(b).toLowerCase();
+}
+
+/**
+ * Builds the environment setup's backend starter. A candidate manager must
+ * prove itself (health + required nodes) before it replaces the active one;
+ * on any failure or abort it is closed without touching the existing
+ * backend. A healthy backend only vouches for the runtime it was started
+ * from: when it serves a different runtime root than the candidate, the
+ * install must refuse to proceed instead of impersonating the new runtime.
+ */
+export function createEnvironmentStartBackend(
+  adapter: EnvironmentStartBackendAdapterOptions,
+): EnvironmentStartBackend {
+  const createManager =
+    adapter.createManager ??
+    ((
+      options: ComfyProcessManagerOptions,
+      client: Pick<ComfyClient, 'health'>,
+    ) => new ComfyProcessManager(options, client));
+  return async (input: EnvironmentBackendInput) => {
+    let backendHealthy = false;
+    try {
+      await adapter.comfy.health();
+      backendHealthy = true;
+    } catch {
+      backendHealthy = false;
+    }
+    if (
+      backendHealthy &&
+      !sameRuntimeRoot(input.runtimeRoot, adapter.activePaths.runtimeRoot)
+    ) {
+      throw new Error(
+        'Another ComfyUI backend is already running from ' +
+          `${adapter.activePaths.runtimeRoot}; close it before starting the ` +
+          `environment at ${input.runtimeRoot}`,
+      );
+    }
+
+    const candidate = createManager(
+      {
+        baseUrl: adapter.baseUrl,
+        rootDirectory: input.runtimeRoot,
+        pythonPath: input.pythonPath,
+        launchScript: input.launchScript,
+        outputDirectory: input.outputDirectory,
+        lowvram: input.profile !== 'high-memory-candidate',
+        logPath: adapter.logPath,
+      },
+      adapter.comfy,
+    );
+    const closeCandidate = () => {
+      void candidate.close().catch(() => undefined);
+    };
+    let systemStats: unknown;
+    let objectInfo: Record<string, unknown>;
+    try {
+      systemStats = await raceWithAbort(
+        candidate.ensureReady(),
+        input.signal,
+        closeCandidate,
+      );
+      objectInfo = await raceWithAbort(
+        adapter.comfy.objectInfo(),
+        input.signal,
+        closeCandidate,
+      );
+      const missingNodes = REQUIRED_COMFY_NODES.filter(
+        (node) => !Object.hasOwn(objectInfo, node),
+      );
+      if (missingNodes.length > 0) {
+        throw new Error(
+          `Backend is missing required nodes: ${missingNodes.join(', ')}`,
+        );
+      }
+      input.signal.throwIfAborted();
+    } catch (error) {
+      await candidate.close().catch(() => undefined);
+      throw error;
+    }
+
+    const previous = adapter.getActiveManager();
+    adapter.setActiveManager(candidate);
+    adapter.activePaths.runtimeRoot = input.runtimeRoot;
+    adapter.activePaths.modelDirectory = input.modelDirectory;
+    adapter.activePaths.outputDirectory = input.outputDirectory;
+    await previous?.close();
+    return { systemStats, objectInfo };
+  };
+}
+
 function jobErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -237,72 +347,8 @@ export async function createAppServices(
   let comfy: ComfyClient | undefined;
   let activeComfyProcess: ComfyProcessManager | undefined;
   let jobCoordinator: JobCoordinator | undefined;
-  const activeEnvironmentPaths = { ...environmentPaths };
-
-  // A candidate manager proves itself (health + required nodes) before it
-  // replaces the active one; on any failure it is closed without touching
-  // the existing backend.
-  const startEnvironmentBackend = async (
-    input: EnvironmentBackendInput,
-  ): Promise<{ systemStats: unknown; objectInfo: unknown }> => {
-    const candidate = new ComfyProcessManager(
-      {
-        baseUrl: comfyBaseUrl,
-        rootDirectory: input.runtimeRoot,
-        pythonPath: input.pythonPath,
-        launchScript: input.launchScript,
-        outputDirectory: input.outputDirectory,
-        lowvram: input.profile !== 'high-memory-candidate',
-        logPath: join(dataDirectory, 'logs', 'comfyui-backend.log'),
-      },
-      comfy!,
-    );
-    const closeCandidate = () => {
-      void candidate.close().catch(() => undefined);
-    };
-    let systemStats: unknown;
-    let objectInfo: Record<string, unknown>;
-    try {
-      systemStats = await raceWithAbort(
-        candidate.ensureReady(),
-        input.signal,
-        closeCandidate,
-      );
-      objectInfo = await raceWithAbort(
-        comfy!.objectInfo(),
-        input.signal,
-        closeCandidate,
-      );
-      const missingNodes = REQUIRED_COMFY_NODES.filter(
-        (node) => !Object.hasOwn(objectInfo, node),
-      );
-      if (missingNodes.length > 0) {
-        throw new Error(
-          `Backend is missing required nodes: ${missingNodes.join(', ')}`,
-        );
-      }
-    } catch (error) {
-      await candidate.close().catch(() => undefined);
-      throw error;
-    }
-
-    const previous = activeComfyProcess;
-    activeComfyProcess = candidate;
-    activeEnvironmentPaths.runtimeRoot = input.runtimeRoot;
-    activeEnvironmentPaths.modelDirectory = input.modelDirectory;
-    activeEnvironmentPaths.outputDirectory = input.outputDirectory;
-    await previous?.close();
-    return { systemStats, objectInfo };
-  };
-
-  const environmentSetup = new EnvironmentSetupService({
-    store: environmentStore,
-    manifest: environmentManifest,
-    defaultInstallRoot: dataDirectory,
-    outputDirectory,
-    detectHardware: (installRoot) => detectHardware(undefined, installRoot),
-    startBackend: startEnvironmentBackend,
-  });
+  let environmentSetup: EnvironmentSetupService | undefined;
+  const activeEnvironmentPaths: EnvironmentPaths = { ...environmentPaths };
 
   try {
     await hardwareWorkflows.load();
@@ -337,6 +383,24 @@ export async function createAppServices(
       },
       comfy,
     );
+    const setup = new EnvironmentSetupService({
+      store: environmentStore,
+      manifest: environmentManifest,
+      defaultInstallRoot: dataDirectory,
+      outputDirectory,
+      detectHardware: (installRoot) => detectHardware(undefined, installRoot),
+      startBackend: createEnvironmentStartBackend({
+        comfy,
+        baseUrl: comfyBaseUrl,
+        logPath: join(dataDirectory, 'logs', 'comfyui-backend.log'),
+        activePaths: activeEnvironmentPaths,
+        getActiveManager: () => activeComfyProcess,
+        setActiveManager: (manager) => {
+          activeComfyProcess = manager;
+        },
+      }),
+    });
+    environmentSetup = setup;
     // The ffprobe binary follows the active runtime; explicit env overrides
     // keep their original precedence.
     const durationReader: AudioDurationReader = (filePath) => {
@@ -405,11 +469,11 @@ export async function createAppServices(
       openComfy,
       startComfy: () => activeComfyProcess!.ensureReady(),
       environment: {
-        getState: () => Promise.resolve(environmentSetup.getState()),
-        detect: (installRoot?: string) => environmentSetup.detect(installRoot),
-        start: (input) => environmentSetup.start(input),
-        retry: (input) => environmentSetup.retry(input),
-        cancel: () => environmentSetup.cancel(),
+        getState: () => Promise.resolve(setup.getState()),
+        detect: (installRoot?: string) => setup.detect(installRoot),
+        start: (input) => setup.start(input),
+        retry: (input) => setup.retry(input),
+        cancel: () => setup.cancel(),
       },
       hardware: {
         detect: () => detectHardware(undefined, outputDirectory),
@@ -424,7 +488,7 @@ export async function createAppServices(
           return;
         }
         closed = true;
-        await environmentSetup.cancel();
+        await setup.cancel();
         await jobCoordinator!.close();
         await activeComfyProcess!.close();
         await Promise.allSettled([
@@ -434,7 +498,7 @@ export async function createAppServices(
       },
     };
   } catch (error) {
-    await environmentSetup.cancel().catch(() => undefined);
+    await environmentSetup?.cancel().catch(() => undefined);
     await jobCoordinator?.close();
     await activeComfyProcess?.close();
     await Promise.allSettled([

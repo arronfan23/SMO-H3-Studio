@@ -2,21 +2,28 @@
 
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { app, dialog } from 'electron';
 import {
   createAppServices,
+  createEnvironmentStartBackend,
   resolveStringOption,
   DEFAULT_DATA_DIRECTORY,
   DEFAULT_OUTPUT_DIRECTORY,
   DEFAULT_COMFYUI_BASE_URL,
 } from '../../src/main/app-services';
+import { ComfyClient } from '../../src/main/comfy';
+import { ComfyProcessManager } from '../../src/main/comfy-process';
+import { REQUIRED_COMFY_NODES } from '../../src/main/environment-setup';
 import { detectHardware } from '../../src/main/hardware';
+import type { EnvironmentBackendInput } from '../../src/main/environment-setup';
+import type { EnvironmentPaths } from '../../src/shared/environment';
 
 const { protocolRegisterFileProtocol, electronAppState, legacyEnvironment } =
   vi.hoisted(() => ({
@@ -329,6 +336,199 @@ describe('createAppServices environment integration', () => {
 
     const state = await services.environment.getState();
     expect(state.installRoot).toBe(dataDirectory);
+  });
+});
+
+describe('packaged environment manifest', () => {
+  test('electron-builder ships resources/environment with the app', async () => {
+    const configPath = fileURLToPath(
+      new URL('../../electron-builder.yml', import.meta.url),
+    );
+    const config = await readFile(configPath, 'utf8');
+
+    const extraResources = config.split('\n').slice(
+      config.split('\n').findIndex((line) => line.startsWith('extraResources:')),
+    );
+    expect(extraResources).toContainEqual(
+      expect.stringMatching(/from:\s*resources\/environment/),
+    );
+    expect(extraResources).toContainEqual(
+      expect.stringMatching(/to:\s*resources\/environment/),
+    );
+
+    const manifestPath = fileURLToPath(
+      new URL('../../resources/environment/selflift-spark.json', import.meta.url),
+    );
+    expect(existsSync(manifestPath)).toBe(true);
+  });
+});
+
+describe('createEnvironmentStartBackend', () => {
+  const objectInfoFixture = Object.fromEntries(
+    REQUIRED_COMFY_NODES.map((node) => [node, { input: {} }]),
+  );
+
+  function makeBackendInput(
+    overrides: Partial<EnvironmentBackendInput> = {},
+  ): EnvironmentBackendInput {
+    return {
+      runtimeRoot: 'D:\\Env\\runtime\\NewRoot',
+      modelDirectory: 'D:\\Env\\models\\diffusion_models',
+      outputDirectory: 'D:\\Env\\output',
+      profile: 'balanced-16gb',
+      runtime: {} as EnvironmentBackendInput['runtime'],
+      pythonPath: 'D:\\Env\\runtime\\NewRoot\\python_embeded\\python.exe',
+      launchScript: 'D:\\Env\\runtime\\NewRoot\\tools\\launch.py',
+      ffprobePath: 'D:\\Env\\runtime\\NewRoot\\tools\\ffmpeg\\ffprobe.exe',
+      signal: new AbortController().signal,
+      ...overrides,
+    };
+  }
+
+  async function startBackendServer(
+    objectInfoGate?: { requested: Promise<void>; onRequest?: () => void },
+  ): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+    const server: Server = createServer((request, response) => {
+      const sendJson = (value: unknown) => {
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify(value));
+      };
+      if (request.url === '/object_info') {
+        if (objectInfoGate) {
+          objectInfoGate.onRequest?.();
+          void objectInfoGate.requested.then(() => sendJson(objectInfoFixture));
+          return;
+        }
+        sendJson(objectInfoFixture);
+        return;
+      }
+      sendJson({ system: { os: 'test' }, devices: [] });
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address() as AddressInfo;
+    let closed = false;
+    return {
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        server.closeAllConnections();
+        server.close();
+        await once(server, 'close');
+      },
+    };
+  }
+
+  function createAdapterHarness(baseUrl: string, logDirectory: string) {
+    const comfy = new ComfyClient(baseUrl);
+    const activePaths: EnvironmentPaths = {
+      runtimeRoot: 'D:\\Env\\runtime\\OldRoot',
+      modelDirectory: 'D:\\Env\\models\\diffusion_models',
+      outputDirectory: 'D:\\Env\\output',
+    };
+    const createdManagers: ComfyProcessManager[] = [];
+    let activeManager: ComfyProcessManager | undefined = new ComfyProcessManager(
+      { baseUrl, logPath: join(logDirectory, 'old.log') },
+      comfy,
+    );
+    const startBackend = createEnvironmentStartBackend({
+      comfy,
+      baseUrl,
+      logPath: join(logDirectory, 'candidate.log'),
+      activePaths,
+      getActiveManager: () => activeManager,
+      setActiveManager: (manager) => {
+        activeManager = manager;
+      },
+      createManager: (options, client) => {
+        const manager = new ComfyProcessManager(options, client);
+        createdManagers.push(manager);
+        return manager;
+      },
+    });
+    return {
+      comfy,
+      activePaths,
+      createdManagers,
+      startBackend,
+      getActiveManager: () => activeManager,
+    };
+  }
+
+  test('rejects a different candidate runtime while a healthy backend is running', async () => {
+    const logDirectory = await useDataDirectory();
+    const upstream = await startBackendServer();
+    cleanups.push(() => upstream.close());
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory);
+    const oldManager = harness.getActiveManager();
+
+    await expect(harness.startBackend(makeBackendInput())).rejects.toThrow(
+      /already running/i,
+    );
+
+    // The old manager and paths stay untouched, and no candidate was built.
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+    expect(harness.createdManagers).toHaveLength(0);
+  });
+
+  test('reuses a healthy backend when the runtime roots match ignoring case', async () => {
+    const logDirectory = await useDataDirectory();
+    const upstream = await startBackendServer();
+    cleanups.push(() => upstream.close());
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory);
+    const oldManager = harness.getActiveManager()!;
+    const oldClose = vi.spyOn(oldManager, 'close');
+
+    const result = (await harness.startBackend(
+      makeBackendInput({ runtimeRoot: 'd:\\env\\runtime\\oldroot' }),
+    )) as { systemStats: unknown; objectInfo: Record<string, unknown> };
+
+    expect(result.objectInfo).toEqual(objectInfoFixture);
+    expect(harness.getActiveManager()).not.toBe(oldManager);
+    expect(harness.createdManagers).toHaveLength(1);
+    expect(oldClose).toHaveBeenCalled();
+    expect(harness.activePaths.runtimeRoot).toBe('d:\\env\\runtime\\oldroot');
+  });
+
+  test('aborting after a delayed objectInfo keeps the old manager and closes the candidate', async () => {
+    const logDirectory = await useDataDirectory();
+    let releaseObjectInfo!: () => void;
+    let objectInfoRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      objectInfoRequested = resolve;
+    });
+    const gate = {
+      requested: new Promise<void>((resolve) => {
+        releaseObjectInfo = resolve;
+      }),
+      onRequest: () => objectInfoRequested(),
+    };
+    const upstream = await startBackendServer(gate);
+    cleanups.push(() => upstream.close());
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory);
+    const oldManager = harness.getActiveManager();
+    const controller = new AbortController();
+
+    const pending = harness.startBackend(
+      makeBackendInput({
+        runtimeRoot: 'D:\\Env\\runtime\\OldRoot',
+        signal: controller.signal,
+      }),
+    );
+    // Wait until the backend health passed and objectInfo is in flight.
+    await vi.waitFor(() => expect(harness.createdManagers).toHaveLength(1));
+    const candidateClose = vi.spyOn(harness.createdManagers[0], 'close');
+    await requested;
+    controller.abort(new Error('Environment setup cancelled'));
+
+    await expect(pending).rejects.toThrow(/cancelled/i);
+    expect(candidateClose).toHaveBeenCalled();
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+
+    releaseObjectInfo();
   });
 });
 

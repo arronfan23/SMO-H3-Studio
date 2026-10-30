@@ -8,6 +8,8 @@ files:
 extraResources:
   - from: resources/brand
     to: resources/brand
+  - from: resources/environment
+    to: resources/environment
   - from: resources/workflows
     to: resources/workflows
   - from: resources/skills
