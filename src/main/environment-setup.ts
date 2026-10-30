@@ -224,17 +224,37 @@ function runtimeTopLevel(runtime: EnvironmentRuntime): string {
   return topLevel;
 }
 
-function versionedRuntimeDirName(topLevel: string, manifestVersion: string): string {
+function versionedDirName(base: string, manifestVersion: string): string {
   const safeVersion =
     manifestVersion.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/[. ]+$/, '') ||
     'unknown';
-  return `${topLevel}.manifest-v${safeVersion}`;
+  return `${base}.manifest-v${safeVersion}`;
+}
+
+function directChildDirName(parent: string, child: string): string | undefined {
+  const resolvedParent = win32.resolve(parent);
+  const resolvedChild = win32.resolve(child);
+  if (win32.dirname(resolvedChild).toLowerCase() !== resolvedParent.toLowerCase()) {
+    return undefined;
+  }
+  return win32.basename(resolvedChild);
+}
+
+function recordedModelRootDirName(
+  installRoot: string,
+  previous: EnvironmentConfig,
+): string | undefined {
+  if (win32.basename(previous.modelDirectory).toLowerCase() !== 'diffusion_models') {
+    return undefined;
+  }
+  return directChildDirName(installRoot, win32.dirname(previous.modelDirectory));
 }
 
 function createLayout(
   installRoot: string,
   runtime: EnvironmentRuntime,
   runtimeDirName?: string,
+  modelRootDirName?: string,
 ): InstallationLayout {
   const topLevel = runtimeTopLevel(runtime);
   const workDirectory = win32.join(installRoot, '.smo-install');
@@ -242,7 +262,7 @@ function createLayout(
   const stagingDirectory = win32.join(workDirectory, 'staging');
   const runtimeContainer = win32.join(installRoot, 'runtime');
   const runtimeRoot = win32.join(runtimeContainer, runtimeDirName ?? topLevel);
-  const modelRoot = win32.join(installRoot, 'models');
+  const modelRoot = win32.join(installRoot, modelRootDirName ?? 'models');
   const resolveRuntimePath = (path: string) =>
     win32.join(runtimeRoot, ...path.split('/').slice(1));
 
@@ -692,34 +712,38 @@ export class EnvironmentSetupService {
   }
 
   /**
-   * A ready runtime recorded under an older manifest is never moved, reused,
-   * or deleted: upgrades install into a versioned sibling directory so a
-   * failed attempt leaves the working environment untouched. A ready runtime
-   * on the current manifest is reused at its recorded directory, whether that
-   * is the default top-level folder or a versioned one.
+   * A ready runtime and model set recorded under an older manifest are never
+   * moved, reused, or deleted: upgrades install into versioned sibling
+   * directories so a failed attempt leaves the working environment untouched.
+   * A ready record on the current manifest is reused at its recorded
+   * directories (default or versioned); models are shared across runtime ids
+   * because their hashes are identical within one manifest.
    */
   private resolveLayout(
     installRoot: string,
     runtime: EnvironmentRuntime,
     previous: EnvironmentConfig | null,
   ): InstallationLayout {
-    if (previous?.status === 'ready' && previous.runtimeId === runtime.id) {
-      const manifestVersion = String(this.options.manifest.version);
-      if (previous.manifestVersion === manifestVersion) {
-        const container = win32.resolve(win32.join(installRoot, 'runtime'));
-        const recorded = win32.resolve(previous.runtimeRoot);
-        if (win32.dirname(recorded).toLowerCase() === container.toLowerCase()) {
-          return createLayout(installRoot, runtime, win32.basename(recorded));
-        }
-      } else {
-        return createLayout(
-          installRoot,
-          runtime,
-          versionedRuntimeDirName(runtimeTopLevel(runtime), manifestVersion),
-        );
-      }
+    if (previous?.status !== 'ready') return createLayout(installRoot, runtime);
+    const manifestVersion = String(this.options.manifest.version);
+    if (previous.manifestVersion !== manifestVersion) {
+      return createLayout(
+        installRoot,
+        runtime,
+        previous.runtimeId === runtime.id
+          ? versionedDirName(runtimeTopLevel(runtime), manifestVersion)
+          : undefined,
+        versionedDirName('models', manifestVersion),
+      );
     }
-    return createLayout(installRoot, runtime);
+    return createLayout(
+      installRoot,
+      runtime,
+      previous.runtimeId === runtime.id
+        ? directChildDirName(win32.join(installRoot, 'runtime'), previous.runtimeRoot)
+        : undefined,
+      recordedModelRootDirName(installRoot, previous),
+    );
   }
 
   private async execute(input: EnvironmentStartInput): Promise<EnvironmentState> {

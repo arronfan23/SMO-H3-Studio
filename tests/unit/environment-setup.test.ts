@@ -71,7 +71,9 @@ function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function makeManifest(): EnvironmentManifest {
+function makeManifest(
+  contentFn: (path: string) => Buffer = modelContent,
+): EnvironmentManifest {
   const archive = Buffer.from('small test archive');
   return {
     version: 1,
@@ -80,7 +82,7 @@ function makeManifest(): EnvironmentManifest {
       sm120: makeRuntime('sm120'),
     },
     modelFiles: MODEL_PATHS.map((path, index) => {
-      const content = modelContent(path);
+      const content = contentFn(path);
       return {
         url: `https://models.test/${index}.safetensors`,
         path,
@@ -213,6 +215,7 @@ async function createHarness(
   overrides: {
     hardware?: HardwareInfo;
     manifest?: EnvironmentManifest;
+    modelContent?: (path: string) => Buffer;
     installRoot?: string;
     outputDirectory?: string;
     configure?: (context: {
@@ -229,6 +232,7 @@ async function createHarness(
   const outputDirectory = overrides.outputDirectory ?? join(installRoot, 'fixed-output');
   cleanups.push(() => rm(installRoot, { recursive: true, force: true }));
   const manifest = overrides.manifest ?? makeManifest();
+  const contentFn = overrides.modelContent ?? modelContent;
   const store = new EnvironmentStore(join(installRoot, 'environment.json'));
   const failNextModel = { value: -1 };
   const corruptLaunch = { value: false };
@@ -285,7 +289,7 @@ async function createHarness(
       }
       networkDownloads.push(options.url);
       await mkdir(dirname(options.destination), { recursive: true });
-      await writeFile(options.destination, modelContent(model?.path ?? ''));
+      await writeFile(options.destination, contentFn(model?.path ?? ''));
     }
     downloadProgress.current?.();
     options.onProgress?.({
@@ -1335,6 +1339,142 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
         pythonPath: join(versionedRoot, 'python_embeded', 'python.exe'),
       }),
     );
+  });
+
+  test('installs a manifest upgrade into a versioned model root', async () => {
+    const upgradedContent = (path: string) => Buffer.from(`upgraded model: ${path}`);
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const ready = await first.store.load();
+    if (!ready) throw new Error('Expected a ready config');
+    await first.store.save({ ...ready, status: 'installing', manifestVersion: '0' });
+    await first.store.markReady();
+    const harness = await createHarness({
+      installRoot: first.installRoot,
+      manifest: makeManifest(upgradedContent),
+      modelContent: upgradedContent,
+    });
+    const versionedModelRoot = join(first.installRoot, 'models.manifest-v1');
+
+    const state = await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(state.config?.modelDirectory).toBe(join(versionedModelRoot, 'diffusion_models'));
+    expect((await harness.store.load())?.modelDirectory).toBe(
+      join(versionedModelRoot, 'diffusion_models'),
+    );
+    const versionedRuntimeRoot = join(
+      first.installRoot,
+      'runtime',
+      `${TOP_LEVEL}.manifest-v1`,
+    );
+    const yaml = await readFile(
+      join(versionedRuntimeRoot, 'ComfyUI', 'extra_model_paths.yaml'),
+      'utf8',
+    );
+    expect(yaml).toContain(`base_path: '${versionedModelRoot}'`);
+    for (const path of MODEL_PATHS) {
+      expect(
+        sha256(await readFile(join(versionedModelRoot, ...path.split('/')))),
+      ).toBe(sha256(upgradedContent(path)));
+      expect(
+        sha256(await readFile(join(first.installRoot, 'models', ...path.split('/')))),
+      ).toBe(sha256(modelContent(path)));
+    }
+  });
+
+  test('keeps old ready models and config when a manifest upgrade model download fails', async () => {
+    const upgradedContent = (path: string) => Buffer.from(`upgraded model: ${path}`);
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const seeded = await first.store.load();
+    if (!seeded) throw new Error('Expected a ready config');
+    await first.store.save({ ...seeded, status: 'installing', manifestVersion: '0' });
+    const oldReady = await first.store.markReady();
+    const oldHashes = new Map<string, string>();
+    for (const path of MODEL_PATHS) {
+      oldHashes.set(
+        path,
+        sha256(await readFile(join(first.installRoot, 'models', ...path.split('/')))),
+      );
+    }
+    const harness = await createHarness({
+      installRoot: first.installRoot,
+      manifest: makeManifest(upgradedContent),
+      modelContent: upgradedContent,
+      configure: ({ failNextModel }) => {
+        failNextModel.value = 1;
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/download failed/);
+
+    expect(await harness.store.load()).toEqual(oldReady);
+    for (const [path, hash] of oldHashes) {
+      expect(
+        sha256(await readFile(join(first.installRoot, 'models', ...path.split('/')))),
+      ).toBe(hash);
+    }
+    const versionedModelRoot = join(first.installRoot, 'models.manifest-v1');
+    expect(
+      sha256(
+        await readFile(join(versionedModelRoot, 'diffusion_models', 'main.safetensors')),
+      ),
+    ).toBe(sha256(upgradedContent('diffusion_models/main.safetensors')));
+  });
+
+  test('reuses versioned runtime and model roots on later runs after an upgrade', async () => {
+    const upgradedContent = (path: string) => Buffer.from(`upgraded model: ${path}`);
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const ready = await first.store.load();
+    if (!ready) throw new Error('Expected a ready config');
+    await first.store.save({ ...ready, status: 'installing', manifestVersion: '0' });
+    await first.store.markReady();
+    const upgraded = await createHarness({
+      installRoot: first.installRoot,
+      manifest: makeManifest(upgradedContent),
+      modelContent: upgradedContent,
+    });
+    await upgraded.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: upgraded.installRoot,
+    });
+    const harness = await createHarness({
+      installRoot: first.installRoot,
+      manifest: makeManifest(upgradedContent),
+      modelContent: upgradedContent,
+    });
+
+    const state = await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(state.config?.runtimeRoot).toBe(
+      join(first.installRoot, 'runtime', `${TOP_LEVEL}.manifest-v1`),
+    );
+    expect(state.config?.modelDirectory).toBe(
+      join(first.installRoot, 'models.manifest-v1', 'diffusion_models'),
+    );
+    expect(harness.downloads.parts).not.toHaveBeenCalled();
+    expect(harness.networkDownloads).toHaveLength(0);
   });
 
   test('keeps the old ready runtime and config when a manifest upgrade download fails', async () => {
