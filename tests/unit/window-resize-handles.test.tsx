@@ -148,10 +148,10 @@ describe('WindowResizeHandles', () => {
     fireEvent.pointerUp(handle, { pointerId: 1 });
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
 
-    // The late resolve must not enter the dragging state; it ends the session
-    // the main process just opened.
+    // The late resolve must not enter dragging or end the session twice.
     resolveBegin(true);
-    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bridge.endResize).toHaveBeenCalledTimes(1);
 
     fireEvent.pointerMove(handle, { pointerId: 1, screenX: 60, screenY: 70 });
     await new Promise((resolve) => setTimeout(resolve, 50));

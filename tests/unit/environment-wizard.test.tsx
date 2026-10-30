@@ -319,6 +319,31 @@ describe('first-launch environment wizard', () => {
     await waitFor(() => expect(screen.getByLabelText('安装目录')).toBeEnabled());
   });
 
+  test.each([
+    { name: 'Error', message: 'Environment setup cancelled' },
+    { name: 'AbortError', message: 'The operation aborted' },
+  ])('treats $name cancellation as a neutral state', async ({ name, message }) => {
+    await renderDetectedWizard();
+    let rejectStart: ((error: Error) => void) | undefined;
+    smo.environment.start.mockImplementation(
+      () => new Promise<EnvironmentState>((_, reject) => { rejectStart = reject; }),
+    );
+    smo.environment.cancel.mockResolvedValue(environmentState({
+      active: false,
+      error: 'Environment setup cancellation requested',
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: '开始安装' }));
+    fireEvent.click(screen.getByRole('button', { name: '取消安装' }));
+    const cancellation = new Error(message);
+    cancellation.name = name;
+    await act(async () => { rejectStart?.(cancellation); });
+
+    await waitFor(() => expect(screen.getByLabelText('安装目录')).toBeEnabled());
+    expect(smo.environment.cancel).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   test('runs detection on demand and shows detection errors', async () => {
     await renderDetectedWizard();
     smo.environment.detect.mockRejectedValueOnce(new Error('无法读取 GPU'));
@@ -348,6 +373,7 @@ describe('first-launch environment wizard', () => {
     expect(progress).toHaveAttribute('max', String(10 * GIB));
     expect(progress).toHaveAttribute('value', String(5 * GIB));
     expect(screen.getByText('5.0 / 10.0 GiB')).toBeInTheDocument();
+    expect(screen.getByText('5.0 / 10.0 GiB').parentElement).not.toHaveAttribute('aria-live');
     expect(screen.getByText('50%')).toBeInTheDocument();
     expect(screen.getByText('当前文件：h3-int8.safetensors')).toBeInTheDocument();
     expect(screen.queryByText(/diffusion_models\\h3/)).not.toBeInTheDocument();
@@ -385,6 +411,24 @@ describe('first-launch environment wizard', () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(2250); });
     expect(smo.environment.getState).toHaveBeenCalledTimes(3);
+  });
+
+  test('clears a transient poll error on recovery and keeps the real state error', async () => {
+    vi.useFakeTimers();
+    const active = environmentState({ active: true, stage: 'download-models' });
+    smo.environment.getState
+      .mockResolvedValueOnce(active)
+      .mockRejectedValueOnce(new Error('瞬时轮询失败'))
+      .mockResolvedValueOnce(environmentState({ active: false, error: '真实下载失败' }));
+    render(<App />);
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    expect(screen.getByRole('alert')).toHaveTextContent('瞬时轮询失败');
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('真实下载失败');
+    expect(screen.queryByText('瞬时轮询失败')).not.toBeInTheDocument();
   });
 
   test('cleans up polling and ignores an initial response that arrives after unmount', async () => {

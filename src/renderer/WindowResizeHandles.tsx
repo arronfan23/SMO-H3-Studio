@@ -119,7 +119,8 @@ export function WindowResizeHandles() {
               // Preserve the last pointer position before closing a session
               // whose pointerup arrived while begin was still pending.
               finishWithFinalResize(direction, operation);
-            } else {
+            } else if (sessionOpen.current) {
+              sessionOpen.current = false;
               sendEndResize();
             }
             return;

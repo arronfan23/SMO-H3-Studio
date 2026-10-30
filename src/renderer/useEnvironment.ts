@@ -10,6 +10,18 @@ const POLL_INTERVAL_MS = 750;
 
 type EnvironmentOperation = 'detect' | 'start' | 'retry';
 
+export function isCancellationError(error: unknown): boolean {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'name' in error &&
+    error.name === 'AbortError'
+  ) {
+    return true;
+  }
+  return /cancelled|canceled|cancellation/i.test(errorMessage(error));
+}
+
 export function isEnvironmentProfileAllowed(
   profile: EnvironmentProfile,
   hardware: HardwareInfo | null,
@@ -27,6 +39,7 @@ export function useEnvironment() {
   const [initializing, setInitializing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
   const mountedRef = useRef(false);
   const generationRef = useRef(0);
   const operationRef = useRef<symbol | null>(null);
@@ -64,13 +77,18 @@ export function useEnvironment() {
       if (mountedRef.current) {
         setPending(true);
         setError(null);
+        setPollError(null);
       }
       try {
         const next = await action();
         if (generation === generationRef.current) applyState(next);
         return true;
       } catch (caught) {
-        if (mountedRef.current && generation === generationRef.current) {
+        if (
+          !isCancellationError(caught) &&
+          mountedRef.current &&
+          generation === generationRef.current
+        ) {
           setError(errorMessage(caught));
         }
         return true;
@@ -117,13 +135,18 @@ export function useEnvironment() {
       if (mountedRef.current) {
         setCancelling(true);
         setError(null);
+        setPollError(null);
       }
       try {
         const next = await window.smo.environment.cancel();
         if (generation === generationRef.current) applyState(next);
         return true;
       } catch (caught) {
-        if (mountedRef.current && generation === generationRef.current) {
+        if (
+          !isCancellationError(caught) &&
+          mountedRef.current &&
+          generation === generationRef.current
+        ) {
           setError(errorMessage(caught));
         }
         return true;
@@ -154,6 +177,7 @@ export function useEnvironment() {
     if (mountedRef.current) {
       setInitializing(true);
       setError(null);
+      setPollError(null);
     }
     const isCurrent = () => mountedRef.current && generation === generationRef.current;
 
@@ -184,7 +208,7 @@ export function useEnvironment() {
         }
       }
     } catch (caught) {
-      if (isCurrent()) setError(errorMessage(caught));
+      if (isCurrent() && !isCancellationError(caught)) setError(errorMessage(caught));
     } finally {
       if (initialReadRef.current === token) initialReadRef.current = null;
       if (isCurrent()) setInitializing(false);
@@ -216,9 +240,12 @@ export function useEnvironment() {
         const next = await window.smo.environment.getState();
         if (!cancelled) {
           applyState(next);
+          setPollError(null);
         }
       } catch (caught) {
-        if (!cancelled) setError(errorMessage(caught));
+        if (!cancelled && !isCancellationError(caught)) {
+          setPollError(errorMessage(caught));
+        }
       } finally {
         polling = false;
       }
@@ -235,7 +262,7 @@ export function useEnvironment() {
     state,
     profile,
     installRoot,
-    error,
+    error: pollError ?? error,
     busy: pending || initializing || state?.active === true,
     cancelling,
     setProfile: changeProfile,

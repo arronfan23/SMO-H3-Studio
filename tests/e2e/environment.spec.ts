@@ -69,7 +69,7 @@ test('first launch configures through the wizard without downloads or GPU depend
         healthy: false,
       };
       const snapshot = () => structuredClone(state);
-      let resolveStart: ((value: EnvironmentState) => void) | undefined;
+      let rejectStart: ((reason: Error) => void) | undefined;
       for (const channel of ['getState', 'start', 'retry', 'cancel']) {
         ipcMain.removeHandler(`environment:${channel}`);
       }
@@ -83,19 +83,23 @@ test('first launch configures through the wizard without downloads or GPU depend
           progress: { downloadedBytes: gib, totalBytes: 4 * gib, currentFile: 'runtime.zip' },
           active: true,
         };
-        return new Promise<EnvironmentState>((resolve) => {
-          resolveStart = resolve;
+        return new Promise<EnvironmentState>((_, reject) => {
+          rejectStart = reject;
         });
       });
       ipcMain.handle('environment:retry', snapshot);
       ipcMain.handle('environment:cancel', () => {
-        state = { ...state, stage: 'select', active: false, error: null };
-        resolveStart?.(snapshot());
+        state = {
+          ...state,
+          stage: 'select',
+          active: false,
+          error: 'Environment setup cancellation requested',
+        };
+        rejectStart?.(new Error('Environment setup cancelled'));
         return snapshot();
       });
     });
 
-    await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('heading', { name: '首次环境配置' })).toBeVisible();
     await expect(page.getByText('Mock RTX 5080')).toBeVisible();
     await expect(page.getByLabel('性能档位')).toHaveValue('conservative');
@@ -109,10 +113,21 @@ test('first launch configures through the wizard without downloads or GPU depend
     await expect(page.getByLabel('安装目录')).toBeDisabled();
     await page.getByRole('button', { name: '取消安装' }).click();
     await expect(page.getByLabel('安装目录')).toBeEnabled();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByText(/Environment setup cancell/)).toHaveCount(0);
 
-    await app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].setContentSize(800, 700);
+    const [actualWidth] = await app.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      win.setMinimumSize(320, 600);
+      win.setContentSize(800, 700);
+      const [roundedWidth] = win.getContentSize();
+      if (roundedWidth !== 800) {
+        win.setContentSize(800 - (roundedWidth - 800), 700);
+      }
+      return win.getContentSize();
     });
+    expect(actualWidth).toBe(800);
+    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(800);
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   } finally {
     await app?.close();

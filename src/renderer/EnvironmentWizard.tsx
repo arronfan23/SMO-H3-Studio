@@ -5,6 +5,7 @@ import type {
 } from '../shared/environment';
 import { fileName } from './ui';
 import {
+  isCancellationError,
   isEnvironmentProfileAllowed,
   type EnvironmentController,
 } from './useEnvironment';
@@ -67,7 +68,9 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
     ? Math.min(100, Math.floor((progress.downloadedBytes / progress.totalBytes) * 100))
     : 0;
   const shouldRetry = state?.config != null;
-  const message = error ?? state?.error ?? null;
+  const rendererError = isCancellationError(error) ? null : error;
+  const stateError = isCancellationError(state?.error) ? null : state?.error;
+  const message = rendererError ?? stateError ?? null;
   const canStart =
     state !== null &&
     !busy &&
@@ -222,7 +225,7 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
                     );
                   })}
                 </ol>
-                <div className="environment-progress-copy" aria-live="polite">
+                <div className="environment-progress-copy">
                   {hasTotal ? (
                     <>
                       <span>{formatGiB(progress.downloadedBytes)} / {formatGiB(progress.totalBytes)} GiB</span>
