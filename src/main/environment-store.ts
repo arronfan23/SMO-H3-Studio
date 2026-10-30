@@ -7,11 +7,12 @@ import type {
   EnvironmentPaths,
 } from '../shared/environment';
 
-const WINDOWS_DEVICE_NAME_PATTERN = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:[ .]|$)/i;
+const WINDOWS_DEVICE_NAME_PATTERN =
+  /^(?:CONIN\$|CONOUT\$|CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:[ .]|$)/i;
 const WINDOWS_ILLEGAL_SEGMENT_CHARACTER_PATTERN = /[<>:"|?*]/;
 const WINDOWS_CONTROL_CHARACTER_PATTERN = /[\x00-\x1F\x7F]/;
 const WINDOWS_DRIVE_ROOT_PATTERN = /^[A-Za-z]:[\\/]$/;
-const WINDOWS_UNC_ROOT_PATTERN = /^\\\\[^\\/]+[\\/][^\\/]+[\\/]$/;
+const WINDOWS_UNC_ROOT_PATTERN = /^[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/]?$/;
 
 function isSafeWindowsAbsolutePath(value: string): boolean {
   if (

@@ -207,6 +207,22 @@ describe('EnvironmentStore Windows path validation', () => {
     { label: 'device with extension', value: 'G:\\SMO\\prn.txt' },
     { label: 'COM device segment', value: 'G:\\SMO\\COM1\\runtime' },
     { label: 'LPT device', value: 'G:\\SMO\\LPT9' },
+    { label: 'CONIN$ device', value: 'G:\\SMO\\CONIN$' },
+    { label: 'lowercase CONOUT$ device', value: 'G:\\SMO\\conout$' },
+    { label: 'CONIN$ device with extension', value: 'G:\\SMO\\CONIN$.txt' },
+    { label: 'CONOUT$ device with extension', value: 'G:\\SMO\\conout$.log' },
+    { label: 'superscript COM1 device', value: 'G:\\SMO\\COM¹' },
+    { label: 'superscript COM2 device', value: 'G:\\SMO\\com²' },
+    { label: 'superscript COM3 device', value: 'G:\\SMO\\Com³' },
+    { label: 'superscript COM1 device with extension', value: 'G:\\SMO\\COM¹.txt' },
+    { label: 'superscript COM2 device with extension', value: 'G:\\SMO\\com².log' },
+    { label: 'superscript COM3 device with extension', value: 'G:\\SMO\\Com³.json' },
+    { label: 'superscript LPT1 device', value: 'G:\\SMO\\LPT¹' },
+    { label: 'superscript LPT2 device', value: 'G:\\SMO\\lpt²' },
+    { label: 'superscript LPT3 device', value: 'G:\\SMO\\Lpt³' },
+    { label: 'superscript LPT1 device with extension', value: 'G:\\SMO\\LPT¹.txt' },
+    { label: 'superscript LPT2 device with extension', value: 'G:\\SMO\\lpt².log' },
+    { label: 'superscript LPT3 device with extension', value: 'G:\\SMO\\Lpt³.json' },
     { label: 'trailing dot', value: 'G:\\SMO\\runtime.' },
     { label: 'trailing space', value: 'G:\\SMO\\runtime ' },
     { label: 'extended namespace', value: '\\\\?\\G:\\SMO\\runtime' },
@@ -235,6 +251,28 @@ describe('EnvironmentStore Windows path validation', () => {
       runtimeRoot: 'G:\\SMO H3 Studio\\运行时',
       modelDirectory: 'D:\\模型 文件\\H3 模型',
       outputDirectory: 'E:\\输出 视频\\成片',
+    });
+
+    await store.save(config);
+
+    await expect(store.load()).resolves.toEqual(config);
+  });
+
+  test.each([
+    '\\\\server\\share',
+    '\\\\server\\share\\',
+    '//server/share',
+    '//server/share/',
+    '\\\\server\\share\\models\\H3',
+    '\\\\server\\share\\models\\H3\\',
+    '//server/share/models/H3',
+    '//server/share/models/H3/',
+  ])('accepts a valid UNC path: %s', async (uncPath) => {
+    const { store } = await useStore();
+    const config = makeConfig({
+      runtimeRoot: uncPath,
+      modelDirectory: uncPath,
+      outputDirectory: uncPath,
     });
 
     await store.save(config);
