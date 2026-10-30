@@ -234,6 +234,79 @@ describe('downloadFile', () => {
     expect(await readFile(destination)).toEqual(payload);
   });
 
+  test('rejects an HTTPS to HTTP redirect without making the follow-up request', async () => {
+    const payload = Buffer.from('must not be reached');
+    const destination = join(directory, 'redirected.bin');
+    const requests: string[] = [];
+    handler = (request, response) => {
+      requests.push(request.url ?? '');
+      if (request.url === '/start') {
+        response.writeHead(302, { Location: `${localOrigin}/insecure` });
+        response.end('discarded redirect body');
+        return;
+      }
+      serveBuffer(payload)(request, response);
+    };
+
+    await expect(
+      downloadFile({
+        url: 'https://download.test/start',
+        destination,
+        expectedSize: payload.length,
+        expectedSha256: sha256(payload),
+        fetch: transport,
+      }),
+    ).rejects.toThrow(/https/i);
+
+    expect(requests).toEqual(['/start']);
+    expect(await exists(destination)).toBe(false);
+    expect(await exists(`${destination}.part`)).toBe(false);
+  });
+
+  test('follows multiple validated HTTPS redirects for every redirect status', async () => {
+    const payload = Buffer.from('multi-hop payload');
+    const destination = join(directory, 'redirected.bin');
+    const requests: string[] = [];
+    const redirects: Record<string, [number, string]> = {
+      '/start': [301, '/second'],
+      '/second': [302, '/third'],
+      '/third': [303, '/fourth'],
+      '/fourth': [307, '/fifth'],
+      '/fifth': [308, '/payload'],
+    };
+    handler = (request, response) => {
+      const path = request.url ?? '';
+      requests.push(path);
+      const redirect = redirects[path];
+      if (redirect) {
+        response.writeHead(redirect[0], { Location: redirect[1] });
+        response.end('discarded redirect body');
+        return;
+      }
+      serveBuffer(payload)(request, response);
+    };
+
+    await expect(
+      downloadFile({
+        url: 'https://download.test/start',
+        destination,
+        expectedSize: payload.length,
+        expectedSha256: sha256(payload),
+        fetch: transport,
+      }),
+    ).resolves.toMatchObject({ bytes: payload.length, sha256: sha256(payload) });
+
+    expect(requests).toEqual([
+      '/start',
+      '/second',
+      '/third',
+      '/fourth',
+      '/fifth',
+      '/payload',
+    ]);
+    expect(await readFile(destination)).toEqual(payload);
+  });
+
   test('keeps the part file and never creates the destination on a hash mismatch', async () => {
     const payload = Buffer.from('untrusted contents');
     const destination = join(directory, 'model.bin');
@@ -635,6 +708,53 @@ describe('download input validation', () => {
 });
 
 describe('downloadParts', () => {
+  test.each([
+    {
+      label: 'a part final path collides with an earlier part temporary path',
+      paths: ['a.part', 'a'],
+      destinationName: 'archive.bin',
+    },
+    {
+      label: 'a part final path collides with a later part temporary path',
+      paths: ['a', 'a.part'],
+      destinationName: 'archive.bin',
+    },
+    {
+      label: 'part temporary path comparison is case-insensitive',
+      paths: ['A.PART', 'a'],
+      destinationName: 'archive.bin',
+    },
+    {
+      label: 'a part temporary path collides with the destination',
+      paths: ['archive'],
+      destinationName: 'archive.part',
+    },
+  ])('rejects $label before any request', async ({ paths, destinationName }) => {
+    const data = Buffer.from('aaaaa');
+    const parts = paths.map((path) => makePart(path, data));
+    const archive = Buffer.concat(parts.map(() => data));
+    const destination = join(directory, destinationName);
+    const requests: string[] = [];
+    handler = (request, response) => {
+      requests.push(request.url ?? '');
+      serveBuffer(data)(request, response);
+    };
+
+    await expect(
+      downloadParts({
+        parts,
+        directory,
+        destination,
+        expectedSize: archive.length,
+        expectedSha256: sha256(archive),
+        fetch: transport,
+      }),
+    ).rejects.toThrow(/collision|collide/i);
+
+    expect(requests).toEqual([]);
+    expect(await exists(destination)).toBe(false);
+  });
+
   test('downloads and merges verified parts in array order with aggregate progress', async () => {
     const first = Buffer.from('first-part-');
     const second = Buffer.from('second-part-');

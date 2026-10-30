@@ -64,6 +64,8 @@ const WINDOWS_DEVICE_NAME_PATTERN =
   /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])(?:[ .]|$)/i;
 const WINDOWS_ILLEGAL_CHARACTER_PATTERN = /[<>"|?*\x00-\x1F]/;
 const CONTENT_RANGE_PATTERN = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/i;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAXIMUM_REDIRECTS = 20;
 
 function validateExpectedSize(value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -172,10 +174,6 @@ function isContainedPath(directory: string, candidate: string): boolean {
   );
 }
 
-function isSamePath(first: string, second: string): boolean {
-  return relative(resolve(first), resolve(second)) === '';
-}
-
 async function regularFileStats(path: string): Promise<Stats | null> {
   try {
     const stats = await lstat(path);
@@ -231,6 +229,43 @@ async function discardResponse(response: Response): Promise<void> {
     await response.body?.cancel();
   } catch {
     // The original HTTP/status error is more useful than a body-cleanup error.
+  }
+}
+
+async function fetchWithValidatedRedirects(
+  fetchImpl: DownloadFetch,
+  initialUrl: URL,
+  headers: Record<string, string> | undefined,
+  signal?: AbortSignal,
+): Promise<Response> {
+  let currentUrl = initialUrl;
+  let redirectCount = 0;
+
+  while (true) {
+    const response = await fetchImpl(currentUrl, {
+      method: 'GET',
+      headers,
+      redirect: 'manual',
+      signal,
+    });
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    const location = response.headers.get('location');
+    if (!location) return response;
+    if (redirectCount >= MAXIMUM_REDIRECTS) {
+      await discardResponse(response);
+      throw new Error('Download exceeded the maximum number of redirects');
+    }
+
+    await discardResponse(response);
+    let nextUrl: URL;
+    try {
+      nextUrl = new URL(location, currentUrl);
+    } catch {
+      throw new Error('Redirect Location must be a valid HTTPS URL');
+    }
+    currentUrl = validateHttpsUrl(nextUrl.href);
+    redirectCount += 1;
   }
 }
 
@@ -291,12 +326,12 @@ export async function downloadFile(
 
   signal?.throwIfAborted();
   await mkdir(dirname(partPath), { recursive: true });
-  const response = await fetchImpl(url, {
-    method: 'GET',
-    headers: canResume ? { Range: `bytes=${downloadedBytes}-` } : undefined,
-    redirect: 'follow',
+  const response = await fetchWithValidatedRedirects(
+    fetchImpl,
+    url,
+    canResume ? { Range: `bytes=${downloadedBytes}-` } : undefined,
     signal,
-  });
+  );
 
   let append = false;
   if (response.status === 200) {
@@ -425,7 +460,9 @@ export async function downloadParts(
   }
 
   let declaredSize = 0;
-  const partPaths = new Set<string>();
+  const occupiedPaths = new Set(
+    [destination, `${destination}.part`].map((path) => path.toLowerCase()),
+  );
   const parts = options.parts.map((part) => {
     validateHttpsUrl(part.url);
     validateExpectedSize(part.size);
@@ -435,17 +472,13 @@ export async function downloadParts(
     if (!isContainedPath(directory, resolvedPartPath)) {
       throw new Error('Part path escapes the parts directory');
     }
-    if (
-      isSamePath(resolvedPartPath, destination) ||
-      isSamePath(resolvedPartPath, `${destination}.part`)
-    ) {
-      throw new Error('Part path collides with the final archive path');
+    for (const path of [resolvedPartPath, `${resolvedPartPath}.part`]) {
+      const normalizedPath = path.toLowerCase();
+      if (occupiedPaths.has(normalizedPath)) {
+        throw new Error('Part or destination path collision detected');
+      }
+      occupiedPaths.add(normalizedPath);
     }
-    const normalizedPartPath = resolvedPartPath.toLowerCase();
-    if (partPaths.has(normalizedPartPath)) {
-      throw new Error('Duplicate part paths are not allowed');
-    }
-    partPaths.add(normalizedPartPath);
     declaredSize += part.size;
     if (!Number.isSafeInteger(declaredSize)) {
       throw new Error('Combined part size must be a safe integer');
