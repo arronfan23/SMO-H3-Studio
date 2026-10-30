@@ -174,6 +174,7 @@ export class EnvironmentStore {
   }
 
   async commitReady(config: EnvironmentConfig): Promise<EnvironmentConfig> {
+    // Call only after the candidate runtime and backend pass health verification.
     const parsed = parseEnvironmentConfig(config);
     return serializeEnvironmentMutation(this.path, async () => {
       const ready: EnvironmentConfig = {

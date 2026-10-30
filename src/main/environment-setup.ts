@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { win32 } from 'node:path';
@@ -62,8 +62,10 @@ export interface EnvironmentBackendInput {
   pythonPath: string;
   launchScript: string;
   ffprobePath: string;
+  signal: AbortSignal;
 }
 
+/** On failure or abort, the adapter closes its candidate manager without stopping a healthy existing backend. */
 export type EnvironmentStartBackend = (
   input: EnvironmentBackendInput,
 ) => Promise<unknown>;
@@ -129,6 +131,20 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+async function assertNotReparsePoint(path: string, label: string): Promise<void> {
+  try {
+    const stats = await lstat(path);
+    if (stats.isSymbolicLink()) {
+      throw new Error(
+        `Refusing symbolic link, junction, or reparse point at ${label}: ${path}`,
+      );
+    }
+  } catch (error) {
+    if (isMissing(error)) return;
+    throw error;
+  }
+}
+
 function isContainedPath(ancestor: string, candidate: string): boolean {
   const child = win32.relative(win32.resolve(ancestor), win32.resolve(candidate));
   return (
@@ -176,6 +192,10 @@ function validateInstallRoot(value: string): string {
     }
   }
   return win32.normalize(value);
+}
+
+function installRootKey(value: string): string {
+  return win32.normalize(value).toLowerCase();
 }
 
 function validateProfile(profile: EnvironmentProfile, hardware: HardwareInfo): void {
@@ -476,6 +496,10 @@ export class EnvironmentSetupService {
   private state: EnvironmentState;
   private readonly loaded: Promise<void>;
   private inFlight: Promise<EnvironmentState> | undefined;
+  private inFlightInput: string | undefined;
+  private detectFlight:
+    | { installRoot: string; promise: Promise<EnvironmentState> }
+    | undefined;
   private controller: AbortController | undefined;
 
   constructor(private readonly options: EnvironmentSetupServiceOptions) {
@@ -497,26 +521,26 @@ export class EnvironmentSetupService {
     return structuredClone(this.state);
   }
 
-  async detect(installRoot = this.options.defaultInstallRoot): Promise<EnvironmentState> {
-    const normalizedRoot = validateInstallRoot(installRoot);
-    await this.loaded;
-    const restoredError = this.state.error;
-    this.state = {
-      ...this.state,
-      installRoot: normalizedRoot,
-      stage: 'detect',
-      active: true,
-      healthy: false,
-      selection: null,
-    };
-    try {
-      const hardware = await this.options.detectHardware(normalizedRoot);
-      this.state = { ...this.state, hardware, active: false, error: restoredError };
-      return this.getState();
-    } catch (error) {
-      this.state = { ...this.state, active: false, healthy: false, error: errorMessage(error) };
-      throw error;
+  detect(installRoot = this.options.defaultInstallRoot): Promise<EnvironmentState> {
+    if (this.inFlight) {
+      return Promise.reject(new Error('Cannot detect hardware while environment setup is active'));
     }
+    const key = installRootKey(installRoot);
+    if (this.detectFlight) {
+      if (this.detectFlight.installRoot !== key) {
+        return Promise.reject(
+          new Error('Cannot detect a different installRoot while detection is active'),
+        );
+      }
+      return this.detectFlight.promise;
+    }
+
+    const operation = this.executeDetect(installRoot);
+    const tracked = operation.finally(() => {
+      if (this.detectFlight?.promise === tracked) this.detectFlight = undefined;
+    });
+    this.detectFlight = { installRoot: key, promise: tracked };
+    return tracked;
   }
 
   start(input: EnvironmentStartInput): Promise<EnvironmentState> {
@@ -543,13 +567,48 @@ export class EnvironmentSetupService {
   }
 
   private begin(input: EnvironmentStartInput): Promise<EnvironmentState> {
-    if (this.inFlight) return this.inFlight;
+    if (this.detectFlight) {
+      return Promise.reject(new Error('Cannot start environment setup while detection is active'));
+    }
+    const inputKey = `${installRootKey(input.installRoot)}\0${input.profileId}`;
+    if (this.inFlight) {
+      if (this.inFlightInput === inputKey) return this.inFlight;
+      return Promise.reject(
+        new Error('A different environment setup input is already active'),
+      );
+    }
     const operation = this.execute(input);
     const tracked = operation.finally(() => {
-      if (this.inFlight === tracked) this.inFlight = undefined;
+      if (this.inFlight === tracked) {
+        this.inFlight = undefined;
+        this.inFlightInput = undefined;
+      }
     });
     this.inFlight = tracked;
+    this.inFlightInput = inputKey;
     return tracked;
+  }
+
+  private async executeDetect(installRoot: string): Promise<EnvironmentState> {
+    await this.loaded;
+    const normalizedRoot = validateInstallRoot(installRoot);
+    const restoredError = this.state.error;
+    this.state = {
+      ...this.state,
+      installRoot: normalizedRoot,
+      stage: 'detect',
+      active: true,
+      healthy: false,
+      selection: null,
+    };
+    try {
+      const hardware = await this.options.detectHardware(normalizedRoot);
+      this.state = { ...this.state, hardware, active: false, error: restoredError };
+      return this.getState();
+    } catch (error) {
+      this.state = { ...this.state, active: false, healthy: false, error: errorMessage(error) };
+      throw error;
+    }
   }
 
   private async restore(): Promise<void> {
@@ -595,7 +654,26 @@ export class EnvironmentSetupService {
     ) {
       throw new Error('Refusing to clean staging outside the installation work directory');
     }
+    await assertNotReparsePoint(workDirectory, 'the installation work directory');
+    await assertNotReparsePoint(layout.downloadDirectory, 'the download directory');
+    await assertNotReparsePoint(stagingDirectory, 'the staging directory');
     await rm(stagingDirectory, { recursive: true, force: true });
+  }
+
+  private async quarantineRuntime(layout: InstallationLayout): Promise<void> {
+    const quarantineRoot = win32.join(layout.workDirectory, 'quarantine');
+    const destination = win32.join(
+      quarantineRoot,
+      `${win32.basename(layout.runtimeRoot)}-${randomUUID()}`,
+    );
+    if (!isContainedPath(layout.workDirectory, destination)) {
+      throw new Error('Refusing to quarantine runtime outside the work directory');
+    }
+    await assertNotReparsePoint(layout.workDirectory, 'the installation work directory');
+    await assertNotReparsePoint(layout.downloadDirectory, 'the download directory');
+    await assertNotReparsePoint(quarantineRoot, 'the quarantine directory');
+    await mkdir(quarantineRoot, { recursive: true });
+    await rename(layout.runtimeRoot, destination);
   }
 
   private async execute(input: EnvironmentStartInput): Promise<EnvironmentState> {
@@ -610,11 +688,12 @@ export class EnvironmentSetupService {
     let readyCommitted: EnvironmentConfig | undefined;
 
     try {
+      await this.loaded;
       const installRoot = validateInstallRoot(input.installRoot);
       if (!PROFILES.has(input.profileId)) {
         throw new Error(`Unknown environment profile: ${String(input.profileId)}`);
       }
-      await this.loaded;
+      signal.throwIfAborted();
       this.state = {
         ...this.state,
         installRoot,
@@ -661,12 +740,14 @@ export class EnvironmentSetupService {
         createdAt: previous?.runtimeRoot === layout.runtimeRoot ? previous.createdAt : now,
         updatedAt: now,
       };
-      const matchingReady =
+      const matchingReadyPaths =
         previous?.status === 'ready' &&
         previous.runtimeId === candidate.runtimeId &&
         previous.runtimeRoot === candidate.runtimeRoot &&
         previous.modelDirectory === candidate.modelDirectory &&
         previous.outputDirectory === candidate.outputDirectory;
+      const matchingReady =
+        matchingReadyPaths && previous.manifestVersion === candidate.manifestVersion;
 
       if (!preserveReady) {
         await this.options.store.save(candidate);
@@ -678,7 +759,9 @@ export class EnvironmentSetupService {
       this.setProgress(0, selection.runtime.archiveSize);
       let runtimeValid = false;
       let runtimeError: unknown;
-      if (await pathExists(layout.runtimeRoot)) {
+      const runtimeExists = await pathExists(layout.runtimeRoot);
+      const staleReadyRuntime = runtimeExists && matchingReadyPaths && !matchingReady;
+      if (runtimeExists && !staleReadyRuntime) {
         try {
           await verifyRuntimeFiles(layout.runtimeRoot, signal);
           runtimeValid = true;
@@ -690,11 +773,13 @@ export class EnvironmentSetupService {
         runtimeError = new Error(`Ready runtime is missing: ${layout.runtimeRoot}`);
       }
       if (matchingReady && !runtimeValid) throw runtimeError;
-      if (!runtimeValid && (await pathExists(layout.runtimeRoot))) throw runtimeError;
+      if (!runtimeValid && runtimeExists) await this.quarantineRuntime(layout);
 
       if (runtimeValid) {
         this.setProgress(selection.runtime.archiveSize, selection.runtime.archiveSize);
       } else {
+        await assertNotReparsePoint(layout.workDirectory, 'the installation work directory');
+        await assertNotReparsePoint(layout.downloadDirectory, 'the download directory');
         await (this.options.downloadParts ?? defaultDownloadParts)({
           parts: selection.runtime.archiveParts,
           directory: layout.downloadDirectory,
@@ -778,6 +863,7 @@ export class EnvironmentSetupService {
       }
       await this.removeStaging(layout);
 
+      signal.throwIfAborted();
       this.setStage('start');
       const result = await this.options.startBackend({
         runtimeRoot: layout.runtimeRoot,
@@ -788,6 +874,7 @@ export class EnvironmentSetupService {
         pythonPath: layout.pythonPath,
         launchScript: layout.launchScript,
         ffprobePath: layout.ffprobePath,
+        signal,
       });
       signal.throwIfAborted();
       const objectInfo = readObjectInfo(result);

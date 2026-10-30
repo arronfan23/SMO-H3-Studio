@@ -2,7 +2,16 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, win32 } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
@@ -388,6 +397,7 @@ describe('EnvironmentSetupService installation', () => {
       ffprobePath: join(harness.installRoot, 'runtime', TOP_LEVEL, 'tools', 'ffmpeg', 'ffprobe.exe'),
       outputDirectory: harness.outputDirectory,
       profile: 'high-memory-candidate',
+      signal: expect.any(AbortSignal),
     });
     expect(harness.backend).toHaveBeenCalledTimes(1);
     expect((await harness.store.load())?.status).toBe('ready');
@@ -514,7 +524,7 @@ describe('EnvironmentSetupService installation', () => {
       }),
       harness.service.retry({
         profileId: 'high-memory-candidate',
-        installRoot: harness.installRoot,
+        installRoot: harness.installRoot.replaceAll('\\', '/'),
       }),
     ]);
 
@@ -564,6 +574,151 @@ describe('EnvironmentSetupService installation', () => {
 
     expect(harness.service.getState().installRoot).toBe(harness.installRoot);
     expect(harness.service.getState().progress.downloadedBytes).toBe(0);
+  });
+});
+
+describe('EnvironmentSetupService operation coordination', () => {
+  test('start rejects while a detect operation is in flight', async () => {
+    const detectStarted = createDeferred();
+    const finishDetect = createDeferred();
+    const detectHardware = vi.fn(async () => {
+      detectStarted.resolve();
+      await finishDetect.promise;
+      return makeHardware();
+    });
+    const harness = await createHarness({ service: { detectHardware } });
+
+    const detecting = harness.service.detect(harness.installRoot);
+    await detectStarted.promise;
+    const starting = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    finishDetect.resolve();
+
+    await expect(starting).rejects.toThrow(/detect|busy|active|progress/i);
+    await detecting;
+  });
+
+  test('detect rejects during setup without clearing the setup active state', async () => {
+    const downloadStarted = createDeferred();
+    const finishDownload = createDeferred();
+    const harness = await createHarness({
+      service: {
+        downloadParts: async (options) => {
+          downloadStarted.resolve();
+          await finishDownload.promise;
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+    const starting = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await downloadStarted.promise;
+
+    const detected = harness.service.detect(harness.installRoot);
+    const outcome = await detected.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const activeDuringSetup = harness.service.getState().active;
+    finishDownload.resolve();
+    await starting;
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/setup|busy|active|progress/i);
+    expect(activeDuringSetup).toBe(true);
+  });
+
+  test('same-root concurrent detects share one hardware detection', async () => {
+    const detectStarted = createDeferred();
+    const finishDetect = createDeferred();
+    const detectHardware = vi.fn(async () => {
+      detectStarted.resolve();
+      await finishDetect.promise;
+      return makeHardware();
+    });
+    const harness = await createHarness({ service: { detectHardware } });
+
+    const first = harness.service.detect(harness.installRoot);
+    await detectStarted.promise;
+    const second = harness.service.detect(harness.installRoot.replaceAll('\\', '/'));
+    finishDetect.resolve();
+    await Promise.all([first, second]);
+
+    expect(detectHardware).toHaveBeenCalledTimes(1);
+  });
+
+  test('a different-root detect rejects while another detect is running', async () => {
+    const otherRoot = await mkdtemp(join(tmpdir(), 'smo-other-detect-'));
+    cleanups.push(() => rm(otherRoot, { recursive: true, force: true }));
+    const detectStarted = createDeferred();
+    const finishDetect = createDeferred();
+    const harness = await createHarness({
+      service: {
+        detectHardware: async (root) => {
+          if (win32.normalize(root) === win32.normalize(harness.installRoot)) {
+            detectStarted.resolve();
+            await finishDetect.promise;
+          }
+          return makeHardware();
+        },
+      },
+    });
+
+    const first = harness.service.detect(harness.installRoot);
+    await detectStarted.promise;
+    const second = harness.service.detect(otherRoot);
+    finishDetect.resolve();
+
+    await expect(second).rejects.toThrow(/detect|root|busy|active/i);
+    await first;
+  });
+
+  test('single-flight rejects a different profile or install root', async () => {
+    const otherRoot = await mkdtemp(join(tmpdir(), 'smo-other-start-'));
+    cleanups.push(() => rm(otherRoot, { recursive: true, force: true }));
+    const downloadStarted = createDeferred();
+    const finishDownload = createDeferred();
+    const harness = await createHarness({
+      service: {
+        downloadParts: async (options) => {
+          downloadStarted.resolve();
+          await finishDownload.promise;
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+    const input = {
+      profileId: 'high-memory-candidate' as const,
+      installRoot: harness.installRoot,
+    };
+    const first = harness.service.start(input);
+    await downloadStarted.promise;
+
+    const differentProfile = harness.service.retry({
+      ...input,
+      profileId: 'balanced-16gb',
+    });
+    const differentRoot = harness.service.start({
+      ...input,
+      installRoot: otherRoot,
+    });
+    finishDownload.resolve();
+
+    await expect(differentProfile).rejects.toThrow(/input|profile|busy|active/i);
+    await expect(differentRoot).rejects.toThrow(/input|root|busy|active/i);
+    await first;
   });
 });
 
@@ -718,6 +873,69 @@ describe('EnvironmentSetupService failures and recovery', () => {
 
     await expect(pending).rejects.toThrow(/abort|cancel/i);
     expect(harness.service.getState()).toMatchObject({ active: false, healthy: false });
+    expect((await harness.store.load())?.status).toBe('failed');
+  });
+
+  test('cancel during final staging cleanup prevents backend startup', async () => {
+    const harness = await createHarness();
+    const cleanupStarted = createDeferred();
+    const finishCleanup = createDeferred();
+    const cleaner = harness.service as unknown as {
+      removeStaging(layout: unknown): Promise<void>;
+    };
+    const original = cleaner.removeStaging.bind(harness.service);
+    let cleanups = 0;
+    vi.spyOn(cleaner, 'removeStaging').mockImplementation(async (layout) => {
+      cleanups += 1;
+      if (cleanups === 2) {
+        cleanupStarted.resolve();
+        await finishCleanup.promise;
+      }
+      return original(layout);
+    });
+
+    const pending = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await cleanupStarted.promise;
+    const cancelling = harness.service.cancel();
+    finishCleanup.resolve();
+    await cancelling;
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect((await harness.store.load())?.status).toBe('failed');
+  });
+
+  test('cancel during backend startup aborts the adapter signal', async () => {
+    const backendStarted = createDeferred();
+    const finishBackend = createDeferred();
+    let harness!: Harness;
+    let observedSignal: AbortSignal | undefined;
+    harness = await createHarness({
+      service: {
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          backendStarted.resolve();
+          await finishBackend.promise;
+          input.signal.throwIfAborted();
+          return { systemStats: {}, objectInfo: makeObjectInfo() };
+        },
+      },
+    });
+
+    const pending = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await backendStarted.promise;
+    const cancelling = harness.service.cancel();
+    expect(observedSignal?.aborted).toBe(true);
+    finishBackend.resolve();
+    await cancelling;
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
     expect((await harness.store.load())?.status).toBe('failed');
   });
 
@@ -1009,6 +1227,133 @@ describe('EnvironmentSetupService failures and recovery', () => {
       service.start({ profileId: 'conservative', installRoot }),
     ).rejects.toThrow(/installRoot|path/i);
     expect(detect).not.toHaveBeenCalled();
+  });
+});
+
+describe('EnvironmentSetupService runtime replacement and reparse safety', () => {
+  test('quarantines a corrupt non-ready runtime and reinstalls on retry', async () => {
+    const first = await createHarness();
+    await writeRuntimeFiles(first.runtimeRoot, { corruptLaunch: true });
+    const config = await seedReadyConfig(first);
+    await first.store.save({ ...config, status: 'failed' });
+    const harness = await createHarness({ installRoot: first.installRoot });
+
+    await expect(
+      harness.service.retry({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true });
+
+    expect(harness.downloads.parts).toHaveBeenCalledTimes(1);
+    const quarantineRoot = join(harness.installRoot, '.smo-install', 'quarantine');
+    const entries = await readdir(quarantineRoot);
+    expect(entries).toHaveLength(1);
+    expect(
+      await readFile(join(quarantineRoot, entries[0], 'tools', 'launch.py'), 'utf8'),
+    ).toBe('corrupt launch');
+    expect(
+      await readFile(join(harness.runtimeRoot, 'tools', 'launch.py'), 'utf8'),
+    ).toBe('launch');
+  });
+
+  test('replaces a same-path ready runtime when manifestVersion changes', async () => {
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const ready = await first.store.load();
+    if (!ready) throw new Error('Expected a ready config');
+    await first.store.save({ ...ready, status: 'installing', manifestVersion: '0' });
+    await first.store.markReady();
+    const harness = await createHarness({ installRoot: first.installRoot });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(harness.downloads.parts).toHaveBeenCalledTimes(1);
+    expect(
+      await readdir(join(harness.installRoot, '.smo-install', 'quarantine')),
+    ).toHaveLength(1);
+  });
+
+  test('keeps a matching ready runtime in place when its hash is corrupt', async () => {
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const oldReady = await first.store.load();
+    await writeFile(join(first.runtimeRoot, 'tools', 'launch.py'), 'corrupt launch');
+    const harness = await createHarness({ installRoot: first.installRoot });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/launch\.py|sha256|hash/i);
+
+    expect(await harness.store.load()).toEqual(oldReady);
+    expect(harness.downloads.parts).not.toHaveBeenCalled();
+    expect(existsSync(join(harness.installRoot, '.smo-install', 'quarantine'))).toBe(false);
+    expect(existsSync(harness.runtimeRoot)).toBe(true);
+  });
+
+  test('quarantining a junction runtime moves the link without deleting its target', async () => {
+    const first = await createHarness();
+    const outside = await mkdtemp(join(tmpdir(), 'smo-runtime-target-'));
+    cleanups.push(() => rm(outside, { recursive: true, force: true }));
+    await writeRuntimeFiles(outside, { corruptLaunch: true });
+    const marker = join(outside, 'keep.txt');
+    await writeFile(marker, 'do not delete');
+    await mkdir(dirname(first.runtimeRoot), { recursive: true });
+    await symlink(outside, first.runtimeRoot, 'junction');
+    const config = await seedReadyConfig(first);
+    await first.store.save({ ...config, status: 'failed' });
+    const harness = await createHarness({ installRoot: first.installRoot });
+
+    await harness.service.retry({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(await readFile(marker, 'utf8')).toBe('do not delete');
+    const quarantineRoot = join(harness.installRoot, '.smo-install', 'quarantine');
+    const entries = await readdir(quarantineRoot);
+    expect(entries).toHaveLength(1);
+    const quarantined = join(quarantineRoot, entries[0]);
+    expect((await lstat(quarantined)).isSymbolicLink()).toBe(true);
+    expect(
+      await readFile(join(harness.runtimeRoot, 'tools', 'launch.py'), 'utf8'),
+    ).toBe('launch');
+  });
+
+  test.each([
+    { scenario: 'work directory', segments: ['.smo-install'] },
+    { scenario: 'download directory', segments: ['.smo-install', 'downloads'] },
+    { scenario: 'staging directory', segments: ['.smo-install', 'staging'] },
+  ])('rejects a $scenario junction without deleting its target', async ({ segments }) => {
+    const harness = await createHarness();
+    const outside = await mkdtemp(join(tmpdir(), 'smo-junction-target-'));
+    cleanups.push(() => rm(outside, { recursive: true, force: true }));
+    const marker = join(outside, 'keep.txt');
+    await writeFile(marker, 'do not delete');
+    const junction = join(harness.installRoot, ...segments);
+    await mkdir(dirname(junction), { recursive: true });
+    await symlink(outside, junction, 'junction');
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/junction|reparse|symbolic|unsafe/i);
+
+    expect(await readFile(marker, 'utf8')).toBe('do not delete');
   });
 });
 
