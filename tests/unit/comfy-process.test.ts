@@ -587,4 +587,193 @@ describe('ComfyProcessManager', () => {
     expect(health).not.toHaveBeenCalled();
     expect(openCalls).toHaveLength(0);
   });
+
+  test('two managers with separate launch directories never overwrite each other', async () => {
+    let healthyA = false;
+    let healthyB = false;
+    const healthA = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthyA) throw new Error('ComfyUI A is offline');
+      return STATS;
+    });
+    const healthB = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthyB) throw new Error('ComfyUI B is offline');
+      return STATS;
+    });
+    const launchDirectoryA = join(tempDir, 'launch-a');
+    const launchDirectoryB = join(tempDir, 'launch-b');
+    const rootA = join(tempDir, 'root-a');
+    const rootB = join(tempDir, 'root-b');
+    const a = createManager({
+      client: { health: healthA },
+      rootDirectory: rootA,
+      logPath: join(tempDir, 'shared.log'),
+      launchDirectory: launchDirectoryA,
+    });
+    const b = createManager({
+      client: { health: healthB },
+      baseUrl: 'http://127.0.0.1:8199',
+      rootDirectory: rootB,
+      logPath: join(tempDir, 'shared.log'),
+      launchDirectory: launchDirectoryB,
+    });
+
+    // Interleave the two startups.
+    const pendingA = a.manager.ensureReady();
+    await vi.waitFor(() => expect(a.openCalls).toHaveLength(1));
+    const pendingB = b.manager.ensureReady();
+    await vi.waitFor(() => expect(b.openCalls).toHaveLength(1));
+    healthyA = true;
+    healthyB = true;
+    await expect(pendingA).resolves.toEqual(STATS);
+    await expect(pendingB).resolves.toEqual(STATS);
+
+    const pathsA = await readFile(join(launchDirectoryA, 'start-comfyui.paths'), 'utf8');
+    const pathsB = await readFile(join(launchDirectoryB, 'start-comfyui.paths'), 'utf8');
+    expect(pathsA).toContain(`SMO_COMFY_ROOT_DIR=${rootA}`);
+    expect(pathsA).toContain('SMO_COMFY_PORT=8188');
+    expect(pathsA).not.toContain(rootB);
+    expect(pathsB).toContain(`SMO_COMFY_ROOT_DIR=${rootB}`);
+    expect(pathsB).toContain('SMO_COMFY_PORT=8199');
+    expect(pathsB).not.toContain(rootA);
+    expect(a.openCalls[0]).toBe(join(launchDirectoryA, 'start-comfyui-hidden.cmd'));
+    expect(b.openCalls[0]).toBe(join(launchDirectoryB, 'start-comfyui-hidden.cmd'));
+  });
+
+  test('an owned manager launches through a pid-recording python worker', async () => {
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) throw new Error('ComfyUI is offline');
+      return STATS;
+    });
+    const { manager, openCalls } = createManager({
+      client: { health },
+      ownedProcess: true,
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    const inner = await readFile(innerLauncherPath, 'utf8');
+    expect(inner).toContain(
+      '"%SMO_COMFY_PYTHON%" -I -X utf8 "%~dp0comfy-worker.py" --lowvram --port %SMO_COMFY_PORT% >> "%SMO_COMFY_LOG%" 2>&1',
+    );
+    expect(inner).not.toContain('%-worker%');
+
+    const paths = await readFile(pathsPath, 'utf8');
+    expect(paths).toContain(`SMO_COMFY_PID=${join(tempDir, 'comfy-worker.pid')}`);
+
+    // The worker must not embed any user-controlled path; everything comes
+    // from the UTF-8 paths file via the environment.
+    const worker = await readFile(join(tempDir, 'comfy-worker.py'), 'utf8');
+    expect(worker).toContain('Popen');
+    expect(worker).toContain('SMO_COMFY_LAUNCH');
+    expect(worker).toContain('SMO_COMFY_PID');
+    expect(worker).not.toContain(tempDir);
+  });
+
+  test('terminate kills an owned backend this manager actually launched', async () => {
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) throw new Error('ComfyUI is offline');
+      return STATS;
+    });
+    const killProcessTree = vi.fn(async (_pid: number) => undefined);
+    const { manager, openCalls } = createManager({
+      client: { health },
+      ownedProcess: true,
+      killProcessTree,
+      openLauncher: async () => {
+        await writeFile(join(tempDir, 'comfy-worker.pid'), '4321', 'utf8');
+        return '';
+      },
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    await manager.terminate();
+    expect(killProcessTree).toHaveBeenCalledWith(4321);
+  });
+
+  test('terminate never kills a reused healthy backend', async () => {
+    const killProcessTree = vi.fn(async (_pid: number) => undefined);
+    const { manager, health, openCalls } = createManager({
+      ownedProcess: true,
+      killProcessTree,
+    });
+
+    // The backend is already healthy: no launch, no pid file, nothing to kill.
+    await expect(manager.ensureReady()).resolves.toEqual(STATS);
+    expect(health).toHaveBeenCalledTimes(1);
+    expect(openCalls).toHaveLength(0);
+
+    await manager.terminate();
+    expect(killProcessTree).not.toHaveBeenCalled();
+  });
+
+  test('terminate skips the kill when the backend already exited', async () => {
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) throw new Error('ComfyUI is offline');
+      return STATS;
+    });
+    const killProcessTree = vi.fn(async (_pid: number) => undefined);
+    const { manager, openCalls } = createManager({
+      client: { health },
+      ownedProcess: true,
+      killProcessTree,
+      openLauncher: async () => {
+        await writeFile(join(tempDir, 'comfy-worker.pid'), '4321', 'utf8');
+        return '';
+      },
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    // The backend recorded its exit before the terminate request.
+    await writeFile(statusPath, '0\n', 'utf8');
+    await manager.terminate();
+    expect(killProcessTree).not.toHaveBeenCalled();
+  });
+
+  test('terminate and close never kill for a non-owned manager', async () => {
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) throw new Error('ComfyUI is offline');
+      return STATS;
+    });
+    const killProcessTree = vi.fn(async (_pid: number) => undefined);
+    const { manager, openCalls } = createManager({
+      client: { health },
+      killProcessTree,
+      openLauncher: async () => {
+        await writeFile(join(tempDir, 'comfy-worker.pid'), '4321', 'utf8');
+        return '';
+      },
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    await manager.terminate();
+    expect(killProcessTree).not.toHaveBeenCalled();
+
+    const owned = createManager({
+      client: { health },
+      ownedProcess: true,
+      killProcessTree,
+    });
+    await owned.manager.ensureReady();
+    await owned.manager.close();
+    expect(killProcessTree).not.toHaveBeenCalled();
+  });
 });

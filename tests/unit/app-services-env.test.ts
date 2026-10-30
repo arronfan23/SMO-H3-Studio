@@ -13,6 +13,7 @@ import { app, dialog } from 'electron';
 import {
   createAppServices,
   createEnvironmentStartBackend,
+  hasStartupEvidence,
   resolveStringOption,
   DEFAULT_DATA_DIRECTORY,
   DEFAULT_OUTPUT_DIRECTORY,
@@ -386,8 +387,11 @@ describe('createEnvironmentStartBackend', () => {
   }
 
   async function startBackendServer(
-    objectInfoGate?: { requested: Promise<void>; onRequest?: () => void },
-    systemStatsResponder?: (requestCount: number) => unknown,
+    options: {
+      objectInfoGate?: { requested: Promise<void>; onRequest?: () => void };
+      objectInfoValue?: unknown;
+      systemStatsResponder?: (requestCount: number) => unknown;
+    } = {},
   ): Promise<{ baseUrl: string; close: () => Promise<void> }> {
     let systemStatsRequests = 0;
     const server: Server = createServer((request, response) => {
@@ -398,7 +402,7 @@ describe('createEnvironmentStartBackend', () => {
       if (request.url === '/system_stats') {
         systemStatsRequests += 1;
         sendJson(
-          systemStatsResponder?.(systemStatsRequests) ?? {
+          options.systemStatsResponder?.(systemStatsRequests) ?? {
             system: { os: 'test' },
             devices: [],
           },
@@ -406,12 +410,14 @@ describe('createEnvironmentStartBackend', () => {
         return;
       }
       if (request.url === '/object_info') {
-        if (objectInfoGate) {
-          objectInfoGate.onRequest?.();
-          void objectInfoGate.requested.then(() => sendJson(objectInfoFixture));
+        if (options.objectInfoGate) {
+          options.objectInfoGate.onRequest?.();
+          void options.objectInfoGate.requested.then(() =>
+            sendJson(options.objectInfoValue ?? objectInfoFixture),
+          );
           return;
         }
-        sendJson(objectInfoFixture);
+        sendJson(options.objectInfoValue ?? objectInfoFixture);
         return;
       }
       sendJson({ system: { os: 'test' }, devices: [] });
@@ -437,8 +443,9 @@ describe('createEnvironmentStartBackend', () => {
     logDirectory: string,
     adapterOverrides: {
       startupEvidenceTimeoutMs?: number;
-      onCreateManager?: (logPath: string) => void;
+      onCreateManager?: (options: { logPath: string; launchDirectory?: string }) => void;
       openLauncher?: (path: string) => Promise<string>;
+      killProcessTree?: (pid: number) => Promise<void>;
     } = {},
   ) {
     const comfy = new ComfyClient(baseUrl);
@@ -449,6 +456,8 @@ describe('createEnvironmentStartBackend', () => {
     };
     const createdManagers: ComfyProcessManager[] = [];
     const createdManagerCloseSpies: ReturnType<typeof vi.spyOn>[] = [];
+    const createdManagerTerminateSpies: ReturnType<typeof vi.spyOn>[] = [];
+    const kills: number[] = [];
     let activeManager: ComfyProcessManager | undefined = new ComfyProcessManager(
       { baseUrl, logPath: join(logDirectory, 'old.log') },
       comfy,
@@ -462,8 +471,16 @@ describe('createEnvironmentStartBackend', () => {
       setActiveManager: (manager) => {
         activeManager = manager;
       },
+      killProcessTree:
+        adapterOverrides.killProcessTree ??
+        (async (pid) => {
+          kills.push(pid);
+        }),
       createManager: (options, client) => {
-        adapterOverrides.onCreateManager?.(options.logPath);
+        adapterOverrides.onCreateManager?.({
+          logPath: options.logPath,
+          launchDirectory: options.launchDirectory,
+        });
         const manager = new ComfyProcessManager(
           {
             startupTimeoutMs: 2_000,
@@ -477,6 +494,7 @@ describe('createEnvironmentStartBackend', () => {
         );
         createdManagers.push(manager);
         createdManagerCloseSpies.push(vi.spyOn(manager, 'close'));
+        createdManagerTerminateSpies.push(vi.spyOn(manager, 'terminate'));
         return manager;
       },
       ...(adapterOverrides.startupEvidenceTimeoutMs === undefined
@@ -488,6 +506,8 @@ describe('createEnvironmentStartBackend', () => {
       activePaths,
       createdManagers,
       createdManagerCloseSpies,
+      createdManagerTerminateSpies,
+      kills,
       startBackend,
       getActiveManager: () => activeManager,
     };
@@ -508,6 +528,7 @@ describe('createEnvironmentStartBackend', () => {
     expect(harness.getActiveManager()).toBe(oldManager);
     expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
     expect(harness.createdManagers).toHaveLength(0);
+    expect(harness.kills).toEqual([]);
   });
 
   test('reuses a healthy backend when the runtime roots match ignoring case', async () => {
@@ -527,6 +548,8 @@ describe('createEnvironmentStartBackend', () => {
     expect(harness.createdManagers).toHaveLength(1);
     expect(oldClose).toHaveBeenCalled();
     expect(harness.activePaths.runtimeRoot).toBe('d:\\env\\runtime\\oldroot');
+    // A reused healthy backend is never terminated.
+    expect(harness.kills).toEqual([]);
   });
 
   test('aborting after a delayed objectInfo keeps the old manager and closes the candidate', async () => {
@@ -542,7 +565,7 @@ describe('createEnvironmentStartBackend', () => {
       }),
       onRequest: () => objectInfoRequested(),
     };
-    const upstream = await startBackendServer(gate);
+    const upstream = await startBackendServer({ objectInfoGate: gate });
     cleanups.push(() => upstream.close());
     const harness = createAdapterHarness(upstream.baseUrl, logDirectory);
     const oldManager = harness.getActiveManager();
@@ -556,14 +579,15 @@ describe('createEnvironmentStartBackend', () => {
     );
     // Wait until the backend health passed and objectInfo is in flight.
     await vi.waitFor(() => expect(harness.createdManagers).toHaveLength(1));
-    const candidateClose = vi.spyOn(harness.createdManagers[0], 'close');
     await requested;
     controller.abort(new Error('Environment setup cancelled'));
 
     await expect(pending).rejects.toThrow(/cancelled/i);
-    expect(candidateClose).toHaveBeenCalled();
+    expect(harness.createdManagerTerminateSpies[0]).toHaveBeenCalled();
     expect(harness.getActiveManager()).toBe(oldManager);
     expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+    // The candidate never launched a process, so there was nothing to kill.
+    expect(harness.kills).toEqual([]);
 
     releaseObjectInfo();
   });
@@ -574,9 +598,10 @@ describe('createEnvironmentStartBackend', () => {
     // the candidate's first health call inside ensureReady succeeds because
     // the OLD backend came online in between. The candidate never launches
     // anything, so its independent log never gains startup evidence.
-    const upstream = await startBackendServer(undefined, (requestCount) =>
-      requestCount === 1 ? {} : { system: { os: 'test' }, devices: [] },
-    );
+    const upstream = await startBackendServer({
+      systemStatsResponder: (requestCount) =>
+        requestCount === 1 ? {} : { system: { os: 'test' }, devices: [] },
+    });
     cleanups.push(() => upstream.close());
     const launches: string[] = [];
     const harness = createAdapterHarness(upstream.baseUrl, logDirectory, {
@@ -595,24 +620,26 @@ describe('createEnvironmentStartBackend', () => {
     // The candidate was closed, never launched a process, and the active
     // manager and paths still belong to the old runtime.
     expect(harness.createdManagers).toHaveLength(1);
-    expect(harness.createdManagerCloseSpies[0]).toHaveBeenCalled();
+    expect(harness.createdManagerTerminateSpies[0]).toHaveBeenCalled();
     expect(launches).toHaveLength(0);
     expect(harness.getActiveManager()).toBe(oldManager);
     expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+    expect(harness.kills).toEqual([]);
   });
 
   test('accepts a genuinely launched candidate once its own log proves the startup', async () => {
     const logDirectory = await useDataDirectory();
     let healthy = false;
-    const upstream = await startBackendServer(undefined, () =>
-      healthy ? { system: { os: 'test' }, devices: [] } : {},
-    );
+    const upstream = await startBackendServer({
+      systemStatsResponder: () =>
+        healthy ? { system: { os: 'test' }, devices: [] } : {},
+    });
     cleanups.push(() => upstream.close());
     const port = new URL(upstream.baseUrl).port;
     const candidateLogPaths: string[] = [];
     const harness = createAdapterHarness(upstream.baseUrl, logDirectory, {
       startupEvidenceTimeoutMs: 2_000,
-      onCreateManager: (logPath) => candidateLogPaths.push(logPath),
+      onCreateManager: (options) => candidateLogPaths.push(options.logPath),
       openLauncher: async () => {
         // Simulate ComfyUI booting from the candidate runtime: it writes
         // its own startup lines into the candidate's independent log.
@@ -641,7 +668,215 @@ describe('createEnvironmentStartBackend', () => {
     expect(harness.getActiveManager()).not.toBe(oldManager);
     expect(oldClose).toHaveBeenCalled();
     expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\NewRoot');
+    expect(harness.kills).toEqual([]);
   });
+
+  test('terminates a launched candidate that lacks nodes; retry starts fresh', async () => {
+    const logDirectory = await useDataDirectory();
+    let healthy = false;
+    const upstream = await startBackendServer({
+      systemStatsResponder: () =>
+        healthy ? { system: { os: 'test' }, devices: [] } : {},
+      // The backend never offers the required nodes.
+      objectInfoValue: {},
+    });
+    cleanups.push(() => upstream.close());
+    const port = new URL(upstream.baseUrl).port;
+    const launchDirs: string[] = [];
+    const logPaths: string[] = [];
+    let launchCount = 0;
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory, {
+      startupEvidenceTimeoutMs: 2_000,
+      onCreateManager: (options) => {
+        launchDirs.push(options.launchDirectory ?? '');
+        logPaths.push(options.logPath);
+      },
+      openLauncher: async () => {
+        // Simulate ComfyUI booting: pid file plus startup evidence, and the
+        // backend starts answering health checks.
+        launchCount += 1;
+        healthy = true;
+        const pid = 5000 + launchCount;
+        await writeFile(
+          join(launchDirs[launchDirs.length - 1], 'comfy-worker.pid'),
+          String(pid),
+          'utf8',
+        );
+        await writeFile(
+          logPaths[logPaths.length - 1],
+          `Starting server\nTo see the GUI go to: http://127.0.0.1:${port}\n`,
+          'utf8',
+        );
+        return '';
+      },
+      killProcessTree: async (pid) => {
+        harness.kills.push(pid);
+        // The tree is gone: the backend stops answering.
+        healthy = false;
+      },
+    });
+    const oldManager = harness.getActiveManager();
+
+    await expect(harness.startBackend(makeBackendInput())).rejects.toThrow(
+      /missing required nodes/i,
+    );
+    expect(harness.kills).toEqual([5001]);
+    expect(harness.getActiveManager()).toBe(oldManager);
+
+    // A retry must launch a fresh candidate into its own directories, not
+    // trip over the terminated one's files.
+    await expect(harness.startBackend(makeBackendInput())).rejects.toThrow(
+      /missing required nodes/i,
+    );
+    expect(harness.kills).toEqual([5001, 5002]);
+    expect(harness.createdManagers).toHaveLength(2);
+    expect(new Set(launchDirs).size).toBe(2);
+    expect(new Set(logPaths).size).toBe(2);
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+  });
+
+  test('aborting after a real launch terminates the candidate process tree', async () => {
+    const logDirectory = await useDataDirectory();
+    let healthy = false;
+    let releaseObjectInfo!: () => void;
+    let objectInfoRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      objectInfoRequested = resolve;
+    });
+    const upstream = await startBackendServer({
+      systemStatsResponder: () =>
+        healthy ? { system: { os: 'test' }, devices: [] } : {},
+      objectInfoGate: {
+        requested: new Promise<void>((resolve) => {
+          releaseObjectInfo = resolve;
+        }),
+        onRequest: () => objectInfoRequested(),
+      },
+    });
+    cleanups.push(() => upstream.close());
+    const port = new URL(upstream.baseUrl).port;
+    const launchDirs: string[] = [];
+    const logPaths: string[] = [];
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory, {
+      startupEvidenceTimeoutMs: 2_000,
+      onCreateManager: (options) => {
+        launchDirs.push(options.launchDirectory ?? '');
+        logPaths.push(options.logPath);
+      },
+      openLauncher: async () => {
+        healthy = true;
+        await writeFile(
+          join(launchDirs[launchDirs.length - 1], 'comfy-worker.pid'),
+          '6001',
+          'utf8',
+        );
+        await writeFile(
+          logPaths[logPaths.length - 1],
+          `Starting server\nTo see the GUI go to: http://127.0.0.1:${port}\n`,
+          'utf8',
+        );
+        return '';
+      },
+      killProcessTree: async (pid) => {
+        harness.kills.push(pid);
+        healthy = false;
+      },
+    });
+    const oldManager = harness.getActiveManager();
+    const controller = new AbortController();
+
+    const pending = harness.startBackend(
+      makeBackendInput({ signal: controller.signal }),
+    );
+    await requested;
+    controller.abort(new Error('Environment setup cancelled'));
+
+    await expect(pending).rejects.toThrow(/cancelled/i);
+    expect(harness.kills).toEqual([6001]);
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+
+    releaseObjectInfo();
+  });
+});
+
+describe('startup evidence port matching', () => {
+  test('matches the GUI URL port against the backend port, including IPv6', () => {
+    const log = (url: string) =>
+      `Starting server\nTo see the GUI go to: ${url}\n`;
+
+    expect(hasStartupEvidence(log('http://127.0.0.1:8188'), '8188')).toBe(true);
+    expect(hasStartupEvidence(log('http://[::1]:8199/'), '8199')).toBe(true);
+    expect(hasStartupEvidence(log('http://[::1]:8199/'), '8188')).toBe(false);
+    expect(hasStartupEvidence(log('http://127.0.0.1:18188'), '8188')).toBe(false);
+    expect(hasStartupEvidence('To see the GUI go to: http://127.0.0.1:8188', '8188')).toBe(false);
+    expect(hasStartupEvidence(log('not a url'), '8188')).toBe(false);
+    expect(hasStartupEvidence('', '8188')).toBe(false);
+  });
+});
+
+describe('createAppServices initial manager profile', () => {
+  function writeEnvironmentConfig(
+    dataDirectory: string,
+    profile: string,
+    runtimeRoot: string,
+  ): Promise<void> {
+    const config = {
+      schemaVersion: 1,
+      runtimeId: 'sm120',
+      runtimeRoot,
+      modelDirectory: join(dataDirectory, 'models'),
+      outputDirectory: join(dataDirectory, 'output'),
+      profile,
+      hardwareFingerprint: {
+        gpu: 'Recorded GPU',
+        vramGiB: 24,
+        ramGiB: 64,
+        cudaComputeCapability: '12.0',
+      },
+      manifestVersion: '1',
+      status: 'ready',
+      createdAt: '2026-01-01T00:00:00+08:00',
+      updatedAt: '2026-01-01T00:00:00+08:00',
+    };
+    return writeFile(
+      join(dataDirectory, 'environment.json'),
+      JSON.stringify(config),
+    );
+  }
+
+  test.each([
+    { profile: 'high-memory-candidate', expectLowvram: false },
+    { profile: 'balanced-16gb', expectLowvram: true },
+  ])(
+    'builds the launcher with lowvram=$expectLowvram for a $profile config',
+    async ({ profile, expectLowvram }) => {
+      const dataDirectory = await useDataDirectory();
+      const runtimeRoot = await useDataDirectory();
+      await writeEnvironmentConfig(dataDirectory, profile, runtimeRoot);
+
+      const services = await createAppServices({
+        dataDirectory,
+        comfyBaseUrl: 'http://127.0.0.1:1',
+      });
+      cleanups.push(() => services.close());
+
+      // The launch fails (no shell in the test mock), but the launcher
+      // files are written before the open attempt.
+      await expect(services.startComfy()).rejects.toThrow();
+
+      const inner = await readFile(
+        join(dataDirectory, 'logs', 'start-comfyui.cmd'),
+        'utf8',
+      );
+      if (expectLowvram) {
+        expect(inner).toContain('--lowvram');
+      } else {
+        expect(inner).not.toContain('--lowvram');
+      }
+    },
+  );
 });
 
 describe('createAppServices test file dialog env', () => {

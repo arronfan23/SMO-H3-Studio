@@ -110,12 +110,13 @@ function environmentManifestPath(): string {
 
 /**
  * Lets an abort signal cancel a pending wait; on abort the cleanup callback
- * runs (e.g. closing the candidate process manager) and the wait rejects.
+ * runs (e.g. terminating the candidate process manager) and is awaited
+ * before the wait rejects, so cleanup is finished when the error surfaces.
  */
 function raceWithAbort<T>(
   promise: Promise<T>,
   signal: AbortSignal,
-  onAbort: () => void,
+  onAbort: () => void | Promise<void>,
 ): Promise<T> {
   const abortError = () =>
     signal.reason instanceof Error
@@ -126,13 +127,18 @@ function raceWithAbort<T>(
             : String(signal.reason),
         );
   if (signal.aborted) {
-    onAbort();
-    return Promise.reject(abortError());
+    return Promise.resolve()
+      .then(onAbort)
+      .then(() => {
+        throw abortError();
+      });
   }
   return new Promise<T>((resolve, reject) => {
     const handleAbort = () => {
-      onAbort();
-      reject(abortError());
+      void Promise.resolve()
+        .then(onAbort)
+        .catch(() => undefined)
+        .then(() => reject(abortError()));
     };
     signal.addEventListener('abort', handleAbort, { once: true });
     promise.then(
@@ -156,6 +162,7 @@ export interface EnvironmentStartBackendAdapterOptions {
   getActiveManager: () => ComfyProcessManager | undefined;
   setActiveManager: (manager: ComfyProcessManager) => void;
   startupEvidenceTimeoutMs?: number;
+  killProcessTree?: (pid: number) => Promise<void>;
   createManager?: (
     options: ComfyProcessManagerOptions,
     client: Pick<ComfyClient, 'health'>,
@@ -184,8 +191,9 @@ function backendPort(baseUrl: string): string {
 /**
  * A freshly started ComfyUI logs its bind line; the port must match the
  * configured backend so a different process cannot satisfy the check.
+ * The GUI address is parsed as a URL so IPv6 hosts ([::1]) compare safely.
  */
-function hasStartupEvidence(logContent: string, port: string): boolean {
+export function hasStartupEvidence(logContent: string, port: string): boolean {
   if (
     !logContent.includes('Starting server') ||
     !logContent.includes('To see the GUI go to:')
@@ -198,10 +206,14 @@ function hasStartupEvidence(logContent: string, port: string): boolean {
   if (guiLine === undefined || port.length === 0) {
     return false;
   }
-  const match = /:(\d{1,5})(?:\D|$)/.exec(
-    guiLine.slice(guiLine.indexOf('To see the GUI go to:')),
-  );
-  return match?.[1] === port;
+  const rawUrl = guiLine
+    .slice(guiLine.indexOf('To see the GUI go to:') + 'To see the GUI go to:'.length)
+    .trim();
+  try {
+    return new URL(rawUrl).port === port;
+  } catch {
+    return false;
+  }
 }
 
 function delay(ms: number): Promise<void> {
@@ -281,12 +293,17 @@ export function createEnvironmentStartBackend(
       );
     }
 
-    // A new runtime gets its own log (and therefore its own exit-status
-    // file): the old backend must never write into the file that serves as
-    // the candidate's startup evidence.
+    // A new runtime gets its own log AND its own launch directory (inner
+    // launcher, hidden launcher, paths file, pid file) under one UUID: the
+    // old backend and any previous candidate must never share a file with
+    // this attempt's startup chain.
+    const candidateId = randomUUID();
     const candidateLogPath = requiresNewRuntime
-      ? join(dirname(adapter.logPath), `environment-${randomUUID()}.log`)
+      ? join(dirname(adapter.logPath), `environment-${candidateId}.log`)
       : adapter.logPath;
+    const candidateLaunchDirectory = requiresNewRuntime
+      ? join(dirname(adapter.logPath), `environment-${candidateId}`)
+      : undefined;
     const candidate = createManager(
       {
         baseUrl: adapter.baseUrl,
@@ -296,11 +313,18 @@ export function createEnvironmentStartBackend(
         outputDirectory: input.outputDirectory,
         lowvram: input.profile !== 'high-memory-candidate',
         logPath: candidateLogPath,
+        ...(candidateLaunchDirectory === undefined
+          ? {}
+          : { launchDirectory: candidateLaunchDirectory }),
+        ownedProcess: true,
+        ...(adapter.killProcessTree === undefined
+          ? {}
+          : { killProcessTree: adapter.killProcessTree }),
       },
       adapter.comfy,
     );
     const closeCandidate = () => {
-      void candidate.close().catch(() => undefined);
+      return candidate.terminate().catch(() => undefined);
     };
     let systemStats: unknown;
     let objectInfo: Record<string, unknown>;
@@ -337,7 +361,7 @@ export function createEnvironmentStartBackend(
       }
       input.signal.throwIfAborted();
     } catch (error) {
-      await candidate.close().catch(() => undefined);
+      await candidate.terminate().catch(() => undefined);
       throw error;
     }
 
@@ -478,6 +502,7 @@ export async function createAppServices(
         baseUrl: comfyBaseUrl,
         rootDirectory: environmentPaths.runtimeRoot,
         outputDirectory,
+        lowvram: environmentConfig?.profile !== 'high-memory-candidate',
         logPath: join(dataDirectory, 'logs', 'comfyui-backend.log'),
       },
       comfy,

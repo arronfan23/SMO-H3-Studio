@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { ComfyClient, ComfySystemStats } from './comfy';
@@ -16,6 +17,8 @@ const LOG_TAIL_LENGTH = 2_000;
 const INNER_LAUNCHER_FILE_NAME = 'start-comfyui.cmd';
 const HIDDEN_LAUNCHER_FILE_NAME = 'start-comfyui-hidden.cmd';
 const PATHS_FILE_NAME = 'start-comfyui.paths';
+const WORKER_FILE_NAME = 'comfy-worker.py';
+const PID_FILE_NAME = 'comfy-worker.pid';
 
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
@@ -32,7 +35,44 @@ const LAUNCHER_ENV = {
   output: 'SMO_COMFY_OUTPUT',
   log: 'SMO_COMFY_LOG',
   status: 'SMO_COMFY_STATUS',
+  pid: 'SMO_COMFY_PID',
 } as const;
+
+// In owned mode the batch runs this worker instead of launch.py directly:
+// the worker spawns launch.py with the same interpreter, records the child
+// PID so terminate() can kill exactly that process tree, and forwards the
+// exit code. Every path arrives through the UTF-8 paths file as an
+// environment variable; nothing user-controlled is embedded in the script.
+const WORKER_SCRIPT = `import os
+import subprocess
+import sys
+
+
+def main() -> int:
+    launch = os.environ["SMO_COMFY_LAUNCH"]
+    pid_path = os.environ["SMO_COMFY_PID"]
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-X", "utf8", launch, *sys.argv[1:]]
+    )
+    with open(pid_path, "w", encoding="ascii") as handle:
+        handle.write(str(process.pid))
+    return process.wait()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+`;
+
+async function defaultKillProcessTree(pid: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    execFile(
+      'taskkill',
+      ['/PID', String(pid), '/T', '/F'],
+      { windowsHide: true },
+      (error) => (error ? reject(error) : resolve()),
+    );
+  });
+}
 
 // The backend must never be a handle-inheriting child of the app: on Windows,
 // child_process.spawn passes bInheritHandles=TRUE, which leaks every
@@ -54,6 +94,9 @@ export interface ComfyProcessManagerOptions {
   launchScript?: string;
   lowvram?: boolean;
   outputDirectory?: string;
+  launchDirectory?: string;
+  ownedProcess?: boolean;
+  killProcessTree?: (pid: number) => Promise<void>;
   logPath: string;
   startupTimeoutMs?: number;
   staleStartupMs?: number;
@@ -91,9 +134,13 @@ function validateLaunchPath(value: string, name: string): string {
 function buildInnerLauncherScript(input: {
   lowvram: boolean;
   outputDirectory?: string;
+  owned: boolean;
 }): string {
+  const target = input.owned
+    ? `"%~dp0${WORKER_FILE_NAME}"`
+    : `"%${LAUNCHER_ENV.launch}%"`;
   const launchArguments = [
-    `"%${LAUNCHER_ENV.python}%" -I -X utf8 "%${LAUNCHER_ENV.launch}%"`,
+    `"%${LAUNCHER_ENV.python}%" -I -X utf8 ${target}`,
     ...(input.lowvram ? ['--lowvram'] : []),
     ...(input.outputDirectory === undefined
       ? []
@@ -129,6 +176,7 @@ function buildPathsFile(input: {
   launchScript: string;
   port: string;
   outputDirectory?: string;
+  pidPath?: string;
   logPath: string;
   statusPath: string;
 }): string {
@@ -140,6 +188,9 @@ function buildPathsFile(input: {
     ...(input.outputDirectory === undefined
       ? []
       : [`${LAUNCHER_ENV.output}=${input.outputDirectory}`]),
+    ...(input.pidPath === undefined
+      ? []
+      : [`${LAUNCHER_ENV.pid}=${input.pidPath}`]),
     `${LAUNCHER_ENV.log}=${input.logPath}`,
     `${LAUNCHER_ENV.status}=${input.statusPath}`,
   ];
@@ -157,6 +208,10 @@ export class ComfyProcessManager {
   private readonly launchScript: string;
   private readonly lowvram: boolean;
   private readonly outputDirectory?: string;
+  private readonly launchDirectory: string;
+  private readonly ownedProcess: boolean;
+  private readonly killProcessTree: (pid: number) => Promise<void>;
+  private readonly pidPath: string;
   private readonly logPath: string;
   private readonly statusPath: string;
   private readonly startupTimeoutMs: number;
@@ -166,6 +221,8 @@ export class ComfyProcessManager {
   private readonly client: Pick<ComfyClient, 'health'>;
   private startPromise: Promise<ComfySystemStats> | null = null;
   private activeStartup: ActiveStartup | null = null;
+  private launchedProcess = false;
+  private terminated = false;
   private closed = false;
 
   constructor(
@@ -192,6 +249,10 @@ export class ComfyProcessManager {
       options.launchScript ?? join(this.rootDirectory, 'tools', 'launch.py');
     this.lowvram = options.lowvram ?? true;
     this.outputDirectory = options.outputDirectory;
+    this.launchDirectory = options.launchDirectory ?? dirname(options.logPath);
+    this.ownedProcess = options.ownedProcess ?? false;
+    this.killProcessTree = options.killProcessTree ?? defaultKillProcessTree;
+    this.pidPath = join(this.launchDirectory, PID_FILE_NAME);
     this.logPath = options.logPath;
     this.statusPath = `${options.logPath}.exit`;
     this.startupTimeoutMs = validateTimeout(
@@ -248,6 +309,36 @@ export class ComfyProcessManager {
     this.closed = true;
   }
 
+  /**
+   * Owned-mode shutdown for candidates that must not outlive the install
+   * attempt. Kills only a backend this manager actually launched (recorded
+   * PID, no exit record); a reused healthy instance or an already-exited
+   * process is left alone, and non-owned managers are never killed.
+   */
+  async terminate(): Promise<void> {
+    this.closed = true;
+    if (!this.ownedProcess || !this.launchedProcess || this.terminated) {
+      return;
+    }
+    // Mark synchronously so concurrent terminate callers cannot both kill.
+    this.terminated = true;
+    if ((await this.readExitCode()) !== null) {
+      return;
+    }
+    let pid: number | null = null;
+    try {
+      const content = await readFile(this.pidPath, 'utf8');
+      const parsed = Number.parseInt(content.trim(), 10);
+      pid = Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    } catch {
+      pid = null;
+    }
+    if (pid === null) {
+      return;
+    }
+    await this.killProcessTree(pid);
+  }
+
   private async startAndWait(): Promise<ComfySystemStats> {
     const exitCode = await this.readExitCode();
     if (
@@ -292,25 +383,36 @@ export class ComfyProcessManager {
     if (this.outputDirectory !== undefined) {
       validateLaunchPath(this.outputDirectory, 'output directory');
     }
+    validateLaunchPath(this.launchDirectory, 'launch directory');
     validateLaunchPath(this.logPath, 'log path');
 
     const logDirectory = dirname(this.logPath);
-    // The log directory (e.g. <data>/logs) may not exist on a fresh data root.
+    // The log and launch directories (e.g. <data>/logs) may not exist on a
+    // fresh data root, and owned candidates get a fresh directory each time.
     await mkdir(logDirectory, { recursive: true });
+    await mkdir(this.launchDirectory, { recursive: true });
     if (this.closed) {
       throw new Error('ComfyProcessManager is closed');
     }
-    const innerLauncherPath = join(logDirectory, INNER_LAUNCHER_FILE_NAME);
-    const hiddenLauncherPath = join(logDirectory, HIDDEN_LAUNCHER_FILE_NAME);
-    const pathsPath = join(logDirectory, PATHS_FILE_NAME);
+    const innerLauncherPath = join(this.launchDirectory, INNER_LAUNCHER_FILE_NAME);
+    const hiddenLauncherPath = join(this.launchDirectory, HIDDEN_LAUNCHER_FILE_NAME);
+    const pathsPath = join(this.launchDirectory, PATHS_FILE_NAME);
     await writeFile(
       innerLauncherPath,
       buildInnerLauncherScript({
         lowvram: this.lowvram,
         outputDirectory: this.outputDirectory,
+        owned: this.ownedProcess,
       }),
       'utf8',
     );
+    if (this.ownedProcess) {
+      await writeFile(
+        join(this.launchDirectory, WORKER_FILE_NAME),
+        WORKER_SCRIPT,
+        'utf8',
+      );
+    }
     await writeFile(
       pathsPath,
       buildPathsFile({
@@ -319,6 +421,7 @@ export class ComfyProcessManager {
         launchScript: this.launchScript,
         port,
         outputDirectory: this.outputDirectory,
+        pidPath: this.ownedProcess ? this.pidPath : undefined,
         logPath: this.logPath,
         statusPath: this.statusPath,
       }),
@@ -340,6 +443,7 @@ export class ComfyProcessManager {
       throw new Error(`Failed to start the ComfyUI process: ${failure}`);
     }
     this.activeStartup = { startedAt: Date.now() };
+    this.launchedProcess = true;
   }
 
   private async readExitCode(): Promise<number | null> {
