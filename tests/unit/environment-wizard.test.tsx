@@ -2,6 +2,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
+import { EnvironmentWizard } from '../../src/renderer/EnvironmentWizard';
+import {
+  useEnvironment,
+  type EnvironmentController,
+} from '../../src/renderer/useEnvironment';
 import type {
   EnvironmentConfig,
   EnvironmentProfile,
@@ -269,7 +274,11 @@ describe('first-launch environment wizard', () => {
     });
     expect(screen.getByLabelText('安装目录')).toBeDisabled();
     expect(start).toBeDisabled();
-    expect(screen.getByRole('button', { name: '取消安装' })).toBeEnabled();
+    const cancel = screen.getByRole('button', { name: '取消安装' });
+    expect(cancel).toBeEnabled();
+    smo.environment.cancel.mockResolvedValue(environmentState({ active: false }));
+    fireEvent.click(cancel);
+    expect(smo.environment.cancel).toHaveBeenCalledTimes(1);
 
     await act(async () => { resolveStart?.(readyState()); });
     await expectStudio();
@@ -397,6 +406,19 @@ describe('first-launch environment wizard', () => {
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
   });
+
+  test('retries an initial getState failure instead of staying on loading', async () => {
+    smo.environment.getState
+      .mockRejectedValueOnce(new Error('环境状态读取失败'))
+      .mockResolvedValueOnce(readyState(true));
+    render(<App />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('环境状态读取失败');
+    fireEvent.click(screen.getByRole('button', { name: '重试读取' }));
+
+    await expectStudio();
+    expect(smo.environment.getState).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('ready environment entry', () => {
@@ -457,6 +479,47 @@ describe('ready environment entry', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('运行时校验失败');
     expect(screen.getByRole('heading', { name: '首次环境配置' })).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: '主导航' })).not.toBeInTheDocument();
+  });
+
+  test('surfaces a skipped health retry and keeps manual retry available', async () => {
+    const controllerRef: { current: EnvironmentController | null } = { current: null };
+
+    function Harness() {
+      const environment = useEnvironment();
+      controllerRef.current = environment;
+      return <EnvironmentWizard environment={environment} />;
+    }
+
+    let rejectHealth: (error: Error) => void = () => undefined;
+    let resolveStart: ((state: EnvironmentState) => void) | undefined;
+    smo.environment.getState.mockResolvedValue(readyState(false));
+    smo.comfy.health.mockImplementation(
+      () => new Promise((_, reject) => { rejectHealth = reject; }),
+    );
+    smo.environment.start.mockImplementation(
+      () => new Promise<EnvironmentState>((resolve) => { resolveStart = resolve; }),
+    );
+    render(<Harness />);
+    await waitFor(() => expect(smo.comfy.health).toHaveBeenCalledTimes(1));
+
+    await act(async () => { void controllerRef.current!.start(); });
+    await act(async () => {
+      rejectHealth(new Error('ComfyUI offline'));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('重试安装');
+    expect(smo.environment.retry).not.toHaveBeenCalled();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('重试安装');
+    await act(async () => { resolveStart?.(readyState(false)); });
+    const retry = await screen.findByRole('button', { name: '重试安装' });
+    await waitFor(() => expect(retry).toBeEnabled());
+    smo.environment.retry.mockResolvedValue(readyState(true));
+    fireEvent.click(retry);
+    await waitFor(() => expect(smo.environment.retry).toHaveBeenCalledTimes(1));
   });
 
   test('keeps the original studio draft across navigation after a healthy restart', async () => {

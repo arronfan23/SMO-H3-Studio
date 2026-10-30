@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import {
   WINDOW_RESIZE_DIRECTIONS,
@@ -50,10 +50,30 @@ export function WindowResizeHandles() {
   const ownerPointerId = useRef<number | null>(null);
   const operationId = useRef(0);
   const latestCursor = useRef<WindowScreenPoint | null>(null);
+  const endRequested = useRef(false);
+  const hasMoved = useRef(false);
   const framePending = useRef(false);
 
   const sendEndResize = (): void => {
     void windowBridge()?.endResize().catch(() => undefined);
+  };
+
+  const finishWithFinalResize = (
+    direction: WindowResizeDirection,
+    operation: number,
+  ): void => {
+    const cursor = latestCursor.current ?? undefined;
+    void windowBridge()
+      ?.resize(direction, cursor)
+      .catch(() => undefined)
+      .finally(() => {
+        if (operation !== operationId.current) return;
+        sessionOpen.current = false;
+        endRequested.current = false;
+        hasMoved.current = false;
+        latestCursor.current = null;
+        sendEndResize();
+      });
   };
 
   const handlePointerDown =
@@ -62,7 +82,7 @@ export function WindowResizeHandles() {
       if (event.button !== 0) {
         return;
       }
-      if (ownerPointerId.current !== null) {
+      if (ownerPointerId.current !== null || sessionOpen.current) {
         return;
       }
       const bridge = windowBridge();
@@ -74,6 +94,8 @@ export function WindowResizeHandles() {
       ownerPointerId.current = event.pointerId;
       const operation = ++operationId.current;
       latestCursor.current = { x: event.screenX, y: event.screenY };
+      endRequested.current = false;
+      hasMoved.current = false;
       sessionOpen.current = true;
       void bridge
         .beginResize(direction, latestCursor.current)
@@ -84,9 +106,16 @@ export function WindowResizeHandles() {
             return;
           }
           if (ownerPointerId.current !== event.pointerId) {
-            // Released before begin resolved: never enter the dragging state,
-            // and close the session the main process may have just opened.
-            if (begun) {
+            if (!begun) {
+              sessionOpen.current = false;
+              endRequested.current = false;
+              hasMoved.current = false;
+              latestCursor.current = null;
+            } else if (endRequested.current && hasMoved.current) {
+              // Preserve the last pointer position before closing a session
+              // whose pointerup arrived while begin was still pending.
+              finishWithFinalResize(direction, operation);
+            } else {
               sendEndResize();
             }
             return;
@@ -96,6 +125,9 @@ export function WindowResizeHandles() {
           } else {
             sessionOpen.current = false;
             ownerPointerId.current = null;
+            endRequested.current = false;
+            hasMoved.current = false;
+            latestCursor.current = null;
             releasePointer(target, event.pointerId);
           }
         })
@@ -105,6 +137,9 @@ export function WindowResizeHandles() {
           }
           sessionOpen.current = false;
           ownerPointerId.current = null;
+          endRequested.current = false;
+          hasMoved.current = false;
+          latestCursor.current = null;
           releasePointer(target, event.pointerId);
         });
     };
@@ -116,12 +151,15 @@ export function WindowResizeHandles() {
       return;
     }
     latestCursor.current = { x: event.screenX, y: event.screenY };
+    hasMoved.current = true;
     if (activeDirection.current === null || framePending.current) {
       return;
     }
     framePending.current = true;
+    const operation = operationId.current;
     requestAnimationFrame(() => {
       framePending.current = false;
+      if (operation !== operationId.current) return;
       const direction = activeDirection.current;
       if (direction !== null) {
         void windowBridge()
@@ -135,16 +173,45 @@ export function WindowResizeHandles() {
     if (event.pointerId !== ownerPointerId.current) {
       return;
     }
+    if (hasMoved.current) {
+      latestCursor.current = { x: event.screenX, y: event.screenY };
+    }
+    const operation = operationId.current;
+    const direction = activeDirection.current;
+    const shouldFlushFinalMove = sessionOpen.current && hasMoved.current;
     ownerPointerId.current = null;
     activeDirection.current = null;
-    latestCursor.current = null;
     releasePointer(event.currentTarget, event.pointerId);
     if (!sessionOpen.current) {
+      latestCursor.current = null;
+      hasMoved.current = false;
+      endRequested.current = false;
+      return;
+    }
+    endRequested.current = true;
+    if (shouldFlushFinalMove) {
+      if (direction !== null) finishWithFinalResize(direction, operation);
       return;
     }
     sessionOpen.current = false;
+    endRequested.current = false;
+    hasMoved.current = false;
+    latestCursor.current = null;
     sendEndResize();
   };
+
+  useEffect(() => {
+    const handleWindowPointerEnd = (event: PointerEvent): void => {
+      if (event.pointerId !== ownerPointerId.current) return;
+      handlePointerEnd(event as unknown as ReactPointerEvent<HTMLDivElement>);
+    };
+    window.addEventListener('pointerup', handleWindowPointerEnd);
+    window.addEventListener('pointercancel', handleWindowPointerEnd);
+    return () => {
+      window.removeEventListener('pointerup', handleWindowPointerEnd);
+      window.removeEventListener('pointercancel', handleWindowPointerEnd);
+    };
+  }, []);
 
   return (
     <>

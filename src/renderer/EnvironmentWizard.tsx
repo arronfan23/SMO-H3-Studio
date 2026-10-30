@@ -48,8 +48,10 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
     installRoot,
     error,
     busy,
+    cancelling,
     setProfile,
     setInstallRoot,
+    readInitial,
     detect,
     start,
     retry,
@@ -69,9 +71,8 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
   const canStart =
     state !== null &&
     !busy &&
-    hardware !== null &&
     installRoot.trim().length > 0 &&
-    isEnvironmentProfileAllowed(profile, hardware);
+    (shouldRetry || (hardware !== null && isEnvironmentProfileAllowed(profile, hardware)));
 
   return (
     <div className="app-frame">
@@ -93,9 +94,22 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
           {message && <p className="form-error environment-error" role="alert">{message}</p>}
 
           {state === null ? (
-            <p className="environment-loading" role="status" aria-live="polite">
-              正在读取环境状态…
-            </p>
+            <>
+              <p className="environment-loading" role="status" aria-live="polite">
+                {message ? '环境状态读取失败，请重试。' : '正在读取环境状态…'}
+              </p>
+              {message && (
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  disabled={busy}
+                  onClick={() => void readInitial()}
+                >
+                  <RotateCcw size={17} aria-hidden="true" />
+                  <span>重试读取</span>
+                </button>
+              )}
+            </>
           ) : (
             <>
               <section className="environment-section" aria-label="硬件摘要">
@@ -178,6 +192,7 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
                     <button
                       type="button"
                       className="button button-secondary"
+                      disabled={cancelling}
                       onClick={() => void cancel()}
                     >
                       <XCircle size={17} aria-hidden="true" />

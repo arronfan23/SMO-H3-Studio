@@ -63,7 +63,7 @@ describe('WindowResizeHandles', () => {
       expect(bridge.resize).toHaveBeenCalledWith('se', { x: 130, y: 240 }),
     );
 
-    fireEvent.pointerUp(handle, { pointerId: 1 });
+    fireEvent.pointerUp(handle, { pointerId: 1, screenX: 130, screenY: 240 });
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
 
     const order = [
@@ -157,6 +157,39 @@ describe('WindowResizeHandles', () => {
     expect(bridge.resize).not.toHaveBeenCalled();
   });
 
+  test('flushes the final moved cursor before ending when begin resolves after pointer up', async () => {
+    let resolveBegin: (begun: boolean) => void = () => undefined;
+    bridge.beginResize.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveBegin = resolve;
+        }),
+    );
+    const { container } = render(<WindowResizeHandles />);
+    const handle = container.querySelector('.window-resize-ne')!;
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 1,
+      button: 0,
+      screenX: 100,
+      screenY: 200,
+    });
+    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 140, screenY: 150 });
+    fireEvent.pointerUp(window, { pointerId: 1, screenX: 145, screenY: 155 });
+
+    expect(bridge.resize).not.toHaveBeenCalled();
+    expect(bridge.endResize).not.toHaveBeenCalled();
+
+    resolveBegin(true);
+    await waitFor(() =>
+      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 145, y: 155 }),
+    );
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+    expect(bridge.resize.mock.invocationCallOrder[0]).toBeLessThan(
+      bridge.endResize.mock.invocationCallOrder[0],
+    );
+  });
+
   test('ends exactly once when pointer up follows a resolved begin', async () => {
     const { container } = render(<WindowResizeHandles />);
     const handle = container.querySelector('.window-resize-se')!;
@@ -208,7 +241,7 @@ describe('WindowResizeHandles', () => {
     await waitFor(() =>
       expect(bridge.resize).toHaveBeenCalledWith('se', { x: 40, y: 50 }),
     );
-    fireEvent.pointerUp(se, { pointerId: 1 });
+    fireEvent.pointerUp(se, { pointerId: 1, screenX: 40, screenY: 50 });
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
   });
 
@@ -249,7 +282,7 @@ describe('WindowResizeHandles', () => {
     await waitFor(() =>
       expect(bridge.resize).toHaveBeenCalledWith('se', { x: 50, y: 60 }),
     );
-    fireEvent.pointerUp(handle, { pointerId: 2 });
+    fireEvent.pointerUp(handle, { pointerId: 2, screenX: 50, screenY: 60 });
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(2));
   });
 });

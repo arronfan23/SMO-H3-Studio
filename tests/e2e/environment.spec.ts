@@ -10,6 +10,7 @@ import type { EnvironmentState } from '../../src/shared/environment';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_PATH = join(__dirname, '../../dist/main/index.js');
+const HARDWARE_MOCK_PATH = join(__dirname, '../fixtures/mock-hardware.cjs');
 const GIB = 1024 ** 3;
 
 async function launchApp(
@@ -20,6 +21,8 @@ async function launchApp(
 ) {
   return electron.launch({
     args: [
+      '--require',
+      HARDWARE_MOCK_PATH,
       APP_PATH,
       '--disable-gpu',
       '--disable-software-rasterizer',
@@ -66,46 +69,11 @@ test('first launch configures through the wizard without downloads or GPU depend
         healthy: false,
       };
       const snapshot = () => structuredClone(state);
-      for (const channel of ['getState', 'detect', 'start', 'retry', 'cancel']) {
+      let resolveStart: ((value: EnvironmentState) => void) | undefined;
+      for (const channel of ['getState', 'start', 'retry', 'cancel']) {
         ipcMain.removeHandler(`environment:${channel}`);
       }
       ipcMain.handle('environment:getState', snapshot);
-      ipcMain.handle('environment:detect', (_event, input: { installRoot?: string }) => {
-        const gib = 1024 ** 3;
-        state = {
-          ...state,
-          installRoot: input.installRoot ?? installRoot,
-          hardware: {
-            gpu: 'Mock RTX 5080',
-            vramGiB: 16,
-            ramGiB: 64,
-            windowsVersion: 'Windows 11',
-            driverVersion: 'test',
-            cudaComputeCapability: '12.0',
-            freeDiskGiB: 512,
-          },
-          selection: {
-            runtime: {
-              id: 'sm120',
-              displayName: 'SM120 test runtime',
-              archiveParts: [],
-              archiveSize: 0,
-              archiveSha256: '',
-              estimatedExtractedBytes: 0,
-              pythonPath: 'python.exe',
-              launchScript: 'launch.py',
-              ffprobePath: 'ffprobe.exe',
-            },
-            profile: 'balanced-16gb',
-            modelFiles: [],
-            requiredBytes: 64 * gib,
-          },
-          stage: 'select',
-          active: false,
-          error: null,
-        };
-        return snapshot();
-      });
       ipcMain.handle('environment:start', (_event, input: { installRoot: string }) => {
         const gib = 1024 ** 3;
         state = {
@@ -115,19 +83,22 @@ test('first launch configures through the wizard without downloads or GPU depend
           progress: { downloadedBytes: gib, totalBytes: 4 * gib, currentFile: 'runtime.zip' },
           active: true,
         };
-        return snapshot();
+        return new Promise<EnvironmentState>((resolve) => {
+          resolveStart = resolve;
+        });
       });
       ipcMain.handle('environment:retry', snapshot);
       ipcMain.handle('environment:cancel', () => {
         state = { ...state, stage: 'select', active: false, error: null };
+        resolveStart?.(snapshot());
         return snapshot();
       });
     });
 
-    await page.reload();
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('heading', { name: '首次环境配置' })).toBeVisible();
     await expect(page.getByText('Mock RTX 5080')).toBeVisible();
-    await expect(page.getByLabel('性能档位')).toHaveValue('balanced-16gb');
+    await expect(page.getByLabel('性能档位')).toHaveValue('conservative');
     await page.getByLabel('安装目录').fill('E:\\SMO-E2E-Custom');
     await page.getByRole('button', { name: '开始安装' }).click();
     await expect(page.getByRole('progressbar', { name: '安装进度' })).toHaveAttribute(
