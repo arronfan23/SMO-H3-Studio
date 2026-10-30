@@ -606,6 +606,8 @@ export class EnvironmentSetupService {
     let candidate: EnvironmentConfig | undefined;
     let candidateSaved = false;
     let preserveReady = false;
+    let previousConfig: EnvironmentConfig | null = null;
+    let readyCommitted: EnvironmentConfig | undefined;
 
     try {
       const installRoot = validateInstallRoot(input.installRoot);
@@ -637,7 +639,8 @@ export class EnvironmentSetupService {
       this.state = { ...this.state, selection };
       layout = createLayout(installRoot, selection.runtime);
 
-      const previous = this.state.config;
+      previousConfig = this.state.config;
+      const previous = previousConfig;
       preserveReady = previous?.status === 'ready';
       const now = new Date().toISOString();
       candidate = {
@@ -703,7 +706,7 @@ export class EnvironmentSetupService {
             this.setProgress(
               progress.downloadedBytes,
               progress.totalBytes,
-              selection.runtime.archiveParts[0].path,
+              progress.path,
             );
           },
         });
@@ -795,8 +798,10 @@ export class EnvironmentSetupService {
         throw new Error(`Backend is missing required nodes: ${missingNodes.join(', ')}`);
       }
 
-      if (!candidateSaved) await this.options.store.save(candidate);
-      const ready = await this.options.store.markReady();
+      signal.throwIfAborted();
+      const ready = await this.options.store.commitReady(candidate);
+      readyCommitted = ready;
+      signal.throwIfAborted();
       this.state = {
         ...this.state,
         config: ready,
@@ -815,7 +820,28 @@ export class EnvironmentSetupService {
         healthy: false,
       };
       if (layout) await this.removeStaging(layout).catch(() => undefined);
-      if (candidate && candidateSaved && !preserveReady) {
+      if (readyCommitted && candidate) {
+        try {
+          if (previousConfig?.status === 'ready') {
+            const restored = await this.options.store.commitReady(previousConfig);
+            this.state = { ...this.state, config: restored };
+          } else {
+            const failed: EnvironmentConfig = {
+              ...candidate,
+              status: 'failed',
+              updatedAt: new Date().toISOString(),
+            };
+            await this.options.store.save(failed);
+            this.state = { ...this.state, config: failed };
+          }
+        } catch (rollbackError) {
+          this.state = {
+            ...this.state,
+            config: readyCommitted,
+            error: `${originalMessage}; ready rollback failed: ${errorMessage(rollbackError)}`,
+          };
+        }
+      } else if (candidate && candidateSaved && !preserveReady) {
         const failed: EnvironmentConfig = {
           ...candidate,
           status: 'failed',

@@ -34,6 +34,8 @@ type DownloadPartsMock = ReturnType<
 type DownloadFileMock = ReturnType<
   typeof vi.fn<(options: DownloadFileOptions) => Promise<DownloadReceipt>>
 >;
+type CommitReady = (config: EnvironmentConfig) => Promise<EnvironmentConfig>;
+type CommitCapableStore = EnvironmentStore & { commitReady: CommitReady };
 const TOP_LEVEL = 'ComfyUI_SelfLift_Spark_SM120_CUDA130';
 const MODEL_PATHS = [
   'diffusion_models/main.safetensors',
@@ -47,6 +49,14 @@ const MODEL_PATHS = [
   'vae_approx/taeh3.safetensors',
   'veda/attention.safetensors',
 ] as const;
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
@@ -163,6 +173,33 @@ interface Harness {
   setDownloadProgressHandler(handler: (() => void) | undefined): void;
 }
 
+function controlReadyCommit(
+  harness: Harness,
+  onCommit: (
+    config: EnvironmentConfig,
+    write: (config: EnvironmentConfig) => Promise<EnvironmentConfig>,
+  ) => Promise<EnvironmentConfig>,
+  path = join(harness.installRoot, 'environment.json'),
+): void {
+  const write = async (config: EnvironmentConfig) => {
+    const ready: EnvironmentConfig = {
+      ...config,
+      status: 'ready',
+      updatedAt:
+        config.status === 'ready' ? config.updatedAt : new Date().toISOString(),
+    };
+    await writeFile(path, `${JSON.stringify(ready, null, 2)}\n`, 'utf8');
+    return ready;
+  };
+  const commit = vi.fn((config: EnvironmentConfig) => onCommit(config, write));
+  (harness.store as CommitCapableStore).commitReady = commit;
+  vi.spyOn(harness.store, 'markReady').mockImplementation(async () => {
+    const current = await harness.store.load();
+    if (!current) throw new Error('No environment configuration exists');
+    return commit(current);
+  });
+}
+
 async function createHarness(
   overrides: {
     hardware?: HardwareInfo;
@@ -274,7 +311,7 @@ async function createHarness(
   const service = new EnvironmentSetupService(options);
   return {
     service,
-    store,
+    store: options.store,
     installRoot,
     outputDirectory,
     manifest,
@@ -436,6 +473,36 @@ describe('EnvironmentSetupService installation', () => {
     expect(progressSeen).toBe(true);
     expect(stages.has('download-models')).toBe(true);
     expect(harness.downloads.parts).toHaveBeenCalledTimes(1);
+  });
+
+  test('uses the runtime download callback path as the current file', async () => {
+    let service!: EnvironmentSetupService;
+    const currentFiles: Array<string | undefined> = [];
+    const harness = await createHarness({
+      service: {
+        downloadParts: async (options) => {
+          options.onProgress?.({
+            downloadedBytes: options.expectedSize,
+            totalBytes: options.expectedSize,
+            path: 'callback-runtime.zip',
+          });
+          currentFiles.push(service.getState().progress.currentFile);
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+    service = harness.service;
+
+    await service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(currentFiles).toEqual(['callback-runtime.zip']);
   });
 
   test('start and retry share one in-flight operation', async () => {
@@ -654,6 +721,64 @@ describe('EnvironmentSetupService failures and recovery', () => {
     expect((await harness.store.load())?.status).toBe('failed');
   });
 
+  test('cancel before the ready commit cannot publish a ready configuration', async () => {
+    let harness!: Harness;
+    harness = await createHarness({
+      service: {
+        startBackend: async () => {
+          void harness.service.cancel();
+          return { systemStats: {}, objectInfo: makeObjectInfo() };
+        },
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/abort|cancel/i);
+
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: { status: 'failed' },
+    });
+    expect((await harness.store.load())?.status).toBe('failed');
+  });
+
+  test('cancel during an atomic ready commit rolls a new installation back to failed', async () => {
+    const harness = await createHarness();
+    const commitStarted = createDeferred();
+    const finishCommit = createDeferred();
+    let commits = 0;
+    controlReadyCommit(harness, async (config, write) => {
+      commits += 1;
+      if (commits === 1) {
+        commitStarted.resolve();
+        await finishCommit.promise;
+      }
+      return write(config);
+    });
+
+    const pending = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await commitStarted.promise;
+    const cancelling = harness.service.cancel();
+    finishCommit.resolve();
+    await cancelling;
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: { status: 'failed' },
+    });
+    expect((await harness.store.load())?.status).toBe('failed');
+  });
+
   test.each(['installing', 'failed'] as const)(
     'restores a persisted %s configuration after restart',
     async (status) => {
@@ -740,6 +865,77 @@ describe('EnvironmentSetupService failures and recovery', () => {
     expect(await old.store.load()).toEqual(oldReady);
     expect(harness.service.getState().config).toEqual(oldReady);
     expect(harness.service.getState().healthy).toBe(false);
+  });
+
+  test('a failed ready commit preserves the old ready file and memory snapshot', async () => {
+    const old = await createHarness();
+    const oldReady = await seedReadyConfig(old);
+    const harness = await createHarness({
+      outputDirectory: old.outputDirectory,
+      service: { store: old.store },
+    });
+    controlReadyCommit(
+      harness,
+      async () => {
+        throw new Error('atomic commit failed');
+      },
+      join(old.installRoot, 'environment.json'),
+    );
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/atomic commit failed/i);
+
+    expect(await old.store.load()).toEqual(oldReady);
+    expect(harness.service.getState()).toMatchObject({
+      config: oldReady,
+      healthy: false,
+      active: false,
+    });
+  });
+
+  test('cancel during ready replacement restores the previous ready configuration', async () => {
+    const old = await createHarness();
+    const oldReady = await seedReadyConfig(old);
+    const harness = await createHarness({
+      outputDirectory: old.outputDirectory,
+      service: { store: old.store },
+    });
+    const commitStarted = createDeferred();
+    const finishCommit = createDeferred();
+    let commits = 0;
+    controlReadyCommit(
+      harness,
+      async (config, write) => {
+        commits += 1;
+        if (commits === 1) {
+          commitStarted.resolve();
+          await finishCommit.promise;
+        }
+        return write(config);
+      },
+      join(old.installRoot, 'environment.json'),
+    );
+
+    const pending = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await commitStarted.promise;
+    const cancelling = harness.service.cancel();
+    finishCommit.resolve();
+    await cancelling;
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    expect(await old.store.load()).toEqual(oldReady);
+    expect(harness.service.getState()).toMatchObject({
+      config: oldReady,
+      healthy: false,
+      active: false,
+    });
   });
 
   test('does not report a previously ready installation healthy when revalidation fails', async () => {

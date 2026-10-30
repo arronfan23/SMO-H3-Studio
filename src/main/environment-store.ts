@@ -173,6 +173,20 @@ export class EnvironmentStore {
     });
   }
 
+  async commitReady(config: EnvironmentConfig): Promise<EnvironmentConfig> {
+    const parsed = parseEnvironmentConfig(config);
+    return serializeEnvironmentMutation(this.path, async () => {
+      const ready: EnvironmentConfig = {
+        ...parsed,
+        status: 'ready',
+        updatedAt:
+          parsed.status === 'ready' ? parsed.updatedAt : new Date().toISOString(),
+      };
+      await this.writeAtomically(ready);
+      return ready;
+    });
+  }
+
   private async writeAtomically(config: EnvironmentConfig): Promise<void> {
     const temporaryPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
 

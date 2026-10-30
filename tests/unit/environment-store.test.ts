@@ -314,6 +314,44 @@ describe('EnvironmentStore atomic writes and readiness', () => {
     await expect(store.load()).resolves.toBeNull();
   });
 
+  test('commitReady writes the supplied healthy configuration in one transition', async () => {
+    const { store } = await useStore();
+    const candidate = makeConfig({
+      status: 'installing',
+      createdAt: '2000-01-01T00:00:00.000Z',
+      updatedAt: '2000-01-01T00:00:00.000Z',
+    });
+    const snapshot = structuredClone(candidate);
+
+    const ready = await store.commitReady(candidate);
+
+    expect(ready.status).toBe('ready');
+    expect(ready.createdAt).toBe(candidate.createdAt);
+    expect(Date.parse(ready.updatedAt)).toBeGreaterThan(
+      Date.parse(candidate.updatedAt),
+    );
+    await expect(store.load()).resolves.toEqual(ready);
+    expect(candidate).toEqual(snapshot);
+  });
+
+  test('commitReady failure leaves the previous ready file untouched', async () => {
+    const { store } = await useStore();
+    await store.save(makeConfig({ manifestVersion: 'old-ready' }));
+    const oldReady = await store.markReady();
+    const writer = store as unknown as AtomicWriter;
+    vi.spyOn(writer, 'writeAtomically').mockRejectedValueOnce(
+      new Error('simulated atomic commit failure'),
+    );
+
+    await expect(
+      store.commitReady(
+        makeConfig({ manifestVersion: 'new-ready', status: 'installing' }),
+      ),
+    ).rejects.toThrow('simulated atomic commit failure');
+
+    await expect(store.load()).resolves.toEqual(oldReady);
+  });
+
   test.each(['installing', 'failed'] as const)(
     'marks an existing %s configuration ready',
     async (status) => {
