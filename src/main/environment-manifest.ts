@@ -12,6 +12,7 @@ const MINIMUM_VRAM_GIB = 8;
 const MINIMUM_RAM_GIB = 32;
 export const ENVIRONMENT_VERIFICATION_TEMP_BYTES = 5 * BYTES_PER_GIB;
 const WINDOWS_DEVICE_NAME_PATTERN = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:[ .]|$)/i;
+const WINDOWS_ILLEGAL_FILENAME_CHARACTER_PATTERN = /[<>"|?*\x01-\x1F]/;
 
 const httpsUrlSchema = z.string().min(1).refine(
   (value) => {
@@ -49,7 +50,8 @@ const relativePathSchema = z.string().refine(
           segment !== '.' &&
           segment !== '..' &&
           !/[. ]$/.test(segment) &&
-          !WINDOWS_DEVICE_NAME_PATTERN.test(segment),
+          !WINDOWS_DEVICE_NAME_PATTERN.test(segment) &&
+          !WINDOWS_ILLEGAL_FILENAME_CHARACTER_PATTERN.test(segment),
       );
   },
   { message: 'Path must be a safe relative path without traversal' },
@@ -106,7 +108,13 @@ const runtimeSchema = z
       paths.add(normalizedPath);
     }
 
-    if (archivePartsSize !== runtime.archiveSize) {
+    if (!Number.isSafeInteger(archivePartsSize)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'archiveParts byte total must be a safe integer',
+        path: ['archiveParts'],
+      });
+    } else if (archivePartsSize !== runtime.archiveSize) {
       context.addIssue({
         code: 'custom',
         message: 'Archive-part sizes must add up to archiveSize',
@@ -169,8 +177,8 @@ function selectRuntimeId(hardware: HardwareInfo): EnvironmentRuntimeId {
 }
 
 export function selectEnvironmentProfile(
-  manifestInput: unknown,
   hardware: HardwareInfo,
+  manifestInput: unknown,
 ): EnvironmentProfileSelection {
   const manifest = parseEnvironmentManifest(manifestInput);
   const runtimeId = selectRuntimeId(hardware);
@@ -185,11 +193,18 @@ export function selectEnvironmentProfile(
   const recommendation = recommendHardware(hardware);
   const runtime = manifest.runtimes[runtimeId];
   const modelBytes = manifest.modelFiles.reduce((total, model) => total + model.size, 0);
+  if (!Number.isSafeInteger(modelBytes)) {
+    throw new Error('modelBytes must be a safe integer');
+  }
+
   const requiredBytes =
     runtime.archiveSize +
     runtime.estimatedExtractedBytes +
     modelBytes +
     ENVIRONMENT_VERIFICATION_TEMP_BYTES;
+  if (!Number.isSafeInteger(requiredBytes)) {
+    throw new Error('requiredBytes must be a safe integer');
+  }
 
   if (
     !Number.isFinite(hardware.freeDiskGiB) ||

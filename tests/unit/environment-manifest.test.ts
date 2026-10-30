@@ -217,6 +217,31 @@ describe('environment manifest', () => {
     expect(() => parseEnvironmentManifest(manifest)).toThrow();
   });
 
+  const illegalCharacters = [
+    ...['<', '>', '"', '|', '?', '*'].map((value) => ({ value, label: value })),
+    ...Array.from({ length: 31 }, (_, index) => ({
+      value: String.fromCharCode(index + 1),
+      label: `U+${(index + 1).toString(16).toUpperCase().padStart(4, '0')}`,
+    })),
+  ];
+  const illegalCharacterCases = pathTargets.flatMap((target) =>
+    illegalCharacters.map((character) => ({
+      ...target,
+      path: `models/before${character.value}after`,
+      label: character.label,
+    })),
+  );
+
+  test.each(illegalCharacterCases)(
+    'rejects $name containing illegal character $label',
+    ({ mutate, path }) => {
+      const manifest = makeManifest();
+      mutate(manifest, path);
+
+      expect(() => parseEnvironmentManifest(manifest)).toThrow();
+    },
+  );
+
   test.each([
     {
       scenario: 'root',
@@ -263,8 +288,8 @@ describe('hardware-aware environment selection', () => {
     { gpu: 'NVIDIA GeForce RTX 5090', cc: '12.0', runtime: 'sm120' },
   ])('selects $runtime for $gpu with CC $cc', ({ gpu, cc, runtime }) => {
     const selection = selectEnvironmentProfile(
-      rawManifest,
       makeHardware({ gpu, cudaComputeCapability: cc }),
+      rawManifest,
     );
 
     expect(selection.runtime.id).toBe(runtime);
@@ -288,8 +313,8 @@ describe('hardware-aware environment selection', () => {
     (cudaComputeCapability) => {
       expect(() =>
         selectEnvironmentProfile(
-          rawManifest,
           makeHardware({ cudaComputeCapability }),
+          rawManifest,
         ),
       ).toThrow(/unsupported|架构/i);
     },
@@ -297,25 +322,25 @@ describe('hardware-aware environment selection', () => {
 
   test('rejects non-NVIDIA GPUs', () => {
     expect(() =>
-      selectEnvironmentProfile(rawManifest, makeHardware({ gpu: 'AMD Radeon RX 7900' })),
+      selectEnvironmentProfile(makeHardware({ gpu: 'AMD Radeon RX 7900' }), rawManifest),
     ).toThrow(/unsupported|架构/i);
   });
 
   test('rejects less than 8 GiB VRAM and treats the boundary as a candidate', () => {
     expect(() =>
-      selectEnvironmentProfile(rawManifest, makeHardware({ vramGiB: 7.99 })),
+      selectEnvironmentProfile(makeHardware({ vramGiB: 7.99 }), rawManifest),
     ).toThrow('8 GiB');
 
     const selection = selectEnvironmentProfile(
-      rawManifest,
       makeHardware({ gpu: 'NVIDIA GeForce RTX 3060', vramGiB: 8, ramGiB: 32 }),
+      rawManifest,
     );
     expect(selection.profile).toBe('conservative');
   });
 
   test('rejects less than 32 GiB RAM before selecting a profile', () => {
     expect(() =>
-      selectEnvironmentProfile(rawManifest, makeHardware({ ramGiB: 31.99 })),
+      selectEnvironmentProfile(makeHardware({ ramGiB: 31.99 }), rawManifest),
     ).toThrow('32 GiB');
   });
 
@@ -330,15 +355,15 @@ describe('hardware-aware environment selection', () => {
     profile,
   }) => {
     const selection = selectEnvironmentProfile(
-      rawManifest,
       makeHardware({ vramGiB, ramGiB: 32 }),
+      rawManifest,
     );
 
     expect(selection.profile).toBe(profile);
   });
 
   test('computes exact download, extraction, model, and verification space', () => {
-    const selection = selectEnvironmentProfile(rawManifest, makeHardware());
+    const selection = selectEnvironmentProfile(makeHardware(), rawManifest);
     const modelBytes = selection.modelFiles.reduce((total, model) => total + model.size, 0);
 
     expect(selection.requiredBytes).toBe(
@@ -355,20 +380,51 @@ describe('hardware-aware environment selection', () => {
     );
   });
 
+  test('rejects an archiveParts byte total above MAX_SAFE_INTEGER', () => {
+    const manifest = makeManifest();
+    manifest.runtimes.sm89.archiveParts[0].size = Number.MAX_SAFE_INTEGER;
+    manifest.runtimes.sm89.archiveParts[1].size = Number.MAX_SAFE_INTEGER;
+    manifest.runtimes.sm89.archiveSize = Number.MAX_SAFE_INTEGER;
+
+    expect(() => parseEnvironmentManifest(manifest)).toThrow(
+      /archiveParts.*safe integer/i,
+    );
+  });
+
+  test('rejects a modelBytes total above MAX_SAFE_INTEGER', () => {
+    const manifest = makeManifest();
+    manifest.modelFiles = manifest.modelFiles.slice(0, 2);
+    for (const model of manifest.modelFiles) model.size = Number.MAX_SAFE_INTEGER;
+
+    expect(() => selectEnvironmentProfile(makeHardware(), manifest)).toThrow(
+      /modelBytes.*safe integer/i,
+    );
+  });
+
+  test('rejects requiredBytes above MAX_SAFE_INTEGER when modelBytes is still safe', () => {
+    const manifest = makeManifest();
+    manifest.modelFiles = manifest.modelFiles.slice(0, 1);
+    manifest.modelFiles[0].size = Number.MAX_SAFE_INTEGER;
+
+    expect(() => selectEnvironmentProfile(makeHardware(), manifest)).toThrow(
+      /requiredBytes.*safe integer/i,
+    );
+  });
+
   test('rejects insufficient disk space before any download can start', () => {
-    const requiredBytes = selectEnvironmentProfile(rawManifest, makeHardware()).requiredBytes;
+    const requiredBytes = selectEnvironmentProfile(makeHardware(), rawManifest).requiredBytes;
 
     expect(() =>
       selectEnvironmentProfile(
-        rawManifest,
         makeHardware({ freeDiskGiB: (requiredBytes - 1) / BYTES_PER_GIB }),
+        rawManifest,
       ),
     ).toThrow(/disk|空间/i);
 
     expect(() =>
       selectEnvironmentProfile(
-        rawManifest,
         makeHardware({ freeDiskGiB: requiredBytes / BYTES_PER_GIB }),
+        rawManifest,
       ),
     ).not.toThrow();
   });
