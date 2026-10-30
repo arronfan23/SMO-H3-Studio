@@ -1,4 +1,4 @@
-import type { HardwarePreset } from './types';
+import type { HardwareInfo, HardwarePreset } from './types';
 
 export type EnvironmentRuntimeId = 'sm89' | 'sm120';
 export type EnvironmentProfile = HardwarePreset;
@@ -65,4 +65,37 @@ export interface EnvironmentProfileSelection {
   profile: EnvironmentProfile;
   modelFiles: EnvironmentModelFile[];
   requiredBytes: number;
+}
+
+export type EnvironmentStage =
+  | 'detect'
+  | 'select'
+  | 'download-runtime'
+  | 'extract'
+  | 'download-models'
+  | 'verify'
+  | 'start'
+  | 'ready';
+
+export interface EnvironmentStartInput {
+  profileId: EnvironmentProfile;
+  installRoot: string;
+}
+
+export interface EnvironmentProgress {
+  downloadedBytes: number;
+  totalBytes: number;
+  currentFile?: string;
+}
+
+export interface EnvironmentState {
+  config: EnvironmentConfig | null;
+  hardware: HardwareInfo | null;
+  selection: EnvironmentProfileSelection | null;
+  installRoot: string;
+  stage: EnvironmentStage;
+  progress: EnvironmentProgress;
+  error: string | null;
+  active: boolean;
+  healthy: boolean;
 }
