@@ -9,6 +9,7 @@ import {
 } from '../../src/renderer/skill-options';
 import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 import type { PolishResult, SmoApi } from '../../src/shared/ipc';
+import type { EnvironmentState } from '../../src/shared/environment';
 import type { Avatar, Work } from '../../src/shared/types';
 
 const avatar: Avatar = {
@@ -51,6 +52,13 @@ function createSmoMock() {
       polish: vi.fn(),
     },
     comfy: { health: vi.fn(), open: vi.fn(), start: vi.fn() },
+    environment: {
+      getState: vi.fn(),
+      detect: vi.fn(),
+      start: vi.fn(),
+      retry: vi.fn(),
+      cancel: vi.fn(),
+    },
     hardware: { detect: vi.fn(), recommend: vi.fn(), apply: vi.fn() },
     works: { list: vi.fn(), delete: vi.fn() },
   };
@@ -84,6 +92,39 @@ beforeEach(() => {
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
   smo.comfy.start.mockResolvedValue({ system: {}, devices: [] });
+  const environment: EnvironmentState = {
+    config: {
+      schemaVersion: 1,
+      runtimeId: 'sm120',
+      runtimeRoot: 'G:\\SMO-H3-Data\\runtime',
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      outputDirectory: 'G:\\SMO-H3-Data\\output',
+      profile: 'balanced-16gb',
+      hardwareFingerprint: {
+        gpu: 'NVIDIA GeForce RTX 5080',
+        vramGiB: 16,
+        ramGiB: 64,
+        cudaComputeCapability: '12.0',
+      },
+      manifestVersion: '1',
+      status: 'ready',
+      createdAt: '2026-10-30T08:00:00.000Z',
+      updatedAt: '2026-10-30T08:00:00.000Z',
+    },
+    hardware: null,
+    selection: null,
+    installRoot: 'G:\\SMO-H3-Data',
+    stage: 'ready',
+    progress: { downloadedBytes: 0, totalBytes: 0 },
+    error: null,
+    active: false,
+    healthy: true,
+  };
+  smo.environment.getState.mockResolvedValue(environment);
+  smo.environment.detect.mockRejectedValue(new Error('Unexpected environment detection'));
+  smo.environment.start.mockRejectedValue(new Error('Unexpected environment start'));
+  smo.environment.retry.mockRejectedValue(new Error('Unexpected environment retry'));
+  smo.environment.cancel.mockRejectedValue(new Error('Unexpected environment cancel'));
   smo.hardware.detect.mockResolvedValue({
     gpu: 'NVIDIA GeForce RTX 5080',
     vramGiB: 16,

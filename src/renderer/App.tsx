@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Clapperboard, FolderOpen, Settings, Users } from 'lucide-react';
-import { DEFAULT_MODEL_DIRECTORY } from '../shared/generation-options';
 import type { Avatar } from '../shared/types';
 import { AvatarsPage } from './AvatarsPage';
+import { EnvironmentWizard } from './EnvironmentWizard';
 import { SettingsPage } from './SettingsPage';
 import { StudioPage } from './StudioPage';
+import { useEnvironment } from './useEnvironment';
 import { WindowResizeHandles } from './WindowResizeHandles';
 import { WindowTitlebar } from './WindowTitlebar';
 import { WorksPage } from './WorksPage';
@@ -19,13 +20,17 @@ const NAVIGATION = [
 
 type PageId = (typeof NAVIGATION)[number]['id'];
 
-export function App() {
+interface StudioApplicationProps {
+  initialModelDirectory: string;
+}
+
+function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
   const [page, setPage] = useState<PageId>('studio');
   const [avatars, setAvatars] = useState<Avatar[]>([]);
   const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
   const [avatarsLoading, setAvatarsLoading] = useState(true);
   const [avatarsError, setAvatarsError] = useState<string | null>(null);
-  const [modelDirectory, setModelDirectory] = useState(DEFAULT_MODEL_DIRECTORY);
+  const [modelDirectory, setModelDirectory] = useState(initialModelDirectory);
   const mountedRef = useRef(true);
 
   const refreshAvatars = useCallback(async (preferredId?: string): Promise<void> => {
@@ -132,4 +137,15 @@ export function App() {
       </div>
     </div>
   );
+}
+
+export function App() {
+  const environment = useEnvironment();
+  const config = environment.state?.config;
+
+  if (config?.status === 'ready' && environment.state?.healthy) {
+    return <StudioApplication initialModelDirectory={config.modelDirectory} />;
+  }
+
+  return <EnvironmentWizard environment={environment} />;
 }

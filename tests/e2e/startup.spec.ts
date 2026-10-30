@@ -38,6 +38,7 @@ test('Electron app starts with isolated env and exposes window.smo domains', asy
 
     const window = await app.firstWindow();
     await expect(window).toHaveTitle('SMO.H3 Studio');
+    await expect(window.getByRole('heading', { name: '首次环境配置' })).toBeVisible();
 
     await expect(
       window.evaluate(() => (window as unknown as Record<string, unknown>).smo !== undefined),
@@ -48,6 +49,7 @@ test('Electron app starts with isolated env and exposes window.smo domains', asy
       jobs: ['start', 'retry', 'cancel'],
       llm: ['saveProfile', 'getProfile', 'listModels', 'testModel', 'polish'],
       comfy: ['health', 'open', 'start'],
+      environment: ['getState', 'detect', 'start', 'retry', 'cancel'],
       hardware: ['detect', 'recommend', 'reset', 'apply'],
       works: ['delete', 'list'],
       files: ['selectImage', 'selectAudio', 'mediaUrl', 'openFolder'],

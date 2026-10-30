@@ -4,6 +4,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { writeReadyEnvironment } from '../fixtures/ready-environment';
+import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -78,6 +80,13 @@ test.describe('real SelfLift ComfyUI backend', () => {
       mkdir(outputDirectory, { recursive: true }),
       mkdir(userDataDir, { recursive: true }),
     ]);
+    await writeReadyEnvironment({
+      dataDirectory,
+      installRoot: dirname(COMFY_ROOT),
+      runtimeRoot: COMFY_ROOT,
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      outputDirectory,
+    });
     const logPath = join(dataDirectory, 'logs', 'comfyui-backend.log');
 
     // A healthy backend before we launch means the test reuses the user's
@@ -87,7 +96,7 @@ test.describe('real SelfLift ComfyUI backend', () => {
     console.log(
       reusedExistingInstance
         ? '[real-comfy] direct reuse: ComfyUI already healthy before app launch'
-        : '[real-comfy] no healthy ComfyUI found; will start the backend via the settings page',
+        : '[real-comfy] no healthy ComfyUI found; will recover through environment retry',
     );
 
     let app: ElectronApplication | undefined;
@@ -114,24 +123,17 @@ test.describe('real SelfLift ComfyUI backend', () => {
 
       const window = await app.firstWindow();
       await expect(window).toHaveTitle('SMO.H3 Studio');
+      await expect(window.locator('nav[aria-label="主导航"]')).toBeVisible({
+        timeout: STARTUP_TIMEOUT_MS,
+      });
       await window.click('nav[aria-label="主导航"] button:has-text("设置")');
 
       const healthyHeading = window.locator('h3:has-text("ComfyUI 连接正常")');
-      const startButton = window.locator('button:has-text("启动 ComfyUI")');
-
-      if (reusedExistingInstance) {
-        await expect(healthyHeading).toBeVisible({ timeout: 30_000 });
-      } else {
-        // The settings page first probes a dead backend (10s client timeout),
-        // so wait for the start button before clicking it.
-        await expect(startButton).toBeVisible({ timeout: 30_000 });
-        await startButton.click();
-        await expect(healthyHeading).toBeVisible({ timeout: STARTUP_TIMEOUT_MS });
-      }
+      await expect(healthyHeading).toBeVisible({ timeout: 30_000 });
       console.log(
         reusedExistingInstance
           ? '[real-comfy] reused pre-existing healthy ComfyUI instance'
-          : '[real-comfy] ComfyUI started through the settings page',
+          : '[real-comfy] ComfyUI started through environment recovery',
       );
 
       // Verify through the app's own IPC surface.

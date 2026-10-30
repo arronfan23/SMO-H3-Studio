@@ -199,6 +199,11 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
           sendJson(response, 200, {
             'VHS_VideoCombine': { input: { required: {} } },
             'LoadImage': { input: { required: {} } },
+            'SelfLiftH3Sampler': { input: { required: {} } },
+            'SelfLiftAvatarH3Sampler': { input: { required: {} } },
+            'VedaSparseAttention': { input: { required: {} } },
+            'QwenH3PromptLocal': { input: { required: {} } },
+            'MiniMaxH3ReferenceToVideo': { input: { required: {} } },
           });
           return;
         }

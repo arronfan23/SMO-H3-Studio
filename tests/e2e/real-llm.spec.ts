@@ -1,13 +1,12 @@
 import { test, expect, _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { createServer } from 'node:http';
-import { once } from 'node:events';
-import type { AddressInfo } from 'node:net';
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { seedAvatar } from '../fixtures/seed-avatar';
+import { startComfyMock } from '../fixtures/mock-comfy';
+import { writeReadyEnvironment } from '../fixtures/ready-environment';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -42,15 +41,6 @@ interface SmoLlmGlobal {
       }>;
     };
   };
-}
-
-async function reserveRefusingPort(): Promise<number> {
-  const server = createServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const { port } = server.address() as AddressInfo;
-  await new Promise((resolve) => server.close(resolve));
-  return port;
 }
 
 async function pickRealAvatarPhoto(directory: string): Promise<string> {
@@ -120,11 +110,14 @@ test.describe('real LLM acceptance', () => {
       name: AVATAR_NAME,
       photoPath: sandboxPhotoPath,
     });
-
-    // A port with nothing listening behind it: the ComfyUI client gets an
-    // immediate connection refusal, so no backend is started and no H3
-    // generation is attempted during this acceptance run.
-    const refusingPort = await reserveRefusingPort();
+    await writeReadyEnvironment({
+      dataDirectory,
+      installRoot: join(root, 'environment'),
+      outputDirectory,
+    });
+    // Only the local health endpoint is used; this acceptance never submits
+    // a generation workflow to ComfyUI.
+    const comfyMock = await startComfyMock({ outputDirectory });
 
     const pageErrors: Error[] = [];
     const consoleErrors: string[] = [];
@@ -151,7 +144,7 @@ test.describe('real LLM acceptance', () => {
           ...process.env,
           SMO_DATA_DIRECTORY: dataDirectory,
           SMO_OUTPUT_DIRECTORY: outputDirectory,
-          SMO_COMFYUI_BASE_URL: `http://127.0.0.1:${refusingPort}`,
+          SMO_COMFYUI_BASE_URL: comfyMock.baseUrl,
         },
       });
       attachMainProcessLogs(app, mainProcessRaw);
@@ -235,6 +228,7 @@ test.describe('real LLM acceptance', () => {
     } finally {
       await app?.close();
       app = undefined;
+      await comfyMock.close();
       await rm(root, { recursive: true, force: true }).catch(() => undefined);
     }
   });

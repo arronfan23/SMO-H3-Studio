@@ -14,6 +14,8 @@ import sharp from 'sharp';
 import { seedAvatar } from '../fixtures/seed-avatar';
 import { startComfyMock } from '../fixtures/mock-comfy';
 import { startLlmMock } from '../fixtures/mock-llm';
+import { writeReadyEnvironment } from '../fixtures/ready-environment';
+import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, '..', '..');
@@ -498,6 +500,11 @@ test.describe('SMO.H3 Studio portable package', () => {
     await mkdir(wrapperDataDirectory, { recursive: true });
     await mkdir(wrapperOutputDirectory, { recursive: true });
     await mkdir(wrapperUserDataDir, { recursive: true });
+    await writeReadyEnvironment({
+      dataDirectory: wrapperDataDirectory,
+      installRoot: join(tempDirectory!, 'wrapper-environment'),
+      outputDirectory: wrapperOutputDirectory,
+    });
 
     const wrapperLogs: string[] = [];
     const wrapper: ChildProcess = spawn(
@@ -605,6 +612,12 @@ test.describe('SMO.H3 Studio portable package', () => {
       mkdir(outputDirectory, { recursive: true }),
       mkdir(userDataDir, { recursive: true }),
     ]);
+    await writeReadyEnvironment({
+      dataDirectory,
+      installRoot: join(root, 'environment'),
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      outputDirectory,
+    });
     avatarImagePath = await createTestAvatarImage(mediaDirectory);
     await seedAvatar({
       dataDirectory,
@@ -882,11 +895,18 @@ test.describe('portable launch cleanup', () => {
     const portableExe = await findPortableExe();
     const root = await mkdtemp(join(tmpdir(), 'smo-abort-e2e-'));
     const state: PackagedLaunchState = {};
+    let comfy: Awaited<ReturnType<typeof startComfyMock>> | undefined;
     try {
       const dataDirectory = join(root, 'data');
       const outputDirectory = join(root, 'output');
       await mkdir(dataDirectory, { recursive: true });
       await mkdir(outputDirectory, { recursive: true });
+      await writeReadyEnvironment({
+        dataDirectory,
+        installRoot: join(root, 'environment'),
+        outputDirectory,
+      });
+      comfy = await startComfyMock({ outputDirectory });
 
       state.wrapper = spawn(
         portableExe,
@@ -896,7 +916,7 @@ test.describe('portable launch cleanup', () => {
             ...process.env,
             SMO_DATA_DIRECTORY: dataDirectory,
             SMO_OUTPUT_DIRECTORY: outputDirectory,
-            SMO_COMFYUI_BASE_URL: 'http://127.0.0.1:65534',
+            SMO_COMFYUI_BASE_URL: comfy.baseUrl,
           },
           stdio: 'ignore',
         },
@@ -914,6 +934,7 @@ test.describe('portable launch cleanup', () => {
       expect(await countProcessesUnder(captured.extractionRoot!)).toBe(0);
     } finally {
       await cleanupPackagedLaunch(state);
+      await comfy?.close();
       await removeTempDirectory(root);
     }
   });

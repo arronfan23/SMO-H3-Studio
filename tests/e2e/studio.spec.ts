@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { startComfyMock } from '../fixtures/mock-comfy';
 import { startLlmMock } from '../fixtures/mock-llm';
+import { writeReadyEnvironment } from '../fixtures/ready-environment';
+import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -389,6 +391,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       mkdir(outputDirectory, { recursive: true }),
       mkdir(userDataDir, { recursive: true }),
     ]);
+    await writeReadyEnvironment({
+      dataDirectory,
+      installRoot: join(root, 'environment'),
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      outputDirectory,
+    });
     const media = await createTestMedia(mediaDirectory);
 
     llmMock = await startLlmMock();
