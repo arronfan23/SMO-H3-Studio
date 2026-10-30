@@ -16,6 +16,10 @@ import {
 } from '../shared/ipc';
 import type { GenerationHandler } from './generation';
 import type {
+  EnvironmentStartInput,
+  EnvironmentState,
+} from '../shared/environment';
+import type {
   GenerationRequest,
   GenerationStartResult,
   HardwareInfo,
@@ -46,6 +50,13 @@ export interface IpcServices {
   comfy: Pick<ComfyClient, 'health'>;
   startComfy: () => Promise<ComfySystemStats>;
   openComfy: () => Promise<void>;
+  environment: {
+    getState: () => Promise<EnvironmentState>;
+    detect: (installRoot?: string) => Promise<EnvironmentState>;
+    start: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
+    retry: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
+    cancel: () => Promise<EnvironmentState>;
+  };
   hardware: {
     detect: () => Promise<HardwareInfo>;
     recommend: (input: HardwareRecommendationInput) => Promise<HardwareProfile>;
@@ -129,6 +140,16 @@ async function dispatch(
     case 'comfy:open':
       await services.openComfy();
       return undefined;
+    case 'environment:getState':
+      return services.environment.getState();
+    case 'environment:detect':
+      return services.environment.detect(request.payload.installRoot);
+    case 'environment:start':
+      return services.environment.start(request.payload);
+    case 'environment:retry':
+      return services.environment.retry(request.payload);
+    case 'environment:cancel':
+      return services.environment.cancel();
     case 'hardware:detect':
       return services.hardware.detect();
     case 'hardware:recommend':

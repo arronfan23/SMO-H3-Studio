@@ -105,6 +105,18 @@ const hardwareInfo: HardwareInfo = {
   freeDiskGiB: 512,
 };
 
+const environmentState = {
+  config: null,
+  hardware: null,
+  selection: null,
+  installRoot: 'D:\\SMO-Environment',
+  stage: 'detect',
+  progress: { downloadedBytes: 0, totalBytes: 0 },
+  error: null,
+  active: false,
+  healthy: false,
+} as const;
+
 class TestIpcRegistry implements IpcHandlerRegistry {
   readonly handlers = new Map<string, IpcHandler>();
 
@@ -185,6 +197,13 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     },
     startComfy: async () => ({ system: {}, devices: [] }),
     openComfy: async () => undefined,
+    environment: {
+      getState: async () => ({ ...environmentState }),
+      detect: async () => ({ ...environmentState }),
+      start: async () => ({ ...environmentState }),
+      retry: async () => ({ ...environmentState }),
+      cancel: async () => ({ ...environmentState }),
+    },
     hardware: {
       detect: async () => hardwareInfo,
       recommend: async (input) => recommendHardware(input),
@@ -304,6 +323,88 @@ describe('IPC input schema', () => {
     const request = { channel, payload: {} };
 
     expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each(['environment:getState', 'environment:cancel'])(
+    'accepts %s with an empty payload',
+    (channel) => {
+      const request = { channel, payload: {} };
+
+      expect(createIpcSchema().parse(request)).toEqual(request);
+    },
+  );
+
+  test('accepts environment detect with an optional install root', () => {
+    const schema = createIpcSchema();
+
+    expect(
+      schema.parse({ channel: 'environment:detect', payload: {} }),
+    ).toEqual({ channel: 'environment:detect', payload: {} });
+    expect(
+      schema.parse({
+        channel: 'environment:detect',
+        payload: { installRoot: 'D:\\SMO-Environment' },
+      }),
+    ).toEqual({
+      channel: 'environment:detect',
+      payload: { installRoot: 'D:\\SMO-Environment' },
+    });
+  });
+
+  test.each(['environment:start', 'environment:retry'])(
+    'accepts %s with a profile and install root',
+    (channel) => {
+      const request = {
+        channel,
+        payload: {
+          profileId: 'balanced-16gb',
+          installRoot: 'D:\\SMO-Environment',
+        },
+      };
+
+      expect(createIpcSchema().parse(request)).toEqual(request);
+    },
+  );
+
+  test.each([
+    { channel: 'environment:getState', payload: { verbose: true } },
+    { channel: 'environment:cancel', payload: { force: true } },
+    { channel: 'environment:detect', payload: { installRoot: '' } },
+    { channel: 'environment:detect', payload: { installRoot: '   ' } },
+    {
+      channel: 'environment:detect',
+      payload: { installRoot: 'D:\\env', runtimeRoot: 'D:\\rt' },
+    },
+    {
+      channel: 'environment:start',
+      payload: { profileId: 'turbo', installRoot: 'D:\\env' },
+    },
+    {
+      channel: 'environment:start',
+      payload: { profileId: 'balanced-16gb' },
+    },
+    {
+      channel: 'environment:start',
+      payload: { profileId: 'balanced-16gb', installRoot: '' },
+    },
+    {
+      channel: 'environment:retry',
+      payload: {
+        profileId: 'conservative',
+        installRoot: 'D:\\env',
+        baseUrl: 'http://127.0.0.1:8188',
+      },
+    },
+    {
+      channel: 'environment:retry',
+      payload: {
+        profileId: 'high-memory-candidate',
+        installRoot: 'D:\\env',
+        outputDirectory: 'D:\\out',
+      },
+    },
+  ])('rejects invalid environment input: %j', (request) => {
+    expect(() => createIpcSchema().parse(request)).toThrow();
   });
 
   test('accepts the remaining domain-specific payloads', () => {
@@ -1109,6 +1210,88 @@ describe('main-process IPC handlers', () => {
       }),
     ).rejects.toThrow(/requires confirmation/i);
   });
+
+  test('returns the environment state through the environment domain', async () => {
+    const harness = await createHarness();
+
+    await expect(harness.invoke('environment:getState')).resolves.toEqual(
+      environmentState,
+    );
+  });
+
+  test('dispatches environment detect with the optional install root', async () => {
+    const detect = vi.fn(async (_installRoot?: string) => ({
+      ...environmentState,
+    }));
+    const harness = await createHarness({
+      environment: {
+        getState: async () => ({ ...environmentState }),
+        detect,
+        start: async () => ({ ...environmentState }),
+        retry: async () => ({ ...environmentState }),
+        cancel: async () => ({ ...environmentState }),
+      },
+    });
+
+    await harness.invoke('environment:detect', {
+      installRoot: 'D:\\SMO-Environment',
+    });
+    expect(detect).toHaveBeenCalledWith('D:\\SMO-Environment');
+
+    await harness.invoke('environment:detect', {});
+    expect(detect).toHaveBeenLastCalledWith(undefined);
+  });
+
+  test.each(['environment:start', 'environment:retry'] as const)(
+    'validates %s input before calling the service',
+    async (channel) => {
+      let calls = 0;
+      const run = async () => {
+        calls += 1;
+        return { ...environmentState };
+      };
+      const harness = await createHarness({
+        environment: {
+          getState: async () => ({ ...environmentState }),
+          detect: async () => ({ ...environmentState }),
+          start: run,
+          retry: run,
+          cancel: async () => ({ ...environmentState }),
+        },
+      });
+
+      await expect(
+        harness.invoke(channel, { profileId: 'turbo', installRoot: 'D:\\env' }),
+      ).rejects.toThrow();
+      expect(calls).toBe(0);
+
+      await expect(
+        harness.invoke(channel, {
+          profileId: 'high-memory-candidate',
+          installRoot: 'D:\\env',
+        }),
+      ).resolves.toEqual(environmentState);
+      expect(calls).toBe(1);
+    },
+  );
+
+  test('dispatches environment cancel to the service', async () => {
+    const cancel = vi.fn(async () => ({ ...environmentState }));
+    const harness = await createHarness({
+      environment: {
+        getState: async () => ({ ...environmentState }),
+        detect: async () => ({ ...environmentState }),
+        start: async () => ({ ...environmentState }),
+        retry: async () => ({ ...environmentState }),
+        cancel,
+      },
+    });
+
+    await expect(harness.invoke('environment:cancel')).resolves.toEqual(
+      environmentState,
+    );
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('LLM configuration privacy', () => {
@@ -1159,6 +1342,7 @@ describe('preload API', () => {
     expect(Object.keys(api).sort()).toEqual([
       'avatars',
       'comfy',
+      'environment',
       'files',
       'hardware',
       'jobs',
@@ -1176,6 +1360,13 @@ describe('preload API', () => {
       'testModel',
     ]);
     expect(Object.keys(api.comfy)).toEqual(['health', 'start', 'open']);
+    expect(Object.keys(api.environment).sort()).toEqual([
+      'cancel',
+      'detect',
+      'getState',
+      'retry',
+      'start',
+    ]);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
     expect(Object.keys(api.works)).toEqual(['delete', 'list']);
     expect(Object.keys(api.files).sort()).toEqual([
@@ -1348,6 +1539,44 @@ describe('preload API', () => {
       channel: 'comfy:open',
       payload: {},
       call: (smo: SmoApi) => smo.comfy.open(),
+    },
+    {
+      channel: 'environment:getState',
+      payload: {},
+      call: (smo: SmoApi) => smo.environment.getState(),
+    },
+    {
+      channel: 'environment:detect',
+      payload: {},
+      call: (smo: SmoApi) => smo.environment.detect(),
+    },
+    {
+      channel: 'environment:detect',
+      payload: { installRoot: 'D:\\SMO-Environment' },
+      call: (smo: SmoApi) => smo.environment.detect('D:\\SMO-Environment'),
+    },
+    {
+      channel: 'environment:start',
+      payload: { profileId: 'balanced-16gb', installRoot: 'D:\\SMO-Environment' },
+      call: (smo: SmoApi) =>
+        smo.environment.start({
+          profileId: 'balanced-16gb',
+          installRoot: 'D:\\SMO-Environment',
+        }),
+    },
+    {
+      channel: 'environment:retry',
+      payload: { profileId: 'conservative', installRoot: 'D:\\SMO-Environment' },
+      call: (smo: SmoApi) =>
+        smo.environment.retry({
+          profileId: 'conservative',
+          installRoot: 'D:\\SMO-Environment',
+        }),
+    },
+    {
+      channel: 'environment:cancel',
+      payload: {},
+      call: (smo: SmoApi) => smo.environment.cancel(),
     },
     {
       channel: 'works:list',

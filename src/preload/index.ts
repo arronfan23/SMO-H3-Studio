@@ -31,6 +31,17 @@ const api: SmoApi = {
     start: () => ipcRenderer.invoke('comfy:start', {}),
     open: () => ipcRenderer.invoke('comfy:open', {}),
   },
+  environment: {
+    getState: () => ipcRenderer.invoke('environment:getState', {}),
+    detect: (installRoot) =>
+      ipcRenderer.invoke(
+        'environment:detect',
+        installRoot === undefined ? {} : { installRoot },
+      ),
+    start: (input) => ipcRenderer.invoke('environment:start', input),
+    retry: (input) => ipcRenderer.invoke('environment:retry', input),
+    cancel: () => ipcRenderer.invoke('environment:cancel', {}),
+  },
   hardware: {
     detect: () => ipcRenderer.invoke('hardware:detect', {}),
     recommend: (input) => ipcRenderer.invoke('hardware:recommend', input),

@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import type {
+  EnvironmentStartInput,
+  EnvironmentState,
+} from './environment';
 import { ASPECT_RATIO_OPTIONS, type AspectRatio } from './generation-options';
 import { H3_MODES, type H3Mode } from './prompt-contract';
 import { SKILL_NAMES, type SkillName } from './skills';
@@ -59,6 +63,11 @@ export const IPC_CHANNELS = [
   'comfy:health',
   'comfy:start',
   'comfy:open',
+  'environment:getState',
+  'environment:detect',
+  'environment:start',
+  'environment:retry',
+  'environment:cancel',
   'hardware:detect',
   'hardware:recommend',
   'hardware:reset',
@@ -153,9 +162,15 @@ const polishRequestSchema = z
   })
   .strict();
 
+const environmentProfileIdSchema = z.enum([
+  'conservative',
+  'balanced-16gb',
+  'high-memory-candidate',
+]);
+
 const hardwareProfileSchema = z
   .object({
-    preset: z.enum(['conservative', 'balanced-16gb', 'high-memory-candidate']),
+    preset: environmentProfileIdSchema,
     modelPolicy: z.enum(['int8', 'bf16-if-present']),
     megapixels: positiveFiniteNumber,
     aspectRatio: z.enum(ASPECT_RATIO_VALUES).optional(),
@@ -213,6 +228,17 @@ const hardwareApplySchema = z
   })
   .strict() satisfies z.ZodType<HardwareApplyRequest>;
 
+const environmentDetectSchema = z
+  .object({ installRoot: nonEmptyString.optional() })
+  .strict();
+
+const environmentStartSchema = z
+  .object({
+    profileId: environmentProfileIdSchema,
+    installRoot: nonEmptyString,
+  })
+  .strict() satisfies z.ZodType<EnvironmentStartInput>;
+
 function requestSchema<T extends (typeof IPC_CHANNELS)[number], P extends z.ZodType>(
   channel: T,
   payload: P,
@@ -267,6 +293,11 @@ export function createIpcSchema() {
     requestSchema('comfy:health', emptyPayload),
     requestSchema('comfy:start', emptyPayload),
     requestSchema('comfy:open', emptyPayload),
+    requestSchema('environment:getState', emptyPayload),
+    requestSchema('environment:detect', environmentDetectSchema),
+    requestSchema('environment:start', environmentStartSchema),
+    requestSchema('environment:retry', environmentStartSchema),
+    requestSchema('environment:cancel', emptyPayload),
     requestSchema('hardware:detect', emptyPayload),
     requestSchema('hardware:recommend', hardwareRecommendationSchema),
     requestSchema('hardware:reset', hardwareResetSchema),
@@ -330,6 +361,13 @@ export interface SmoApi {
     health(): Promise<ComfyHealth>;
     start(): Promise<ComfyHealth>;
     open(): Promise<void>;
+  };
+  readonly environment: {
+    getState(): Promise<EnvironmentState>;
+    detect(installRoot?: string): Promise<EnvironmentState>;
+    start(input: EnvironmentStartInput): Promise<EnvironmentState>;
+    retry(input: EnvironmentStartInput): Promise<EnvironmentState>;
+    cancel(): Promise<EnvironmentState>;
   };
   readonly hardware: {
     detect(): Promise<HardwareInfo>;

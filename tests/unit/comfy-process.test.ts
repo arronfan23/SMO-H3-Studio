@@ -392,6 +392,101 @@ describe('ComfyProcessManager', () => {
     );
   });
 
+  test('omits --lowvram from the inner launcher when lowvram is false', async () => {
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) {
+        throw new Error('ComfyUI is offline');
+      }
+      return STATS;
+    });
+    const { manager, openCalls } = createManager({
+      client: { health },
+      lowvram: false,
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    const inner = await readFile(innerLauncherPath, 'utf8');
+    expect(inner).not.toContain('--lowvram');
+    expect(inner).toContain(
+      '"%SMO_COMFY_PYTHON%" -I -X utf8 "%SMO_COMFY_LAUNCH%" --port %SMO_COMFY_PORT% >> "%SMO_COMFY_LOG%" 2>&1',
+    );
+  });
+
+  test('passes the output directory through the paths file, never embedded in the launcher', async () => {
+    // The output path deliberately contains spaces, non-ASCII characters,
+    // percent signs, and exclamation marks; all of them must travel through
+    // the UTF-8 paths file verbatim, not through the batch script.
+    const outputDirectory = join(tempDir, 'smo 100%!整合 输出');
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) {
+        throw new Error('ComfyUI is offline');
+      }
+      return STATS;
+    });
+    const { manager, openCalls } = createManager({
+      client: { health },
+      outputDirectory,
+    });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    const inner = await readFile(innerLauncherPath, 'utf8');
+    expect(inner).toContain('--output-directory "%SMO_COMFY_OUTPUT%"');
+    expect(inner).not.toContain(outputDirectory);
+    expect(inner).toContain('setlocal DisableDelayedExpansion');
+
+    const paths = await readFile(pathsPath, 'utf8');
+    expect(paths).toContain(`SMO_COMFY_OUTPUT=${outputDirectory}`);
+  });
+
+  test('omits --output-directory entirely when no output directory is configured', async () => {
+    let healthy = false;
+    const health = vi.fn(async (): Promise<ComfySystemStats> => {
+      if (!healthy) {
+        throw new Error('ComfyUI is offline');
+      }
+      return STATS;
+    });
+    const { manager, openCalls } = createManager({ client: { health } });
+
+    const pending = manager.ensureReady();
+    await vi.waitFor(() => expect(openCalls).toHaveLength(1));
+    healthy = true;
+    await expect(pending).resolves.toEqual(STATS);
+
+    const inner = await readFile(innerLauncherPath, 'utf8');
+    expect(inner).not.toContain('--output-directory');
+    const paths = await readFile(pathsPath, 'utf8');
+    expect(paths).not.toContain('SMO_COMFY_OUTPUT');
+  });
+
+  test.each([
+    { name: 'CR/LF', outputDirectory: 'C:\\evil\r\nwhoami' },
+    { name: 'double quote', outputDirectory: 'C:\\evil" & whoami' },
+  ])(
+    'rejects $name in the output directory before writing launcher files',
+    async ({ outputDirectory }) => {
+      const health = offlineHealth();
+      const { manager, openCalls } = createManager({
+        client: { health },
+        outputDirectory,
+      });
+
+      await expect(manager.ensureReady()).rejects.toThrow(/must not contain/);
+      expect(openCalls).toHaveLength(0);
+      expect(existsSync(innerLauncherPath)).toBe(false);
+    },
+  );
+
   test('rejects CR/LF in launch paths before writing launcher files', async () => {
     const health = offlineHealth();
     const { manager, openCalls } = createManager({

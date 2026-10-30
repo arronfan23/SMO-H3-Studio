@@ -29,6 +29,7 @@ const LAUNCHER_ENV = {
   python: 'SMO_COMFY_PYTHON',
   launch: 'SMO_COMFY_LAUNCH',
   port: 'SMO_COMFY_PORT',
+  output: 'SMO_COMFY_OUTPUT',
   log: 'SMO_COMFY_LOG',
   status: 'SMO_COMFY_STATUS',
 } as const;
@@ -51,6 +52,8 @@ export interface ComfyProcessManagerOptions {
   rootDirectory?: string;
   pythonPath?: string;
   launchScript?: string;
+  lowvram?: boolean;
+  outputDirectory?: string;
   logPath: string;
   startupTimeoutMs?: number;
   staleStartupMs?: number;
@@ -85,14 +88,25 @@ function validateLaunchPath(value: string, name: string): string {
   return value;
 }
 
-function buildInnerLauncherScript(): string {
+function buildInnerLauncherScript(input: {
+  lowvram: boolean;
+  outputDirectory?: string;
+}): string {
+  const launchArguments = [
+    `"%${LAUNCHER_ENV.python}%" -I -X utf8 "%${LAUNCHER_ENV.launch}%"`,
+    ...(input.lowvram ? ['--lowvram'] : []),
+    ...(input.outputDirectory === undefined
+      ? []
+      : [`--output-directory "%${LAUNCHER_ENV.output}%"`]),
+    `--port %${LAUNCHER_ENV.port}% >> "%${LAUNCHER_ENV.log}%" 2>&1`,
+  ];
   const lines = [
     '@echo off',
     'setlocal DisableDelayedExpansion',
     'chcp 65001>nul',
     `for /f "usebackq delims=" %%L in ("%~dp0${PATHS_FILE_NAME}") do set "%%L"`,
     `cd /d "%${LAUNCHER_ENV.root}%"`,
-    `"%${LAUNCHER_ENV.python}%" -I -X utf8 "%${LAUNCHER_ENV.launch}%" --lowvram --port %${LAUNCHER_ENV.port}% >> "%${LAUNCHER_ENV.log}%" 2>&1`,
+    launchArguments.join(' '),
     `set "RESULT=%errorlevel%"`,
     `>"%${LAUNCHER_ENV.status}%" echo %RESULT%`,
     'exit /b %RESULT%',
@@ -114,6 +128,7 @@ function buildPathsFile(input: {
   pythonPath: string;
   launchScript: string;
   port: string;
+  outputDirectory?: string;
   logPath: string;
   statusPath: string;
 }): string {
@@ -122,6 +137,9 @@ function buildPathsFile(input: {
     `${LAUNCHER_ENV.python}=${input.pythonPath}`,
     `${LAUNCHER_ENV.launch}=${input.launchScript}`,
     `${LAUNCHER_ENV.port}=${input.port}`,
+    ...(input.outputDirectory === undefined
+      ? []
+      : [`${LAUNCHER_ENV.output}=${input.outputDirectory}`]),
     `${LAUNCHER_ENV.log}=${input.logPath}`,
     `${LAUNCHER_ENV.status}=${input.statusPath}`,
   ];
@@ -137,6 +155,8 @@ export class ComfyProcessManager {
   private readonly rootDirectory: string;
   private readonly pythonPath: string;
   private readonly launchScript: string;
+  private readonly lowvram: boolean;
+  private readonly outputDirectory?: string;
   private readonly logPath: string;
   private readonly statusPath: string;
   private readonly startupTimeoutMs: number;
@@ -170,6 +190,8 @@ export class ComfyProcessManager {
       options.pythonPath ?? join(this.rootDirectory, 'python_embeded', 'python.exe');
     this.launchScript =
       options.launchScript ?? join(this.rootDirectory, 'tools', 'launch.py');
+    this.lowvram = options.lowvram ?? true;
+    this.outputDirectory = options.outputDirectory;
     this.logPath = options.logPath;
     this.statusPath = `${options.logPath}.exit`;
     this.startupTimeoutMs = validateTimeout(
@@ -267,6 +289,9 @@ export class ComfyProcessManager {
     validateLaunchPath(this.rootDirectory, 'root directory');
     validateLaunchPath(this.pythonPath, 'python path');
     validateLaunchPath(this.launchScript, 'launch script');
+    if (this.outputDirectory !== undefined) {
+      validateLaunchPath(this.outputDirectory, 'output directory');
+    }
     validateLaunchPath(this.logPath, 'log path');
 
     const logDirectory = dirname(this.logPath);
@@ -278,7 +303,14 @@ export class ComfyProcessManager {
     const innerLauncherPath = join(logDirectory, INNER_LAUNCHER_FILE_NAME);
     const hiddenLauncherPath = join(logDirectory, HIDDEN_LAUNCHER_FILE_NAME);
     const pathsPath = join(logDirectory, PATHS_FILE_NAME);
-    await writeFile(innerLauncherPath, buildInnerLauncherScript(), 'utf8');
+    await writeFile(
+      innerLauncherPath,
+      buildInnerLauncherScript({
+        lowvram: this.lowvram,
+        outputDirectory: this.outputDirectory,
+      }),
+      'utf8',
+    );
     await writeFile(
       pathsPath,
       buildPathsFile({
@@ -286,6 +318,7 @@ export class ComfyProcessManager {
         pythonPath: this.pythonPath,
         launchScript: this.launchScript,
         port,
+        outputDirectory: this.outputDirectory,
         logPath: this.logPath,
         statusPath: this.statusPath,
       }),
