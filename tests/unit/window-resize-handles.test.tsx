@@ -175,19 +175,54 @@ describe('WindowResizeHandles', () => {
       screenY: 200,
     });
     fireEvent.pointerMove(handle, { pointerId: 1, screenX: 140, screenY: 150 });
-    fireEvent.pointerUp(window, { pointerId: 1, screenX: 145, screenY: 155 });
+    fireEvent.pointerUp(window, { pointerId: 1, screenX: 0, screenY: 0 });
 
     expect(bridge.resize).not.toHaveBeenCalled();
     expect(bridge.endResize).not.toHaveBeenCalled();
 
     resolveBegin(true);
     await waitFor(() =>
-      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 145, y: 155 }),
+      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 140, y: 150 }),
     );
     await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
     expect(bridge.resize.mock.invocationCallOrder[0]).toBeLessThan(
       bridge.endResize.mock.invocationCallOrder[0],
     );
+  });
+
+  test('flushes the last move on lost capture and allows the next drag to begin', async () => {
+    const { container } = render(<WindowResizeHandles />);
+    const handle = container.querySelector('.window-resize-ne')!;
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 1,
+      button: 0,
+      screenX: 100,
+      screenY: 200,
+    });
+    await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(1));
+    fireEvent.pointerMove(handle, { pointerId: 1, screenX: 145, screenY: 155 });
+    fireEvent.lostPointerCapture(handle, { pointerId: 1, screenX: 0, screenY: 0 });
+
+    await waitFor(() =>
+      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 145, y: 155 }),
+    );
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(1));
+
+    fireEvent.pointerDown(handle, {
+      pointerId: 2,
+      button: 0,
+      screenX: 200,
+      screenY: 250,
+    });
+    await waitFor(() => expect(bridge.beginResize).toHaveBeenCalledTimes(2));
+    fireEvent.pointerMove(handle, { pointerId: 2, screenX: 240, screenY: 280 });
+    fireEvent.pointerUp(handle, { pointerId: 2, screenX: 0, screenY: 0 });
+
+    await waitFor(() =>
+      expect(bridge.resize).toHaveBeenCalledWith('ne', { x: 240, y: 280 }),
+    );
+    await waitFor(() => expect(bridge.endResize).toHaveBeenCalledTimes(2));
   });
 
   test('ends exactly once when pointer up follows a resolved begin', async () => {

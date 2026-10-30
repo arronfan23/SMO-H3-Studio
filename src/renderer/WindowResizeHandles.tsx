@@ -173,9 +173,6 @@ export function WindowResizeHandles() {
     if (event.pointerId !== ownerPointerId.current) {
       return;
     }
-    if (hasMoved.current) {
-      latestCursor.current = { x: event.screenX, y: event.screenY };
-    }
     const operation = operationId.current;
     const direction = activeDirection.current;
     const shouldFlushFinalMove = sessionOpen.current && hasMoved.current;
@@ -224,6 +221,7 @@ export function WindowResizeHandles() {
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerEnd}
           onPointerCancel={handlePointerEnd}
+          onLostPointerCapture={handlePointerEnd}
         />
       ))}
     </>
