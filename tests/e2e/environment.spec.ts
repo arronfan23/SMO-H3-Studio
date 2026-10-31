@@ -101,7 +101,7 @@ test('first launch configures through the wizard without downloads or GPU depend
     });
 
     await expect(page.getByRole('heading', { name: '首次环境配置' })).toBeVisible();
-    await expect(page.getByText('Mock RTX 5080')).toBeVisible();
+    await expect(page.getByText('NVIDIA GeForce RTX 5080')).toBeVisible();
     await expect(page.getByLabel('性能档位')).toHaveValue('conservative');
     await page.getByLabel('安装目录').fill('E:\\SMO-E2E-Custom');
     await page.getByRole('button', { name: '开始安装' }).click();

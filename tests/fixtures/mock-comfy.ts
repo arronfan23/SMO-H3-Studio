@@ -192,7 +192,7 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
         if (method === 'GET' && url === '/system_stats') {
           sendJson(response, 200, {
             system: { os: 'Windows' },
-            devices: [{ name: 'Mock GPU' }],
+            devices: [{ name: 'NVIDIA GeForce RTX 5080' }],
           });
           return;
         }

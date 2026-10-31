@@ -23,7 +23,7 @@ childProcess.execFile = function mockHardwareExecFile(command, args, options, ca
   let stdout;
 
   if (isCommand(command, 'nvidia-smi') || isCommand(command, 'nvidia-smi.exe')) {
-    stdout = 'Mock RTX 5080, 16384 MiB, 576.88, 12.0\n';
+    stdout = 'NVIDIA GeForce RTX 5080, 16384 MiB, 576.88, 12.0\n';
   } else if (
     (isCommand(command, 'powershell.exe') || isCommand(command, 'powershell')) &&
     isHardwarePowerShell(actualArgs)
