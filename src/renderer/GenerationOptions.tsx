@@ -93,21 +93,6 @@ export function GenerationOptions({
             })}
           </select>
         </div>
-        <div className="field">
-          <label htmlFor={`${idPrefix}-subtitles`}>生成画面内字幕</label>
-          <label className="checkbox-field">
-            <input
-              id={`${idPrefix}-subtitles`}
-              type="checkbox"
-              checked={value.subtitles}
-              disabled={disabled}
-              onChange={(event) =>
-                onChange({ ...value, subtitles: event.target.checked })
-              }
-            />
-            <span>在画面安全区内显示字幕</span>
-          </label>
-        </div>
       </div>
     </>
   );

@@ -277,6 +277,15 @@ describe('IPC input schema', () => {
     ).toThrow(/audioPath/i);
   });
 
+  test('rejects subtitle preferences in new generation requests', () => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...generationRequest, subtitles: true },
+      }),
+    ).toThrow();
+  });
+
   test.each([
     { channel: 'files:selectImage', payload: {} },
     { channel: 'files:selectAudio', payload: {} },

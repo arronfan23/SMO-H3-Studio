@@ -12,7 +12,6 @@ import {
   H3_MODEL_OPTIONS,
   RESOLUTION_OPTIONS,
   buildHardwareProfile,
-  withSubtitlePreference,
 } from '../../src/shared/generation-options';
 import { buildH3Frames, patchWorkflow } from '../../src/shared/workflow';
 import { WORKFLOW_NODES } from '../../src/shared/workflow-nodes';
@@ -36,12 +35,18 @@ describe('H3 generation options', () => {
     }
   });
 
-  test('offers 0.4/0.7/1.0 MP resolutions with INT8 as the default model', () => {
-    expect(RESOLUTION_OPTIONS.map((option) => option.value)).toEqual([0.4, 0.7, 1]);
+  test('offers seven resolutions with INT8 and 0.7 MP as defaults', () => {
+    expect(RESOLUTION_OPTIONS.map((option) => option.value)).toEqual([
+      0.3, 0.4, 0.55, 0.7, 0.85, 1, 1.2,
+    ]);
     expect(RESOLUTION_OPTIONS.map((option) => option.label)).toEqual([
+      '0.3MP（轻量）',
       '0.4MP（流畅）',
+      '0.55MP（均衡）',
       '0.7MP（标准，默认）',
-      '1.0MP（高清）',
+      '0.85MP（高负载，未实测）',
+      '1.0MP（高负载，未实测）',
+      '1.2MP（高负载，未实测）',
     ]);
     expect(H3_MODEL_OPTIONS.map((option) => option.value)).toEqual(['int8', 'bf16']);
     expect(H3_MODEL_OPTIONS.map((option) => option.label)).toEqual([
@@ -58,7 +63,6 @@ describe('H3 generation options', () => {
       model: 'int8',
       aspectRatio: '16:9 (Widescreen)',
       megapixels: 0.7,
-      subtitles: false,
     });
   });
 
@@ -89,45 +93,6 @@ describe('H3 generation options', () => {
       tiling: 'auto',
       requiresConfirmation: true,
     });
-  });
-});
-
-describe('withSubtitlePreference', () => {
-  test('returns the prompt unchanged when subtitles are disabled', () => {
-    expect(withSubtitlePreference('任何提示词', false, 'text')).toBe('任何提示词');
-    expect(withSubtitlePreference('任何提示词', false, 'audio')).toBe('任何提示词');
-  });
-
-  test('appends narration-aware guidance for text mode', () => {
-    const result = withSubtitlePreference('主播微笑', true, 'text');
-
-    expect(result).toContain('主播微笑');
-    expect(result).toContain('旁白/对白');
-    expect(result).toContain('安全画面区');
-  });
-
-  test('appends voice-aware guidance for audio mode', () => {
-    const result = withSubtitlePreference('自然说话', true, 'audio');
-
-    expect(result).toContain('自然说话');
-    expect(result).toContain('上传语音');
-    expect(result).not.toContain('旁白/对白');
-  });
-
-  test.each(['请添加字幕', 'add subtitles please', 'include caption text'])(
-    'does not append guidance when the prompt already mentions subtitles: %s',
-    (prompt) => {
-      expect(withSubtitlePreference(prompt, true, 'text')).toBe(prompt);
-      expect(withSubtitlePreference(prompt, true, 'audio')).toBe(prompt);
-    },
-  );
-
-  test('appends the guidance exactly once even when applied repeatedly', () => {
-    const once = withSubtitlePreference('原始提示词', true, 'text');
-    const twice = withSubtitlePreference(once, true, 'text');
-
-    expect(twice).toBe(once);
-    expect(once.match(/同步显示/g)).toHaveLength(1);
   });
 });
 

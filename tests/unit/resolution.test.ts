@@ -1,8 +1,37 @@
 import { describe, expect, test } from 'vitest';
 import {
+  DEFAULT_GENERATION_OPTIONS,
+  DEFAULT_RESOLUTION_MP,
+  RESOLUTION_OPTIONS,
+} from '../../src/shared/generation-options';
+import {
   pythonRoundHalfEven,
   resolveH3Resolution,
 } from '../../src/shared/resolution';
+
+describe('resolution options', () => {
+  test('offers seven megapixel tiers with 0.7 MP as the default', () => {
+    expect(RESOLUTION_OPTIONS.map((option) => option.value)).toEqual([
+      0.3, 0.4, 0.55, 0.7, 0.85, 1, 1.2,
+    ]);
+    expect(DEFAULT_RESOLUTION_MP).toBe(0.7);
+    expect(DEFAULT_GENERATION_OPTIONS).toEqual({
+      model: 'int8',
+      aspectRatio: '16:9 (Widescreen)',
+      megapixels: 0.7,
+    });
+  });
+
+  test('does not claim high-load tiers are verified', () => {
+    const highLoadOptions = RESOLUTION_OPTIONS.filter((option) => option.value > 0.7);
+
+    expect(highLoadOptions.map((option) => option.value)).toEqual([0.85, 1, 1.2]);
+    for (const option of highLoadOptions) {
+      expect(option.label).toContain('未实测');
+      expect(option.label).not.toMatch(/已验证|已实测/);
+    }
+  });
+});
 
 describe('pythonRoundHalfEven', () => {
   test.each([
@@ -22,19 +51,16 @@ describe('pythonRoundHalfEven', () => {
 });
 
 describe('resolveH3Resolution', () => {
-  test('resolves 16:9 widescreen outputs across megapixel tiers', () => {
-    expect(resolveH3Resolution('16:9 (Widescreen)', 0.4)).toEqual({
-      width: 864,
-      height: 480,
-    });
-    expect(resolveH3Resolution('16:9 (Widescreen)', 0.7)).toEqual({
-      width: 1152,
-      height: 640,
-    });
-    expect(resolveH3Resolution('16:9 (Widescreen)', 1)).toEqual({
-      width: 1376,
-      height: 768,
-    });
+  test.each([
+    [0.3, { width: 736, height: 416 }],
+    [0.4, { width: 864, height: 480 }],
+    [0.55, { width: 1024, height: 576 }],
+    [0.7, { width: 1152, height: 640 }],
+    [0.85, { width: 1248, height: 704 }],
+    [1, { width: 1376, height: 768 }],
+    [1.2, { width: 1504, height: 832 }],
+  ])('resolves 16:9 widescreen output at %s MP', (megapixels, expected) => {
+    expect(resolveH3Resolution('16:9 (Widescreen)', megapixels)).toEqual(expected);
   });
 
   test('mirrors the resolution for portrait widescreen', () => {

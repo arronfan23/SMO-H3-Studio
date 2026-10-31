@@ -306,60 +306,43 @@ async function waitForJobEvent(
   });
 }
 
+function submittedPrompt(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  submissionIndex = 0,
+): string {
+  const submitted = harness.comfy.submissions[submissionIndex] as Record<
+    string,
+    { inputs: Record<string, unknown> }
+  >;
+  return String(submitted['136'].inputs.prompt);
+}
+
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) {
     await cleanup();
   }
 });
 
-describe('GenerationHandler subtitle preference', () => {
-  function submittedPrompt(harness: Awaited<ReturnType<typeof createHarness>>): string {
-    const submitted = harness.comfy.submissions[0] as Record<
-      string,
-      { inputs: Record<string, unknown> }
-    >;
-    return String(submitted['136'].inputs.prompt);
-  }
-
-  test('appends subtitle guidance once while metadata keeps the original prompt and flag', async () => {
+describe('GenerationHandler prompt submission', () => {
+  test('submits the original prompt without injecting subtitle guidance', async () => {
     const harness = await createHarness();
-    const request = { ...harness.textRequest, prompt: '主播在摄影棚微笑', subtitles: true };
+    const request = {
+      ...harness.textRequest,
+      prompt: '主播在摄影棚微笑',
+      subtitles: true,
+    } as GenerationRequest;
 
     const result = await harness.startGeneration(request);
     await waitForWork(harness.store, result.id, 'done');
 
-    const finalPrompt = submittedPrompt(harness);
-    expect(finalPrompt).toContain('主播在摄影棚微笑');
-    expect(finalPrompt).toContain('旁白/对白');
-    expect(finalPrompt.match(/同步显示/g)).toHaveLength(1);
+    expect(submittedPrompt(harness)).toBe('主播在摄影棚微笑');
 
     const work = harness.store.listWorks().find((candidate) => candidate.id === result.id);
-    expect(work?.metadata).toMatchObject({
-      request: { prompt: '主播在摄影棚微笑', subtitles: true },
+    expect(work?.metadata?.request).toEqual({
+      ...harness.textRequest,
+      prompt: '主播在摄影棚微笑',
     });
-  });
-
-  test('keeps the submitted prompt unchanged when it already requests subtitles', async () => {
-    const harness = await createHarness();
-    const request = { ...harness.textRequest, prompt: '画面下方显示字幕', subtitles: true };
-
-    const result = await harness.startGeneration(request);
-    await waitForWork(harness.store, result.id, 'done');
-
-    expect(submittedPrompt(harness)).toBe('画面下方显示字幕');
-  });
-
-  test('submits the original prompt when subtitles are not requested', async () => {
-    const harness = await createHarness();
-
-    const result = await harness.startGeneration(harness.textRequest);
-    await waitForWork(harness.store, result.id, 'done');
-
-    expect(submittedPrompt(harness)).toBe(harness.textRequest.prompt);
-    const work = harness.store.listWorks().find((candidate) => candidate.id === result.id);
-    expect(work?.metadata).toMatchObject({
-      request: { prompt: harness.textRequest.prompt },
-    });
+    expect(work?.metadata?.request).not.toHaveProperty('subtitles');
   });
 });
 
@@ -1448,6 +1431,36 @@ describe('GenerationHandler failures and cancellation', () => {
 
 
 describe('GenerationHandler retry', () => {
+  test('retries legacy subtitle metadata without injecting subtitle guidance', async () => {
+    const harness = await createHarness();
+    const legacyRequest = {
+      ...harness.textRequest,
+      prompt: '旧作品原始提示词',
+      subtitles: true,
+    } as GenerationRequest;
+    const original = harness.store.addWork({
+      id: 'legacy-subtitle-work',
+      avatarId: harness.avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+      metadata: {
+        request: legacyRequest,
+        workflowVersion: 'text-ref2va.json',
+      },
+    });
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(submittedPrompt(harness)).toBe('旧作品原始提示词');
+    expect(retryWork.metadata?.request).not.toHaveProperty('subtitles');
+    expect(harness.store.getWork(original.id)?.metadata?.request).toHaveProperty(
+      'subtitles',
+      true,
+    );
+  });
+
   test('creates a new work with retryOf and leaves the original unchanged', async () => {
     const harness = await createHarness();
     const original = await harness.startGeneration(harness.textRequest);

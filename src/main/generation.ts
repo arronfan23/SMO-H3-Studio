@@ -11,7 +11,6 @@ import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
 import type { Store } from './store';
 import { patchWorkflow } from '../shared/workflow';
-import { withSubtitlePreference } from '../shared/generation-options';
 import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
 import type {
   GenerationRequest,
@@ -96,9 +95,6 @@ function sanitizeRequest(request: GenerationRequest): GenerationRequest {
   }
   if (request.trimStart !== undefined) {
     sanitized.trimStart = request.trimStart;
-  }
-  if (request.subtitles !== undefined) {
-    sanitized.subtitles = request.subtitles;
   }
   return sanitized;
 }
@@ -517,16 +513,11 @@ export function createGenerationHandler(
           await readFile(workflowPath, 'utf8'),
         ) as WorkflowGraph;
         throwIfCancelled();
-        const generationPrompt = withSubtitlePreference(
-          request.prompt,
-          request.subtitles ?? false,
-          request.mode,
-        );
         const changes: Record<string, unknown> =
           request.mode === 'text'
             ? {
                 [WORKFLOW_PATHS.text.image]: image,
-                [WORKFLOW_PATHS.text.prompt]: generationPrompt,
+                [WORKFLOW_PATHS.text.prompt]: request.prompt,
                 [WORKFLOW_PATHS.text.duration]: request.duration,
                 [WORKFLOW_PATHS.text.seed]: request.seed,
                 [WORKFLOW_PATHS.text.output]: `SMO-H3/${workId}`,
@@ -534,7 +525,7 @@ export function createGenerationHandler(
             : {
                 [WORKFLOW_PATHS.audio.image]: image,
                 [WORKFLOW_PATHS.audio.audio]: audio,
-                [WORKFLOW_PATHS.audio.prompt]: generationPrompt,
+                [WORKFLOW_PATHS.audio.prompt]: request.prompt,
                 [WORKFLOW_PATHS.audio.trimStart]: request.trimStart ?? 0,
                 [WORKFLOW_PATHS.audio.trimDuration]: request.duration,
                 [WORKFLOW_PATHS.audio.seed]: request.seed,

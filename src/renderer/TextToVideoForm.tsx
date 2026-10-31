@@ -26,7 +26,7 @@ export function TextToVideoForm({
   const [originalText, setOriginalText] = useState('');
   const [polishedText, setPolishedText] = useState('');
   const [activeTab, setActiveTab] = useState<PromptTab>('original');
-  const [skill, setSkill] = useState<'auto' | SkillName>('auto');
+  const [skill, setSkill] = useState<'auto' | SkillName>('h3-prompt-writing');
   const [duration, setDuration] = useState<number | ''>(8);
   const [polishedAutoDuration, setPolishedAutoDuration] = useState<number | null>(null);
   const [seed, setSeed] = useState(42);
@@ -118,7 +118,6 @@ export function TextToVideoForm({
         prompt,
         duration: resolvedDuration,
         seed,
-        subtitles: options.subtitles,
       });
       setJobId(result.id);
     } catch (startError) {

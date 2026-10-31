@@ -1,4 +1,4 @@
-import type { HardwareProfile, VideoMode } from './types';
+import type { HardwareProfile } from './types';
 
 export const DEFAULT_MODEL_DIRECTORY =
   'G:\\H3Selflift整合包\\模型部分\\diffusion_models';
@@ -31,7 +31,7 @@ export const ASPECT_RATIO_OPTIONS: readonly AspectRatioOption[] = [
 
 export const DEFAULT_ASPECT_RATIO: AspectRatio = '16:9 (Widescreen)';
 
-export type ResolutionMegapixels = 0.4 | 0.7 | 1;
+export type ResolutionMegapixels = 0.3 | 0.4 | 0.55 | 0.7 | 0.85 | 1 | 1.2;
 
 export interface ResolutionOption {
   value: ResolutionMegapixels;
@@ -39,9 +39,13 @@ export interface ResolutionOption {
 }
 
 export const RESOLUTION_OPTIONS: readonly ResolutionOption[] = [
+  { value: 0.3, label: '0.3MP（轻量）' },
   { value: 0.4, label: '0.4MP（流畅）' },
+  { value: 0.55, label: '0.55MP（均衡）' },
   { value: 0.7, label: '0.7MP（标准，默认）' },
-  { value: 1, label: '1.0MP（高清）' },
+  { value: 0.85, label: '0.85MP（高负载，未实测）' },
+  { value: 1, label: '1.0MP（高负载，未实测）' },
+  { value: 1.2, label: '1.2MP（高负载，未实测）' },
 ];
 
 export const DEFAULT_RESOLUTION_MP: ResolutionMegapixels = 0.7;
@@ -64,14 +68,12 @@ export interface GenerationOptionsValue {
   model: H3ModelOption;
   aspectRatio: AspectRatio;
   megapixels: ResolutionMegapixels;
-  subtitles: boolean;
 }
 
 export const DEFAULT_GENERATION_OPTIONS: GenerationOptionsValue = {
   model: DEFAULT_H3_MODEL,
   aspectRatio: DEFAULT_ASPECT_RATIO,
   megapixels: DEFAULT_RESOLUTION_MP,
-  subtitles: false,
 };
 
 export function buildHardwareProfile(
@@ -98,22 +100,4 @@ export function buildHardwareProfile(
     tiling: 'auto',
     requiresConfirmation: true,
   };
-}
-
-const SUBTITLE_HINT_PATTERN = /subtitle|caption|字幕/i;
-
-export function withSubtitlePreference(
-  prompt: string,
-  enabled: boolean,
-  mode: VideoMode,
-): string {
-  if (!enabled) return prompt;
-  if (SUBTITLE_HINT_PATTERN.test(prompt)) return prompt;
-
-  const guidance =
-    mode === 'audio'
-      ? '同步显示与上传语音一致的字幕，字幕语言与语音一致，并始终保持在安全画面区内。'
-      : '同步显示与旁白/对白一致的字幕，字幕语言与旁白/对白一致，并始终保持在安全画面区内。';
-
-  return `${prompt}\n${guidance}`;
 }

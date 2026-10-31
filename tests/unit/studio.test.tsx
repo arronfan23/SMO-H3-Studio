@@ -464,7 +464,6 @@ describe('text-to-video studio', () => {
         prompt: '用户最终确认的镜头文本',
         duration: 9,
         seed: 42,
-        subtitles: false,
       }),
     );
     expect(await screen.findByText('job-1')).toBeInTheDocument();
@@ -761,7 +760,6 @@ describe('audio digital human studio', () => {
         trimStart: 1.25,
         duration: 6,
         seed: 7,
-        subtitles: false,
       }),
     );
     await waitFor(() =>
@@ -839,7 +837,7 @@ describe('generation options and hardware apply', () => {
     return screen.getByRole('tabpanel', { name: '文字生视频' });
   }
 
-  test('shows Chinese skill titles without raw English ids and explains the selection', async () => {
+  test('defaults to general video writing while keeping auto selection available', async () => {
     await renderStudio();
     const panel = within(textPanel());
     const select = panel.getByLabelText('视频风格（Skill）');
@@ -852,15 +850,17 @@ describe('generation options and hardware apply', () => {
     }
     expect(options).toHaveLength(SKILL_NAMES.length + 1);
 
-    expect(panel.getByText(AUTO_SKILL_OPTION.description)).toBeInTheDocument();
-
-    fireEvent.change(select, { target: { value: 'h3-prompt-writing' } });
+    expect(select).toHaveValue('h3-prompt-writing');
     expect(
       panel.getByText(SKILL_OPTIONS['h3-prompt-writing'].description),
     ).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: 'auto' } });
+    expect(select).toHaveValue('auto');
+    expect(panel.getByText(AUTO_SKILL_OPTION.description)).toBeInTheDocument();
   });
 
-  test('renders H3 model, aspect ratio, resolution, and subtitle controls with INT8 defaults', async () => {
+  test('renders H3 model, aspect ratio, and resolution controls without subtitles', async () => {
     await renderStudio();
     const panel = within(textPanel());
 
@@ -873,7 +873,8 @@ describe('generation options and hardware apply', () => {
       within(resolution).getByRole('option', { name: '1152 × 640 px' }),
     ).toBeInTheDocument();
     expect(panel.queryByText(/0\.\dMP/)).not.toBeInTheDocument();
-    expect(panel.getByLabelText('生成画面内字幕')).not.toBeChecked();
+    expect(panel.queryByLabelText('生成画面内字幕')).not.toBeInTheDocument();
+    expect(panel.queryByText('在画面安全区内显示字幕')).not.toBeInTheDocument();
   });
 
   test('updates the resolution pixel labels when the aspect ratio changes', async () => {
@@ -925,9 +926,13 @@ describe('generation options and hardware apply', () => {
     const [applyOrder] = smo.hardware.apply.mock.invocationCallOrder;
     const [startOrder] = smo.jobs.start.mock.invocationCallOrder;
     expect(applyOrder).toBeLessThan(startOrder);
-    expect(smo.jobs.start).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: '默认选项直接生成', subtitles: false }),
-    );
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'text',
+      avatarId: avatar.id,
+      prompt: '默认选项直接生成',
+      duration: 8,
+      seed: 42,
+    });
   });
 
   test('maps BF16, aspect ratio, and resolution choices onto the hardware profile', async () => {
@@ -959,23 +964,6 @@ describe('generation options and hardware apply', () => {
       confirmed: true,
       modelDirectory: DEFAULT_MODEL_DIRECTORY,
     });
-  });
-
-  test('sends subtitles: true when the subtitle option is enabled', async () => {
-    await renderStudio();
-    const panel = within(textPanel());
-    fireEvent.change(panel.getByLabelText('原始文字'), {
-      target: { value: '需要同步字幕' },
-    });
-    fireEvent.click(panel.getByLabelText('生成画面内字幕'));
-    expect(panel.getByLabelText('生成画面内字幕')).toBeChecked();
-
-    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
-
-    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalled());
-    expect(smo.jobs.start).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: '需要同步字幕', subtitles: true }),
-    );
   });
 
   test('shows the apply error and skips jobs.start when hardware apply fails', async () => {

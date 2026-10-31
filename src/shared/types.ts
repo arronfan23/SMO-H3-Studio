@@ -8,7 +8,6 @@ export interface GenerationRequest {
   seed: number;
   audioPath?: string;
   trimStart?: number;
-  subtitles?: boolean;
   retryOf?: string;
 }
 

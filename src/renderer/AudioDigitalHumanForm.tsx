@@ -117,7 +117,6 @@ export function AudioDigitalHumanForm({
         trimStart,
         duration: resolvedDuration,
         seed,
-        subtitles: options.subtitles,
       });
       setJobId(result.id);
     } catch (startError) {

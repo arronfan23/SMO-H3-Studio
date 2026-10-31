@@ -119,7 +119,6 @@ const generationRequestSchema = z
     seed: z.number().int().nonnegative(),
     audioPath: nonEmptyString.optional(),
     trimStart: nonNegativeFiniteNumber.optional(),
-    subtitles: z.boolean().optional(),
     retryOf: z.string().optional(),
   })
   .strict()
