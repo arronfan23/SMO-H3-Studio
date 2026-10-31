@@ -19,6 +19,7 @@ interface PolishContext {
   audioPath: string;
   trimStart: number;
   duration: number | '';
+  skill: 'auto' | SkillName;
 }
 
 interface PendingPolish {
@@ -63,7 +64,7 @@ export function AudioDigitalHumanForm({
   const pendingPolishRef = useRef<PendingPolish | null>(null);
   const currentPolishContextRef = useRef<PolishContext | null>(null);
   currentPolishContextRef.current =
-    audioPath === null ? null : { originalText, audioPath, trimStart, duration };
+    audioPath === null ? null : { originalText, audioPath, trimStart, duration, skill };
 
   // Pause any playing preview when the panel or the whole studio page is hidden.
   useEffect(() => {
@@ -143,7 +144,8 @@ export function AudioDigitalHumanForm({
       current.originalText === request.context.originalText &&
       current.audioPath === request.context.audioPath &&
       Object.is(current.trimStart, request.context.trimStart) &&
-      Object.is(current.duration, request.context.duration)
+      Object.is(current.duration, request.context.duration) &&
+      current.skill === request.context.skill
     );
   };
 
@@ -164,6 +166,7 @@ export function AudioDigitalHumanForm({
         audioPath: clip.audioPath,
         trimStart,
         duration,
+        skill,
       },
     };
     pendingPolishRef.current = request;

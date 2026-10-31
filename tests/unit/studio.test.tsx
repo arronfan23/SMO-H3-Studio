@@ -802,6 +802,46 @@ describe('audio digital human studio', () => {
     );
   });
 
+  test('discards a stale polish response after changing Skill', async () => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\stale-skill.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: 'Skill 竞态原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(smo.llm.polish).toHaveBeenCalledWith(
+      expect.objectContaining({ skill: 'h3-prompt-writing' }),
+    );
+    fireEvent.change(panel.getByLabelText('视频风格（Skill）'), {
+      target: { value: 'auto' },
+    });
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '不应被接受的旧 Skill 结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('auto');
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByRole('textbox', { name: '润色结果' })).not.toBeInTheDocument();
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('Skill 竞态原文');
+  });
+
   test('invalidates an old request when audio changes and only applies the newest polish', async () => {
     const resolvers: Array<(value: PolishResult) => void> = [];
     smo.llm.polish.mockImplementation(
