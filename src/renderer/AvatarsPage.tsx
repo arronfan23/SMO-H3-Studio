@@ -53,6 +53,9 @@ export function AvatarsPage({
   }, []);
 
   const selectPhoto = async (): Promise<void> => {
+    if (saving) {
+      return;
+    }
     const requestId = ++photoRequestRef.current;
     setAuthorizing(false);
     setSelecting(true);
@@ -78,20 +81,24 @@ export function AvatarsPage({
   };
 
   const save = async (): Promise<void> => {
-    if (selecting || authorizing) {
+    if (selecting || authorizing || saving) {
       return;
     }
     if (name.trim().length === 0 || photoPath === null) {
       setError('请填写模特名称并选择照片。');
       return;
     }
+    const requestId = photoRequestRef.current;
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
       const avatar = await window.smo.avatars.create({ name: name.trim(), photoPath });
       await onCreated(avatar);
-      if (mountedRef.current) {
+      // Only clear the form when no newer photo-selection request started
+      // while the save was in flight; otherwise the cleanup would wipe a
+      // fresh selection.
+      if (mountedRef.current && photoRequestRef.current === requestId) {
         setName('');
         setPhotoPath(null);
         setNotice(`已保存并选择 ${avatar.name}`);
@@ -118,6 +125,9 @@ export function AvatarsPage({
   const handlePhotoDrop = (event: DragEvent<HTMLDivElement>): void => {
     event.preventDefault();
     setDropActive(false);
+    if (saving) {
+      return;
+    }
     const requestId = ++photoRequestRef.current;
     setSelecting(false);
     const files = Array.from(event.dataTransfer.files);
@@ -269,7 +279,9 @@ export function AvatarsPage({
             }
             onDragOver={(event) => {
               event.preventDefault();
-              setDropActive(true);
+              if (!saving) {
+                setDropActive(true);
+              }
             }}
             onDragLeave={() => setDropActive(false)}
             onDrop={handlePhotoDrop}

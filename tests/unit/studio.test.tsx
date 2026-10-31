@@ -484,6 +484,58 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     });
   });
 
+  test('ignores a drop while saving and only clears the form for an unchanged selection', async () => {
+    const created: Avatar = {
+      ...avatar,
+      id: 'avatar-saved',
+      name: '模特甲',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\saved.png',
+    };
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\original.png');
+    let resolveCreate!: (value: Avatar) => void;
+    smo.avatars.create.mockImplementationOnce(
+      () => new Promise<Avatar>((resolve) => { resolveCreate = resolve; }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '模特甲' } });
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['b'], 'during-save.png')] },
+    });
+
+    expect(smo.files.getDroppedFilePath).not.toHaveBeenCalled();
+    expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\photos\\original.png')}`,
+    );
+
+    await act(async () => {
+      resolveCreate(created);
+    });
+    await screen.findByText(/已保存并选择/);
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['c'], 'after-save.png')] } });
+    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith('G:\\dropped\\after-save.png');
+    const nextPreview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(nextPreview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\after-save.png')}`,
+    );
+    expect(screen.getByText('after-save.png')).toBeInTheDocument();
+  });
+
   test('clears the form error when removing the selected photo', async () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\clear-error.png');
