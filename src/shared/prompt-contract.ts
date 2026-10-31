@@ -48,6 +48,13 @@ const ONLY_ALLOWED_TAIL_PATTERN = new RegExp(
   `${FINAL_TWO_SECONDS}\\b[^.\\n;]{0,160}\\b(?:only|exclusively)\\b[^.\\n;]{0,120}\\b(?:ambient|ambience|ambiance|environmental|music|visuals?|picture|room\\s+tone|silence|silent)\\b`,
   'i',
 );
+const CHINESE_TAIL_PERIOD_PATTERN = /(?:最后|结尾)(?:的)?\s*(?:2|两)\s*秒/;
+const CHINESE_VOCAL_WORDS = String.raw`(?:旁白|对白|语音|人声|配音|解说|歌声|说话|讲话|朗读)`;
+const CHINESE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
+  String.raw`(?:没有|无|不包含|不含|不再包含|不再有)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS}(?:\s*(?:、|/|或|和|与)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS})*`,
+);
+const CHINESE_ONLY_ALLOWED_TAIL_PATTERN =
+  /(?:仅|只)(?:保留|剩下|留下|有)?[^。！？\n]{0,60}(?:环境声|环境音|音乐|画面)/;
 
 const INTERACTIVE_OUTPUT_PATTERNS = [
   /^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:required\s+)?(?:clarifications?|questions?|next steps?|start gate|approval|confirmation)\b/im,
@@ -216,6 +223,24 @@ function maskNegatedTailVocals(text: string): string {
 function hasNonNarrationTail(text: string): boolean {
   const scope = stripDialogueAndVisibleText(text);
   let foundValidDeclaration = false;
+  for (const sentence of scope.split(/(?<=[。！？])|[.!?]\s+|\n+/)) {
+    if (!CHINESE_TAIL_PERIOD_PATTERN.test(sentence)) {
+      continue;
+    }
+    const remaining = sentence.replace(
+      new RegExp(CHINESE_NEGATED_TAIL_VOCAL_PATTERN.source, 'g'),
+      '',
+    );
+    if (new RegExp(CHINESE_VOCAL_WORDS).test(remaining)) {
+      return false;
+    }
+    if (
+      CHINESE_NEGATED_TAIL_VOCAL_PATTERN.test(sentence) ||
+      CHINESE_ONLY_ALLOWED_TAIL_PATTERN.test(sentence)
+    ) {
+      foundValidDeclaration = true;
+    }
+  }
   for (const sentence of scope.split(/(?<=[.!?])\s+|\n+/)) {
     const conflictClauses = maskNegatedTailVocals(sentence).split(/[,;]+|\b(?:but|however)\b/i);
     const originalClauses = sentence.split(/[,;]+|\b(?:but|however)\b/i);

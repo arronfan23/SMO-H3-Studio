@@ -275,6 +275,21 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
     expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
   });
 
+  test('accepts a Chinese non-narration tail with only ambience, music, or visuals', () => {
+    const text = basePrompt(
+      `[Shot 1] The presenter (S1) says: ${dialogue} 最后2秒无旁白、对白或语音，仅保留环境声、音乐或画面。`,
+    );
+    expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
+
+  test.each([
+    '最后2秒仍有对白和旁白，仅保留环境声。',
+    'The last 2 seconds still contain dialogue and narration; only music remains.',
+  ])('rejects speech that continues into the final two seconds: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
+  });
+
   test.each([
     'The final 2 seconds contain only music and dialogue.',
     'The final 2 seconds contain only music and singing.',
