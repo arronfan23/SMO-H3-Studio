@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RELEASE_BASE_URL =
-  'https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1';
+  'https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1';
 const SHA256_PATTERN = /^[0-9a-fA-F]{64}$/;
 
 function assertPositiveInteger(value, label) {
