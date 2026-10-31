@@ -56,6 +56,7 @@ export interface IpcServices {
     start: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
     retry: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
     cancel: () => Promise<EnvironmentState>;
+    validate: () => Promise<EnvironmentState>;
   };
   hardware: {
     detect: () => Promise<HardwareInfo>;
@@ -150,6 +151,8 @@ async function dispatch(
       return services.environment.retry(request.payload);
     case 'environment:cancel':
       return services.environment.cancel();
+    case 'environment:validate':
+      return services.environment.validate();
     case 'hardware:detect':
       return services.hardware.detect();
     case 'hardware:recommend':

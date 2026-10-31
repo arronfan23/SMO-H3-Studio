@@ -20,6 +20,8 @@ export interface EnvironmentConfig extends EnvironmentPaths {
   schemaVersion: 1;
   runtimeId: EnvironmentRuntimeId;
   profile: EnvironmentProfile;
+  /** Recorded install root; absent in configs written before it was tracked. */
+  installRoot?: string;
   hardwareFingerprint: EnvironmentHardwareFingerprint;
   manifestVersion: string;
   status: 'installing' | 'ready' | 'failed';

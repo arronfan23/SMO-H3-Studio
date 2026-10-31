@@ -548,16 +548,74 @@ describe('createEnvironmentStartBackend', () => {
     const oldManager = harness.getActiveManager()!;
     const oldClose = vi.spyOn(oldManager, 'close');
 
-    const result = (await harness.startBackend(
+    const result = await harness.startBackend(
       makeBackendInput({ runtimeRoot: 'd:\\env\\runtime\\oldroot' }),
-    )) as { systemStats: unknown; objectInfo: Record<string, unknown> };
+    );
 
     expect(result.objectInfo).toEqual(objectInfoFixture);
+    // Health alone never replaces the active backend; only activate() does.
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+    expect(oldClose).not.toHaveBeenCalled();
+
+    await result.activate();
+
     expect(harness.getActiveManager()).not.toBe(oldManager);
     expect(harness.createdManagers).toHaveLength(1);
     expect(oldClose).toHaveBeenCalled();
     expect(harness.activePaths.runtimeRoot).toBe('d:\\env\\runtime\\oldroot');
     // A reused healthy backend is never terminated.
+    expect(harness.kills).toEqual([]);
+  });
+
+  test('rollback terminates the candidate and leaves the active manager and paths untouched', async () => {
+    const logDirectory = await useDataDirectory();
+    const upstream = await startBackendServer();
+    cleanups.push(() => upstream.close());
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory);
+    const oldManager = harness.getActiveManager();
+
+    const result = await harness.startBackend(
+      makeBackendInput({ runtimeRoot: 'D:\\Env\\runtime\\OldRoot' }),
+    );
+    await result.rollback();
+
+    expect(harness.createdManagerTerminateSpies[0]).toHaveBeenCalled();
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths).toEqual({
+      runtimeRoot: 'D:\\Env\\runtime\\OldRoot',
+      modelDirectory: 'D:\\Env\\models\\diffusion_models',
+      outputDirectory: 'D:\\Env\\output',
+    });
+    // A repeated rollback is a no-op once the transaction settled.
+    await result.rollback();
+    expect(harness.createdManagerTerminateSpies[0]).toHaveBeenCalledTimes(1);
+    expect(harness.kills).toEqual([]);
+  });
+
+  test('an activate failure restores the previous manager and paths and terminates the candidate', async () => {
+    const logDirectory = await useDataDirectory();
+    const upstream = await startBackendServer();
+    cleanups.push(() => upstream.close());
+    const harness = createAdapterHarness(upstream.baseUrl, logDirectory);
+    const oldManager = harness.getActiveManager()!;
+    vi.spyOn(oldManager, 'close').mockRejectedValue(new Error('close exploded'));
+
+    const result = await harness.startBackend(
+      makeBackendInput({ runtimeRoot: 'D:\\Env\\runtime\\OldRoot' }),
+    );
+    await expect(result.activate()).rejects.toThrow(/close exploded/i);
+
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths).toEqual({
+      runtimeRoot: 'D:\\Env\\runtime\\OldRoot',
+      modelDirectory: 'D:\\Env\\models\\diffusion_models',
+      outputDirectory: 'D:\\Env\\output',
+    });
+    expect(harness.createdManagerTerminateSpies[0]).toHaveBeenCalled();
+    // The failed activation settled the transaction: rollback is a no-op.
+    await result.rollback();
+    expect(harness.createdManagerTerminateSpies[0]).toHaveBeenCalledTimes(1);
     expect(harness.kills).toEqual([]);
   });
 
@@ -665,15 +723,18 @@ describe('createEnvironmentStartBackend', () => {
     const oldManager = harness.getActiveManager()!;
     const oldClose = vi.spyOn(oldManager, 'close');
 
-    const result = (await harness.startBackend(makeBackendInput())) as {
-      systemStats: unknown;
-      objectInfo: Record<string, unknown>;
-    };
+    const result = await harness.startBackend(makeBackendInput());
 
     expect(result.objectInfo).toEqual(objectInfoFixture);
     // A new runtime must use an independent log, never the shared one.
     expect(candidateLogPaths).toHaveLength(1);
     expect(candidateLogPaths[0]).toMatch(/environment-[0-9a-f-]+\.log$/);
+    // The verified candidate stays inactive until the transaction commits.
+    expect(harness.getActiveManager()).toBe(oldManager);
+    expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\OldRoot');
+
+    await result.activate();
+
     expect(harness.getActiveManager()).not.toBe(oldManager);
     expect(oldClose).toHaveBeenCalled();
     expect(harness.activePaths.runtimeRoot).toBe('D:\\Env\\runtime\\NewRoot');
@@ -880,6 +941,130 @@ describe('createEnvironmentStartBackend', () => {
     expect(candidatePaths).toContain('environment-');
     expect(candidatePaths).not.toContain('old.log');
     expect(harness.kills).toEqual([]);
+  });
+
+  describe('environment validation through app services', () => {
+    function writeReadyConfig(
+      dataDirectory: string,
+      overrides: Record<string, unknown> = {},
+    ): Promise<void> {
+      const config = {
+        schemaVersion: 1,
+        runtimeId: 'sm120',
+        runtimeRoot: join(dataDirectory, 'runtime', 'sm120'),
+        modelDirectory: join(dataDirectory, 'models', 'diffusion_models'),
+        outputDirectory: join(dataDirectory, 'output'),
+        profile: 'balanced-16gb',
+        hardwareFingerprint: {
+          gpu: 'Recorded GPU',
+          vramGiB: 16,
+          ramGiB: 64,
+          cudaComputeCapability: '12.0',
+        },
+        manifestVersion: '1',
+        status: 'ready',
+        createdAt: '2026-01-01T00:00:00+08:00',
+        updatedAt: '2026-01-01T00:00:00+08:00',
+        ...overrides,
+      };
+      return writeFile(
+        join(dataDirectory, 'environment.json'),
+        JSON.stringify(config),
+      );
+    }
+
+    test('rejects validation without a ready configuration', async () => {
+      const dataDirectory = await useDataDirectory();
+
+      const services = await createAppServices({ dataDirectory });
+      cleanups.push(() => services.close());
+
+      await expect(services.environment.validate()).rejects.toThrow(/ready/i);
+    });
+
+    test('validates a ready config through health and required nodes, then reports healthy', async () => {
+      const dataDirectory = await useDataDirectory();
+      await writeReadyConfig(dataDirectory);
+      const upstream = await startBackendServer();
+      cleanups.push(() => upstream.close());
+
+      const services = await createAppServices({
+        dataDirectory,
+        comfyBaseUrl: upstream.baseUrl,
+      });
+      cleanups.push(() => services.close());
+
+      const state = await services.environment.validate();
+      expect(state).toMatchObject({ stage: 'ready', healthy: true, error: null });
+      expect(state.config?.status).toBe('ready');
+
+      // The validated health survives later state reads.
+      await vi.waitFor(async () => {
+        await expect(services.environment.getState()).resolves.toMatchObject({
+          healthy: true,
+        });
+      });
+    });
+
+    test('rejects validation when the backend misses required nodes without activating', async () => {
+      const dataDirectory = await useDataDirectory();
+      await writeReadyConfig(dataDirectory);
+      const upstream = await startBackendServer({ objectInfoValue: {} });
+      cleanups.push(() => upstream.close());
+
+      const services = await createAppServices({
+        dataDirectory,
+        comfyBaseUrl: upstream.baseUrl,
+      });
+      cleanups.push(() => services.close());
+
+      await expect(services.environment.validate()).rejects.toThrow(
+        /missing required nodes/i,
+      );
+      await vi.waitFor(async () => {
+        const state = await services.environment.getState();
+        expect(state.config?.status).toBe('ready');
+      });
+      const state = await services.environment.getState();
+      expect(state.healthy).toBe(false);
+      expect(state.stage).not.toBe('ready');
+    });
+
+    test('restores a custom installRoot recorded in the ready config', async () => {
+      const dataDirectory = await useDataDirectory();
+      await writeReadyConfig(dataDirectory, {
+        installRoot: 'D:\\SMO-Custom-Env',
+      });
+
+      const services = await createAppServices({ dataDirectory });
+      cleanups.push(() => services.close());
+
+      await vi.waitFor(async () => {
+        const state = await services.environment.getState();
+        expect(state.config?.status).toBe('ready');
+      });
+      const state = await services.environment.getState();
+      expect(state.installRoot).toBe('D:\\SMO-Custom-Env');
+    });
+
+    test('derives the installRoot from the recorded runtimeRoot when the field is absent', async () => {
+      const dataDirectory = await useDataDirectory();
+      const customRoot = await useDataDirectory();
+      await writeReadyConfig(dataDirectory, {
+        runtimeRoot: join(customRoot, 'runtime', 'sm120'),
+        modelDirectory: join(customRoot, 'models', 'diffusion_models'),
+      });
+
+      const services = await createAppServices({ dataDirectory });
+      cleanups.push(() => services.close());
+
+      await vi.waitFor(async () => {
+        const state = await services.environment.getState();
+        expect(state.config?.status).toBe('ready');
+      });
+      const state = await services.environment.getState();
+      expect(state.installRoot).toBe(customRoot);
+    });
   });
 });
 

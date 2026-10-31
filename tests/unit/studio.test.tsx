@@ -58,6 +58,7 @@ function createSmoMock() {
       start: vi.fn(),
       retry: vi.fn(),
       cancel: vi.fn(),
+      validate: vi.fn(),
     },
     hardware: { detect: vi.fn(), recommend: vi.fn(), apply: vi.fn() },
     works: { list: vi.fn(), delete: vi.fn() },
@@ -125,6 +126,7 @@ beforeEach(() => {
   smo.environment.start.mockRejectedValue(new Error('Unexpected environment start'));
   smo.environment.retry.mockRejectedValue(new Error('Unexpected environment retry'));
   smo.environment.cancel.mockRejectedValue(new Error('Unexpected environment cancel'));
+  smo.environment.validate.mockResolvedValue(environment);
   smo.hardware.detect.mockResolvedValue({
     gpu: 'NVIDIA GeForce RTX 5080',
     vramGiB: 16,

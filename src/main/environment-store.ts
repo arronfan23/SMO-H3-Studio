@@ -92,6 +92,7 @@ const environmentConfigSchema = z
     runtimeRoot: windowsAbsolutePathSchema,
     modelDirectory: windowsAbsolutePathSchema,
     outputDirectory: windowsAbsolutePathSchema,
+    installRoot: windowsAbsolutePathSchema.optional(),
     profile: z.enum(['conservative', 'balanced-16gb', 'high-memory-candidate']),
     hardwareFingerprint: environmentHardwareFingerprintSchema,
     manifestVersion: z.string(),

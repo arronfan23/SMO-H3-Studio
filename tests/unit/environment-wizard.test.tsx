@@ -118,6 +118,7 @@ function createSmoMock() {
       start: vi.fn(),
       retry: vi.fn(),
       cancel: vi.fn(),
+      validate: vi.fn(),
     },
     hardware: { detect: vi.fn(), recommend: vi.fn(), reset: vi.fn(), apply: vi.fn() },
     works: { list: vi.fn(), delete: vi.fn() },
@@ -161,6 +162,7 @@ beforeEach(() => {
     `smo-media://media/${encodeURIComponent(path)}`,
   );
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
+  smo.environment.validate.mockResolvedValue(readyState(true));
   smo.window.isMaximized.mockResolvedValue(false);
   smo.window.toggleMaximize.mockResolvedValue(false);
 });
@@ -471,17 +473,18 @@ describe('ready environment entry', () => {
     render(<App />);
 
     await expectStudio();
-    expect(smo.comfy.health).not.toHaveBeenCalled();
+    expect(smo.environment.validate).not.toHaveBeenCalled();
     expect(smo.environment.detect).not.toHaveBeenCalled();
     expect(smo.environment.retry).not.toHaveBeenCalled();
   });
 
-  test('checks ComfyUI health on restart and enters without reinstalling', async () => {
+  test('validates the ready environment on restart and enters without reinstalling', async () => {
     smo.environment.getState.mockResolvedValue(readyState(false));
     render(<App />);
 
     await expectStudio();
-    expect(smo.comfy.health).toHaveBeenCalledTimes(1);
+    expect(smo.environment.validate).toHaveBeenCalledTimes(1);
+    expect(smo.comfy.health).not.toHaveBeenCalled();
     expect(smo.environment.retry).not.toHaveBeenCalled();
     expect(smo.environment.start).not.toHaveBeenCalled();
 
@@ -500,9 +503,9 @@ describe('ready environment entry', () => {
     expect(await screen.findByLabelText('模型目录')).toHaveValue(readyConfig.modelDirectory);
   });
 
-  test('uses full environment retry with the saved profile when the health check fails', async () => {
+  test('uses full environment retry with the saved profile when validation fails', async () => {
     smo.environment.getState.mockResolvedValue(readyState(false));
-    smo.comfy.health.mockRejectedValue(new Error('ComfyUI offline'));
+    smo.environment.validate.mockRejectedValue(new Error('ComfyUI offline'));
     smo.environment.retry.mockResolvedValue(readyState(true));
     render(<App />);
 
@@ -514,9 +517,9 @@ describe('ready environment entry', () => {
     expect(smo.environment.start).not.toHaveBeenCalled();
   });
 
-  test('keeps the wizard visible with an error when health recovery fails', async () => {
+  test('keeps the wizard visible with an error when validation recovery fails', async () => {
     smo.environment.getState.mockResolvedValue(readyState(false));
-    smo.comfy.health.mockRejectedValue(new Error('ComfyUI offline'));
+    smo.environment.validate.mockRejectedValue(new Error('ComfyUI offline'));
     smo.environment.retry.mockRejectedValue(new Error('运行时校验失败'));
     render(<App />);
 
@@ -525,7 +528,7 @@ describe('ready environment entry', () => {
     expect(screen.queryByRole('navigation', { name: '主导航' })).not.toBeInTheDocument();
   });
 
-  test('surfaces a skipped health retry and keeps manual retry available', async () => {
+  test('surfaces a skipped validation retry and keeps manual retry available', async () => {
     const controllerRef: { current: EnvironmentController | null } = { current: null };
 
     function Harness() {
@@ -534,21 +537,21 @@ describe('ready environment entry', () => {
       return <EnvironmentWizard environment={environment} />;
     }
 
-    let rejectHealth: (error: Error) => void = () => undefined;
+    let rejectValidation: (error: Error) => void = () => undefined;
     let resolveStart: ((state: EnvironmentState) => void) | undefined;
     smo.environment.getState.mockResolvedValue(readyState(false));
-    smo.comfy.health.mockImplementation(
-      () => new Promise((_, reject) => { rejectHealth = reject; }),
+    smo.environment.validate.mockImplementation(
+      () => new Promise((_, reject) => { rejectValidation = reject; }),
     );
     smo.environment.start.mockImplementation(
       () => new Promise<EnvironmentState>((resolve) => { resolveStart = resolve; }),
     );
     render(<Harness />);
-    await waitFor(() => expect(smo.comfy.health).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(smo.environment.validate).toHaveBeenCalledTimes(1));
 
     await act(async () => { void controllerRef.current!.start(); });
     await act(async () => {
-      rejectHealth(new Error('ComfyUI offline'));
+      rejectValidation(new Error('ComfyUI offline'));
       await Promise.resolve();
     });
 

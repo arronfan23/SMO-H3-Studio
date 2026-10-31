@@ -426,6 +426,19 @@ describe('EnvironmentSetupService installation', () => {
     expect(existsSync(join(harness.installRoot, '.smo-install', 'staging'))).toBe(false);
   });
 
+  test('records the normalized installRoot in the saved environment config', async () => {
+    const harness = await createHarness();
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect((await harness.store.load())?.installRoot).toBe(
+      win32.normalize(harness.installRoot),
+    );
+  });
+
   test('escapes apostrophes in the YAML model root', async () => {
     const parent = await mkdtemp(join(tmpdir(), "smo-setup-'quote-"));
     const installRoot = join(parent, 'install');
@@ -1231,6 +1244,213 @@ describe('EnvironmentSetupService failures and recovery', () => {
       service.start({ profileId: 'conservative', installRoot }),
     ).rejects.toThrow(/installRoot|path/i);
     expect(detect).not.toHaveBeenCalled();
+  });
+});
+
+describe('EnvironmentSetupService installRoot restore', () => {
+  function restartService(harness: Harness): EnvironmentSetupService {
+    return new EnvironmentSetupService({
+      store: harness.store,
+      manifest: harness.manifest,
+      defaultInstallRoot: harness.installRoot,
+      outputDirectory: harness.outputDirectory,
+      detectHardware: async () => makeHardware(),
+      downloadParts: harness.downloads.parts,
+      downloadFile: harness.downloads.file,
+      startBackend: harness.backend,
+    });
+  }
+
+  test('prefers the recorded custom installRoot of a ready config after restart', async () => {
+    const harness = await createHarness();
+    const customRoot = await mkdtemp(join(tmpdir(), 'smo-custom-root-'));
+    cleanups.push(() => rm(customRoot, { recursive: true, force: true }));
+    await seedReadyConfig(harness, { installRoot: customRoot });
+    const restarted = restartService(harness);
+
+    await vi.waitFor(() => {
+      expect(restarted.getState().config).not.toBeNull();
+    });
+
+    expect(restarted.getState().installRoot).toBe(win32.normalize(customRoot));
+    expect(restarted.getState().healthy).toBe(false);
+  });
+
+  test('derives the installRoot from the recorded runtimeRoot for legacy configs', async () => {
+    const harness = await createHarness();
+    const legacyRoot = await mkdtemp(join(tmpdir(), 'smo-legacy-root-'));
+    cleanups.push(() => rm(legacyRoot, { recursive: true, force: true }));
+    await seedReadyConfig(harness, {
+      runtimeRoot: join(legacyRoot, 'runtime', TOP_LEVEL),
+      modelDirectory: join(legacyRoot, 'models', 'diffusion_models'),
+    });
+    const restarted = restartService(harness);
+
+    await vi.waitFor(() => {
+      expect(restarted.getState().config).not.toBeNull();
+    });
+
+    expect(restarted.getState().installRoot).toBe(win32.normalize(legacyRoot));
+  });
+
+  test('shows an error instead of reinstalling into the default directory when the installRoot cannot be restored', async () => {
+    const harness = await createHarness();
+    await seedReadyConfig(harness, { runtimeRoot: 'D:\\sm120' });
+    const restarted = restartService(harness);
+
+    await vi.waitFor(() => {
+      expect(restarted.getState().error).toMatch(/installRoot/i);
+    });
+    const state = restarted.getState();
+    expect(state.installRoot).toBe('');
+    expect(state.config?.status).toBe('ready');
+    expect(state.healthy).toBe(false);
+
+    await expect(
+      restarted.retry({
+        profileId: 'high-memory-candidate',
+        installRoot: state.installRoot,
+      }),
+    ).rejects.toThrow(/installRoot/i);
+  });
+
+  test('reuses a custom-root ready installation on offline retry after restart', async () => {
+    const first = await createHarness();
+    await first.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: first.installRoot,
+    });
+    const offlineParts = vi.fn(async () => {
+      throw new Error('network offline');
+    });
+    const offlineFile = vi.fn(async () => {
+      throw new Error('network offline');
+    });
+    const second = await createHarness({
+      installRoot: first.installRoot,
+      service: {
+        downloadParts: offlineParts,
+        downloadFile: offlineFile,
+      },
+    });
+    await vi.waitFor(() => {
+      expect(second.service.getState().config?.status).toBe('ready');
+    });
+    const restoredInstallRoot = second.service.getState().installRoot;
+
+    const state = await second.service.retry({
+      profileId: 'high-memory-candidate',
+      installRoot: restoredInstallRoot,
+    });
+
+    expect(state).toMatchObject({ stage: 'ready', healthy: true });
+    expect(restoredInstallRoot).toBe(win32.normalize(first.installRoot));
+    expect(state.config?.installRoot).toBe(win32.normalize(first.installRoot));
+    expect(offlineParts).not.toHaveBeenCalled();
+    expect(offlineFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('EnvironmentSetupService backend transactions', () => {
+  function makeTransaction(activateError?: Error) {
+    const calls: string[] = [];
+    const activate = vi.fn(async () => {
+      calls.push('activate');
+      if (activateError) throw activateError;
+    });
+    const rollback = vi.fn(async () => {
+      calls.push('rollback');
+    });
+    return {
+      calls,
+      activate,
+      rollback,
+      result: {
+        systemStats: { system: { os: 'test' }, devices: [] },
+        objectInfo: makeObjectInfo(),
+        activate,
+        rollback,
+      },
+    };
+  }
+
+  test('activates the backend transaction only after the ready commit succeeds', async () => {
+    const transaction = makeTransaction();
+    const harness = await createHarness({
+      service: { startBackend: async () => transaction.result },
+    });
+    controlReadyCommit(harness, async (config, write) => {
+      transaction.calls.push('commit');
+      return write(config);
+    });
+
+    const state = await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(state).toMatchObject({ stage: 'ready', healthy: true });
+    expect(transaction.calls).toEqual(['commit', 'activate']);
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('rolls back the candidate when cancel lands during a delayed ready commit', async () => {
+    const transaction = makeTransaction();
+    const harness = await createHarness({
+      service: { startBackend: async () => transaction.result },
+    });
+    const commitStarted = createDeferred();
+    const finishCommit = createDeferred();
+    let commits = 0;
+    controlReadyCommit(harness, async (config, write) => {
+      commits += 1;
+      if (commits === 1) {
+        commitStarted.resolve();
+        await finishCommit.promise;
+      }
+      return write(config);
+    });
+
+    const pending = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await commitStarted.promise;
+    const cancelling = harness.service.cancel();
+    finishCommit.resolve();
+    await cancelling;
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    expect(transaction.activate).not.toHaveBeenCalled();
+    expect(transaction.rollback).toHaveBeenCalledTimes(1);
+    expect((await harness.store.load())?.status).toBe('failed');
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+    });
+  });
+
+  test('rolls back the candidate and the ready commit when activation fails', async () => {
+    const transaction = makeTransaction(new Error('activate exploded'));
+    const harness = await createHarness({
+      service: { startBackend: async () => transaction.result },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/activate exploded/i);
+
+    expect(transaction.activate).toHaveBeenCalledTimes(1);
+    expect(transaction.rollback).toHaveBeenCalledTimes(1);
+    expect((await harness.store.load())?.status).toBe('failed');
+    expect(harness.service.getState()).toMatchObject({
+      stage: 'start',
+      active: false,
+      healthy: false,
+    });
   });
 });
 

@@ -203,6 +203,7 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
       start: async () => ({ ...environmentState }),
       retry: async () => ({ ...environmentState }),
       cancel: async () => ({ ...environmentState }),
+      validate: async () => ({ ...environmentState }),
     },
     hardware: {
       detect: async () => hardwareInfo,
@@ -325,7 +326,7 @@ describe('IPC input schema', () => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
 
-  test.each(['environment:getState', 'environment:cancel'])(
+  test.each(['environment:getState', 'environment:cancel', 'environment:validate'])(
     'accepts %s with an empty payload',
     (channel) => {
       const request = { channel, payload: {} };
@@ -369,6 +370,7 @@ describe('IPC input schema', () => {
   test.each([
     { channel: 'environment:getState', payload: { verbose: true } },
     { channel: 'environment:cancel', payload: { force: true } },
+    { channel: 'environment:validate', payload: { verbose: true } },
     { channel: 'environment:detect', payload: { installRoot: '' } },
     { channel: 'environment:detect', payload: { installRoot: '   ' } },
     {
@@ -1219,6 +1221,36 @@ describe('main-process IPC handlers', () => {
     );
   });
 
+  test('dispatches environment validate with an empty payload', async () => {
+    const validate = vi.fn(async () => ({
+      ...environmentState,
+      stage: 'ready' as const,
+      healthy: true,
+    }));
+    const harness = await createHarness({
+      environment: {
+        getState: async () => ({ ...environmentState }),
+        detect: async () => ({ ...environmentState }),
+        start: async () => ({ ...environmentState }),
+        retry: async () => ({ ...environmentState }),
+        cancel: async () => ({ ...environmentState }),
+        validate,
+      },
+    });
+
+    await expect(harness.invoke('environment:validate')).resolves.toEqual({
+      ...environmentState,
+      stage: 'ready',
+      healthy: true,
+    });
+    expect(validate).toHaveBeenCalledTimes(1);
+
+    await expect(
+      harness.invoke('environment:validate', { verbose: true }),
+    ).rejects.toThrow();
+    expect(validate).toHaveBeenCalledTimes(1);
+  });
+
   test('dispatches environment detect with the optional install root', async () => {
     const detect = vi.fn(async (_installRoot?: string) => ({
       ...environmentState,
@@ -1230,6 +1262,7 @@ describe('main-process IPC handlers', () => {
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel: async () => ({ ...environmentState }),
+        validate: async () => ({ ...environmentState }),
       },
     });
 
@@ -1257,6 +1290,7 @@ describe('main-process IPC handlers', () => {
           start: run,
           retry: run,
           cancel: async () => ({ ...environmentState }),
+          validate: async () => ({ ...environmentState }),
         },
       });
 
@@ -1284,6 +1318,7 @@ describe('main-process IPC handlers', () => {
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel,
+        validate: async () => ({ ...environmentState }),
       },
     });
 
@@ -1366,6 +1401,7 @@ describe('preload API', () => {
       'getState',
       'retry',
       'start',
+      'validate',
     ]);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
     expect(Object.keys(api.works)).toEqual(['delete', 'list']);

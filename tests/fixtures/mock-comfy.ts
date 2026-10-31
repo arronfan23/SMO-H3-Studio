@@ -13,6 +13,8 @@ const execFileAsync = promisify(execFile);
 export interface ComfyMockOptions {
   outputDirectory: string;
   ffmpegPath?: string;
+  /** Nodes removed from /object_info, simulating a backend that lost custom nodes. */
+  omitObjectInfoNodes?: string[];
 }
 
 export interface ComfyMock {
@@ -169,7 +171,7 @@ function outputPrefixFromPrompt(prompt: Record<string, unknown>): string {
 }
 
 export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMock> {
-  const { outputDirectory, ffmpegPath } = options;
+  const { outputDirectory, ffmpegPath, omitObjectInfoNodes = [] } = options;
   const records = new Map<string, PromptRecord>();
   const sockets = new Set<WebSocket>();
   const submittedPromptIds: string[] = [];
@@ -196,7 +198,7 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
         }
 
         if (method === 'GET' && url === '/object_info') {
-          sendJson(response, 200, {
+          const objectInfo: Record<string, unknown> = {
             'VHS_VideoCombine': { input: { required: {} } },
             'LoadImage': { input: { required: {} } },
             'SelfLiftH3Sampler': { input: { required: {} } },
@@ -204,7 +206,11 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
             'VedaSparseAttention': { input: { required: {} } },
             'QwenH3PromptLocal': { input: { required: {} } },
             'MiniMaxH3ReferenceToVideo': { input: { required: {} } },
-          });
+          };
+          for (const node of omitObjectInfoNodes) {
+            delete objectInfo[node];
+          }
+          sendJson(response, 200, objectInfo);
           return;
         }
 

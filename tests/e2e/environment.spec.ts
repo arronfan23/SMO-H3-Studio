@@ -160,3 +160,37 @@ test('a healthy ready environment reopens the original studio on restart', async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('a ready environment whose backend lost required nodes cannot enter the studio', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'smo-environment-nodes-e2e-'));
+  const dataDirectory = join(root, 'data');
+  const outputDirectory = join(root, 'output');
+  const userDataDir = join(root, 'user');
+  const installRoot = join(root, 'environment');
+  await Promise.all([
+    mkdir(dataDirectory, { recursive: true }),
+    mkdir(outputDirectory, { recursive: true }),
+    mkdir(userDataDir, { recursive: true }),
+  ]);
+  await writeReadyEnvironment({ dataDirectory, installRoot, outputDirectory });
+  const comfy = await startComfyMock({
+    outputDirectory,
+    omitObjectInfoNodes: ['MiniMaxH3ReferenceToVideo'],
+  });
+  let app: ElectronApplication | undefined;
+  try {
+    app = await launchApp(userDataDir, dataDirectory, outputDirectory, comfy.baseUrl);
+    const page = await app.firstWindow();
+
+    // Health alone is not enough: the missing custom node must keep the
+    // studio locked behind the wizard, and recovery fails visibly because
+    // the fixture runtime has no verifiable files.
+    await expect(page.getByRole('heading', { name: '首次环境配置' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: '主导航' })).toHaveCount(0);
+    await expect(page.getByRole('alert')).toBeVisible();
+  } finally {
+    await app?.close();
+    await comfy.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

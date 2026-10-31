@@ -41,6 +41,7 @@ const api: SmoApi = {
     start: (input) => ipcRenderer.invoke('environment:start', input),
     retry: (input) => ipcRenderer.invoke('environment:retry', input),
     cancel: () => ipcRenderer.invoke('environment:cancel', {}),
+    validate: () => ipcRenderer.invoke('environment:validate', {}),
   },
   hardware: {
     detect: () => ipcRenderer.invoke('hardware:detect', {}),

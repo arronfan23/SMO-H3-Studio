@@ -103,6 +103,34 @@ describe('EnvironmentStore persistence', () => {
     await expect(store.load()).resolves.toEqual(config);
   });
 
+  test('roundtrips a configuration with a custom installRoot', async () => {
+    const { store } = await useStore();
+    const config = makeConfig({ installRoot: 'D:\\SMO-Custom-Root' });
+
+    await store.save(config);
+
+    await expect(store.load()).resolves.toEqual(config);
+  });
+
+  test.each([
+    'relative\\install',
+    'C:\\safe\\..\\escape',
+    'not a path',
+  ])('rejects an unsafe installRoot %s on save', async (installRoot) => {
+    const { store } = await useStore();
+
+    await expect(store.save(makeConfig({ installRoot }))).rejects.toThrow(
+      /path|installRoot/i,
+    );
+  });
+
+  test('rejects a stored configuration with an unsafe installRoot', async () => {
+    const { store, path } = await useStore();
+    await writeJson(path, makeConfig({ installRoot: 'C:\\safe\\..\\escape' }));
+
+    await expect(store.load()).rejects.toThrow(/path|installRoot/i);
+  });
+
   test('rejects malformed JSON instead of treating it as a missing configuration', async () => {
     const { store, path } = await useStore();
     await mkdir(dirname(path), { recursive: true });

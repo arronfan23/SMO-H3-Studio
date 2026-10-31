@@ -70,6 +70,39 @@ export type EnvironmentStartBackend = (
   input: EnvironmentBackendInput,
 ) => Promise<unknown>;
 
+/**
+ * A verified candidate backend awaiting commitment. The health and node
+ * checks have already passed, but the candidate has not replaced the active
+ * backend yet: `activate` performs the swap (only after the ready commit
+ * succeeds) and `rollback` reclaims the candidate without touching the
+ * active backend. Both settle the transaction; a settled transaction ignores
+ * further calls.
+ */
+export interface EnvironmentBackendTransaction {
+  systemStats: unknown;
+  objectInfo: Record<string, unknown>;
+  activate: () => Promise<void>;
+  rollback: () => Promise<void>;
+}
+
+/**
+ * Detects the optional transaction shape in a backend start result. Plain
+ * `{ systemStats, objectInfo }` results stay supported for adapters that
+ * activate internally.
+ */
+export function readBackendTransaction(
+  result: unknown,
+): EnvironmentBackendTransaction | undefined {
+  if (!isRecord(result)) return undefined;
+  if (
+    typeof result.activate === 'function' &&
+    typeof result.rollback === 'function'
+  ) {
+    return result as unknown as EnvironmentBackendTransaction;
+  }
+  return undefined;
+}
+
 export interface EnvironmentExtractInput {
   archivePath: string;
   stagingDirectory: string;
@@ -556,6 +589,31 @@ export class EnvironmentSetupService {
     return structuredClone(this.state);
   }
 
+  /** State read that waits for the persisted configuration restore. */
+  async getRestoredState(): Promise<EnvironmentState> {
+    await this.loaded;
+    return this.getState();
+  }
+
+  /**
+   * Marks a restored ready environment healthy. Called by the host only
+   * after the recorded backend passed a fresh health and required-node
+   * validation and its candidate was activated.
+   */
+  confirmBackendValidation(): EnvironmentState {
+    if (this.state.config?.status !== 'ready') {
+      throw new Error('Only a ready environment configuration can be validated');
+    }
+    this.state = {
+      ...this.state,
+      stage: 'ready',
+      active: false,
+      healthy: true,
+      error: null,
+    };
+    return this.getState();
+  }
+
   detect(installRoot = this.options.defaultInstallRoot): Promise<EnvironmentState> {
     if (this.inFlight) {
       return Promise.reject(new Error('Cannot detect hardware while environment setup is active'));
@@ -649,11 +707,28 @@ export class EnvironmentSetupService {
   private async restore(): Promise<void> {
     try {
       const config = await this.options.store.load();
-      const error =
+      let error =
         config && config.status !== 'ready'
           ? 'Previous environment installation was interrupted or failed; retry to resume.'
           : null;
-      this.state = { ...this.state, config, error, healthy: false };
+      let installRoot = this.state.installRoot;
+      if (config) {
+        try {
+          installRoot =
+            config.installRoot === undefined
+              ? // Legacy configs predate the installRoot field: the runtime
+                // always lives at <installRoot>/runtime/<topLevel>.
+                validateInstallRoot(win32.dirname(win32.dirname(config.runtimeRoot)))
+              : validateInstallRoot(config.installRoot);
+        } catch (rootError) {
+          // Never fall back to the default directory: an empty root makes any
+          // reinstall attempt fail validation instead of silently targeting
+          // the wrong location.
+          installRoot = '';
+          error = `Could not restore the recorded installRoot: ${errorMessage(rootError)}`;
+        }
+      }
+      this.state = { ...this.state, config, installRoot, error, healthy: false };
     } catch (error) {
       this.state = {
         ...this.state,
@@ -756,6 +831,8 @@ export class EnvironmentSetupService {
     let preserveReady = false;
     let previousConfig: EnvironmentConfig | null = null;
     let readyCommitted: EnvironmentConfig | undefined;
+    let transaction: EnvironmentBackendTransaction | undefined;
+    let transactionActivated = false;
 
     try {
       await this.loaded;
@@ -797,6 +874,7 @@ export class EnvironmentSetupService {
         runtimeRoot: layout.runtimeRoot,
         modelDirectory: layout.modelDirectory,
         outputDirectory: this.options.outputDirectory,
+        installRoot,
         profile: selection.profile,
         hardwareFingerprint: {
           gpu: hardware.gpu,
@@ -945,6 +1023,7 @@ export class EnvironmentSetupService {
         signal,
       });
       signal.throwIfAborted();
+      transaction = readBackendTransaction(result);
       const objectInfo = readObjectInfo(result);
       const missingNodes = REQUIRED_COMFY_NODES.filter(
         (node) => !Object.hasOwn(objectInfo, node),
@@ -957,6 +1036,12 @@ export class EnvironmentSetupService {
       const ready = await this.options.store.commitReady(candidate);
       readyCommitted = ready;
       signal.throwIfAborted();
+      if (transaction !== undefined) {
+        // The candidate only replaces the active backend once the ready
+        // state is durably committed and no cancellation arrived in between.
+        await transaction.activate();
+        transactionActivated = true;
+      }
       this.state = {
         ...this.state,
         config: ready,
@@ -974,6 +1059,9 @@ export class EnvironmentSetupService {
         active: false,
         healthy: false,
       };
+      if (transaction !== undefined && !transactionActivated) {
+        await transaction.rollback().catch(() => undefined);
+      }
       if (layout) await this.removeStaging(layout).catch(() => undefined);
       if (readyCommitted && candidate) {
         try {

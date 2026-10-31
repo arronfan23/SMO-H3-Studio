@@ -196,9 +196,9 @@ export function useEnvironment() {
 
       if (initial.config?.status === 'ready' && !initial.healthy) {
         try {
-          await window.smo.comfy.health();
+          const validated = await window.smo.environment.validate();
           if (!isCurrent()) return;
-          applyState({ ...initial, stage: 'ready', healthy: true, error: null });
+          applyState(validated);
         } catch {
           if (!isCurrent()) return;
           const executed = await retry();

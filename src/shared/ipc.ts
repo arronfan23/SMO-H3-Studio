@@ -68,6 +68,7 @@ export const IPC_CHANNELS = [
   'environment:start',
   'environment:retry',
   'environment:cancel',
+  'environment:validate',
   'hardware:detect',
   'hardware:recommend',
   'hardware:reset',
@@ -298,6 +299,7 @@ export function createIpcSchema() {
     requestSchema('environment:start', environmentStartSchema),
     requestSchema('environment:retry', environmentStartSchema),
     requestSchema('environment:cancel', emptyPayload),
+    requestSchema('environment:validate', emptyPayload),
     requestSchema('hardware:detect', emptyPayload),
     requestSchema('hardware:recommend', hardwareRecommendationSchema),
     requestSchema('hardware:reset', hardwareResetSchema),
@@ -368,6 +370,7 @@ export interface SmoApi {
     start(input: EnvironmentStartInput): Promise<EnvironmentState>;
     retry(input: EnvironmentStartInput): Promise<EnvironmentState>;
     cancel(): Promise<EnvironmentState>;
+    validate(): Promise<EnvironmentState>;
   };
   readonly hardware: {
     detect(): Promise<HardwareInfo>;

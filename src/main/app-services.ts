@@ -18,7 +18,7 @@ import {
   EnvironmentSetupService,
   REQUIRED_COMFY_NODES,
   type EnvironmentBackendInput,
-  type EnvironmentStartBackend,
+  type EnvironmentBackendTransaction,
 } from './environment-setup';
 import { EnvironmentStore, resolveEnvironmentPaths } from './environment-store';
 import { FileService, type FileDialog } from './files';
@@ -32,7 +32,11 @@ import { FileLlmConfigStore } from './llm-config';
 import { SkillsService } from './skills';
 import { Store } from './store';
 import { WorkService } from './works';
-import type { EnvironmentConfig, EnvironmentPaths } from '../shared/environment';
+import type {
+  EnvironmentConfig,
+  EnvironmentPaths,
+  EnvironmentState,
+} from '../shared/environment';
 import {
   MediaRegistry,
   registerMediaProtocol,
@@ -266,7 +270,7 @@ async function waitForStartupEvidence(input: {
  */
 export function createEnvironmentStartBackend(
   adapter: EnvironmentStartBackendAdapterOptions,
-): EnvironmentStartBackend {
+): (input: EnvironmentBackendInput) => Promise<EnvironmentBackendTransaction> {
   const createManager =
     adapter.createManager ??
     ((
@@ -366,13 +370,41 @@ export function createEnvironmentStartBackend(
       throw error;
     }
 
-    const previous = adapter.getActiveManager();
-    adapter.setActiveManager(candidate);
-    adapter.activePaths.runtimeRoot = input.runtimeRoot;
-    adapter.activePaths.modelDirectory = input.modelDirectory;
-    adapter.activePaths.outputDirectory = input.outputDirectory;
-    await previous?.close();
-    return { systemStats, objectInfo };
+    // The verified candidate does not replace the active backend here: the
+    // caller commits the ready configuration first and only then activates.
+    let settled = false;
+    const activate = async (): Promise<void> => {
+      if (settled) {
+        throw new Error('Environment backend transaction is already settled');
+      }
+      settled = true;
+      const previous = adapter.getActiveManager();
+      const previousPaths: EnvironmentPaths = { ...adapter.activePaths };
+      try {
+        adapter.setActiveManager(candidate);
+        adapter.activePaths.runtimeRoot = input.runtimeRoot;
+        adapter.activePaths.modelDirectory = input.modelDirectory;
+        adapter.activePaths.outputDirectory = input.outputDirectory;
+        await previous?.close();
+      } catch (error) {
+        if (previous !== undefined) {
+          adapter.setActiveManager(previous);
+        }
+        adapter.activePaths.runtimeRoot = previousPaths.runtimeRoot;
+        adapter.activePaths.modelDirectory = previousPaths.modelDirectory;
+        adapter.activePaths.outputDirectory = previousPaths.outputDirectory;
+        await candidate.terminate().catch(() => undefined);
+        throw error;
+      }
+    };
+    const rollback = async (): Promise<void> => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      await candidate.terminate();
+    };
+    return { systemStats, objectInfo, activate, rollback };
   };
 }
 
@@ -508,24 +540,68 @@ export async function createAppServices(
       },
       comfy,
     );
+    const startEnvironmentBackend = createEnvironmentStartBackend({
+      comfy,
+      baseUrl: comfyBaseUrl,
+      logPath: join(dataDirectory, 'logs', 'comfyui-backend.log'),
+      activePaths: activeEnvironmentPaths,
+      getActiveManager: () => activeComfyProcess,
+      setActiveManager: (manager) => {
+        activeComfyProcess = manager;
+      },
+    });
     const setup = new EnvironmentSetupService({
       store: environmentStore,
       manifest: environmentManifest,
       defaultInstallRoot: dataDirectory,
       outputDirectory,
       detectHardware: (installRoot) => detectHardware(undefined, installRoot),
-      startBackend: createEnvironmentStartBackend({
-        comfy,
-        baseUrl: comfyBaseUrl,
-        logPath: join(dataDirectory, 'logs', 'comfyui-backend.log'),
-        activePaths: activeEnvironmentPaths,
-        getActiveManager: () => activeComfyProcess,
-        setActiveManager: (manager) => {
-          activeComfyProcess = manager;
-        },
-      }),
+      startBackend: startEnvironmentBackend,
     });
     environmentSetup = setup;
+    /**
+     * Re-validates a restored ready environment: the recorded backend must
+     * prove health and every required node before it becomes active. Only a
+     * ready config may be validated, and the candidate is activated only
+     * after all checks pass; any failure leaves the active backend untouched
+     * and the renderer falls back to a full retry.
+     */
+    const validateEnvironment = async (): Promise<EnvironmentState> => {
+      const state = await setup.getRestoredState();
+      const config = state.config;
+      if (state.active) {
+        throw new Error('Cannot validate the environment while setup is active');
+      }
+      if (config === null || config.status !== 'ready') {
+        throw new Error('Environment validation requires a ready configuration');
+      }
+      const runtime = environmentManifest.runtimes[config.runtimeId];
+      if (runtime === undefined) {
+        throw new Error(
+          `The environment manifest has no runtime ${config.runtimeId}`,
+        );
+      }
+      const resolveRuntimePath = (path: string) =>
+        join(config.runtimeRoot, ...path.split('/').slice(1));
+      const transaction = await startEnvironmentBackend({
+        runtimeRoot: config.runtimeRoot,
+        modelDirectory: config.modelDirectory,
+        outputDirectory: config.outputDirectory,
+        profile: config.profile,
+        runtime,
+        pythonPath: resolveRuntimePath(runtime.pythonPath),
+        launchScript: resolveRuntimePath(runtime.launchScript),
+        ffprobePath: resolveRuntimePath(runtime.ffprobePath),
+        signal: new AbortController().signal,
+      });
+      try {
+        await transaction.activate();
+      } catch (error) {
+        await transaction.rollback().catch(() => undefined);
+        throw error;
+      }
+      return setup.confirmBackendValidation();
+    };
     // The ffprobe binary follows the active runtime; explicit env overrides
     // keep their original precedence.
     const durationReader: AudioDurationReader = (filePath) => {
@@ -599,6 +675,7 @@ export async function createAppServices(
         start: (input) => setup.start(input),
         retry: (input) => setup.retry(input),
         cancel: () => setup.cancel(),
+        validate: () => validateEnvironment(),
       },
       hardware: {
         detect: () => detectHardware(undefined, outputDirectory),
