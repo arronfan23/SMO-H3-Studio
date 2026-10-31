@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { FileAudio, Sparkles, Video } from 'lucide-react';
 import { SKILL_NAMES, type SkillName } from '../shared/skills';
 import {
@@ -13,6 +13,18 @@ import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName } from './ui';
 
 type PromptTab = 'original' | 'polished';
+
+interface PolishContext {
+  originalText: string;
+  audioPath: string;
+  trimStart: number;
+  duration: number | '';
+}
+
+interface PendingPolish {
+  id: number;
+  context: PolishContext;
+}
 
 export function AudioDigitalHumanForm({
   avatarId,
@@ -44,6 +56,14 @@ export function AudioDigitalHumanForm({
   const [jobId, setJobId] = useState<string | null>(null);
   const { url: audioUrl, error: mediaError } = useMediaUrl(audioPath);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const originalTabRef = useRef<HTMLButtonElement | null>(null);
+  const polishedTabRef = useRef<HTMLButtonElement | null>(null);
+  const operationRef = useRef<'polish' | 'generation' | null>(null);
+  const polishRequestIdRef = useRef(0);
+  const pendingPolishRef = useRef<PendingPolish | null>(null);
+  const currentPolishContextRef = useRef<PolishContext | null>(null);
+  currentPolishContextRef.current =
+    audioPath === null ? null : { originalText, audioPath, trimStart, duration };
 
   // Pause any playing preview when the panel or the whole studio page is hidden.
   useEffect(() => {
@@ -68,6 +88,12 @@ export function AudioDigitalHumanForm({
     try {
       const selected = await window.smo.files.selectAudio();
       if (selected !== null) {
+        polishRequestIdRef.current += 1;
+        pendingPolishRef.current = null;
+        if (operationRef.current === 'polish') {
+          operationRef.current = null;
+        }
+        setPolishing(false);
         setAudioPath(selected);
         setAudioSeconds(null);
         setDuration(0);
@@ -109,13 +135,39 @@ export function AudioDigitalHumanForm({
     return { audioPath, duration: resolvedDuration };
   };
 
+  const isCurrentPolish = (request: PendingPolish): boolean => {
+    const current = currentPolishContextRef.current;
+    return (
+      pendingPolishRef.current?.id === request.id &&
+      current !== null &&
+      current.originalText === request.context.originalText &&
+      current.audioPath === request.context.audioPath &&
+      Object.is(current.trimStart, request.context.trimStart) &&
+      Object.is(current.duration, request.context.duration)
+    );
+  };
+
   const polish = async (): Promise<void> => {
+    if (operationRef.current !== null) {
+      return;
+    }
     const text = originalText.trim();
     const clip = resolveValidClip(text);
     if (clip === null) {
       return;
     }
 
+    const request: PendingPolish = {
+      id: ++polishRequestIdRef.current,
+      context: {
+        originalText,
+        audioPath: clip.audioPath,
+        trimStart,
+        duration,
+      },
+    };
+    pendingPolishRef.current = request;
+    operationRef.current = 'polish';
     setPolishing(true);
     setError(null);
     try {
@@ -127,17 +179,32 @@ export function AudioDigitalHumanForm({
         referenceLabels: ['<Picture 1>', '<Audio 1>'],
         skill,
       });
+      if (!isCurrentPolish(request)) {
+        return;
+      }
       setPolishedText(result.text);
       setActiveTab('polished');
     } catch (polishError) {
+      if (!isCurrentPolish(request)) {
+        return;
+      }
       setActiveTab('original');
       setError(errorMessage(polishError));
     } finally {
-      setPolishing(false);
+      if (pendingPolishRef.current?.id === request.id) {
+        pendingPolishRef.current = null;
+        if (operationRef.current === 'polish') {
+          operationRef.current = null;
+        }
+        setPolishing(false);
+      }
     }
   };
 
   const startGeneration = async (): Promise<void> => {
+    if (operationRef.current !== null) {
+      return;
+    }
     const prompt = (activeTab === 'polished' ? polishedText : originalText).trim();
     const clip = resolveValidClip(prompt);
     if (clip === null) {
@@ -148,6 +215,7 @@ export function AudioDigitalHumanForm({
       return;
     }
 
+    operationRef.current = 'generation';
     setSubmitting(true);
     setError(null);
     setJobId(null);
@@ -171,8 +239,45 @@ export function AudioDigitalHumanForm({
     } catch (startError) {
       setError(errorMessage(startError));
     } finally {
+      operationRef.current = null;
       setSubmitting(false);
     }
+  };
+
+  const focusPromptTab = (tab: PromptTab): void => {
+    setActiveTab(tab);
+    (tab === 'original' ? originalTabRef : polishedTabRef).current?.focus();
+  };
+
+  const handlePromptTabKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    const availableTabs: PromptTab[] =
+      polishedText.length > 0 ? ['original', 'polished'] : ['original'];
+    const currentTab: PromptTab =
+      event.target === polishedTabRef.current ? 'polished' : 'original';
+    const currentIndex = availableTabs.indexOf(currentTab);
+    if (currentIndex < 0) {
+      return;
+    }
+
+    let nextIndex: number;
+    switch (event.key) {
+      case 'ArrowLeft':
+        nextIndex = (currentIndex - 1 + availableTabs.length) % availableTabs.length;
+        break;
+      case 'ArrowRight':
+        nextIndex = (currentIndex + 1) % availableTabs.length;
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = availableTabs.length - 1;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    focusPromptTab(availableTabs[nextIndex]);
   };
 
   return (
@@ -238,23 +343,32 @@ export function AudioDigitalHumanForm({
       />
 
       <div className="prompt-editor">
-        <div className="tab-list" role="tablist" aria-label="音频提示词版本">
+        <div
+          className="tab-list"
+          role="tablist"
+          aria-label="音频提示词版本"
+          onKeyDown={handlePromptTabKeyDown}
+        >
           <button
+            ref={originalTabRef}
             id="audio-original-tab"
             type="button"
             role="tab"
             aria-selected={activeTab === 'original'}
             aria-controls="audio-original-panel"
+            tabIndex={activeTab === 'original' ? 0 : -1}
             onClick={() => setActiveTab('original')}
           >
             原文
           </button>
           <button
+            ref={polishedTabRef}
             id="audio-polished-tab"
             type="button"
             role="tab"
             aria-selected={activeTab === 'polished'}
             aria-controls="audio-polished-panel"
+            tabIndex={activeTab === 'polished' ? 0 : -1}
             disabled={polishedText.length === 0}
             onClick={() => setActiveTab('polished')}
           >
@@ -279,7 +393,13 @@ export function AudioDigitalHumanForm({
               id="audio-polished-text"
               rows={7}
               value={polishedText}
-              onChange={(event) => setPolishedText(event.target.value)}
+              onChange={(event) => {
+                const value = event.target.value;
+                setPolishedText(value);
+                if (value.length === 0) {
+                  focusPromptTab('original');
+                }
+              }}
             />
           </div>
         )}
@@ -333,12 +453,12 @@ export function AudioDigitalHumanForm({
           />
         </div>
       </div>
-      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing}>
+      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting}>
         <Sparkles size={16} aria-hidden="true" />
         {polishing ? '正在润色…' : 'AI 润色'}
       </button>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <button className="button button-generate" type="submit" disabled={submitting}>
+      <button className="button button-generate" type="submit" disabled={polishing || submitting}>
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>

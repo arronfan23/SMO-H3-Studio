@@ -49,7 +49,7 @@ async function createTestMedia(directory: string): Promise<{
     '-f',
     'lavfi',
     '-i',
-    'sine=frequency=1000:duration=2',
+    'sine=frequency=1000:duration=8',
     audioPath,
   ]);
   return { imagePath, audioPath };
@@ -519,6 +519,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   test('audio digital human', async () => {
     const avatarName = 'E2E Audio Avatar';
     await createAvatar(page!, avatarName);
+    await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!, avatarName);
     await page!.click('#audio-mode-tab');
     await page!.click('button:has-text("选择音频")');
@@ -530,6 +531,30 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     });
 
     await page!.fill('#audio-prompt', 'She speaks with a calm expression.');
+    await page!.fill('#audio-trim', '1');
+    await page!.fill('#audio-duration', '6');
+    const requestsBefore = llmMock.requests.length;
+    await page!.click('#audio-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#audio-polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await expect(page!.locator('#audio-polished-tab')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    const editedPrompt = 'Edited audio digital human prompt used for generation.';
+    await page!.fill('#audio-polished-text', editedPrompt);
+
+    const llmRequest = llmMock.requests
+      .slice(requestsBefore)
+      .find((request) => request.method === 'POST' && request.url === '/v1/chat/completions');
+    expect(llmRequest).toBeDefined();
+    const llmBody = JSON.parse(llmRequest!.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const llmUserContent = llmBody.messages.find((message) => message.role === 'user')?.content;
+    expect(llmUserContent).toContain('Reference labels: <Picture 1>, <Audio 1>.');
+    expect(llmUserContent).not.toContain('audioPath');
+    expect(llmUserContent).not.toContain(launchOptions.fileDialogPaths[2]);
+
     const previousCount = comfyMock.submittedPromptIds.length;
     await page!.click('#audio-mode-panel button:has-text("生成视频")');
     const jobLocator = page!.locator(
@@ -539,6 +564,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     const jobId = (await jobLocator.textContent())!;
     await waitForStableStatus(page!, jobId, 'done');
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
+    const submitted = comfyMock.submittedPrompts[previousCount];
+    const promptNode = submitted.prompt['42'] as { inputs: { prompt: string } };
+    expect(promptNode.inputs.prompt).toBe(editedPrompt);
   });
 
   test('works list shows completed work and filters by status and mode', async () => {

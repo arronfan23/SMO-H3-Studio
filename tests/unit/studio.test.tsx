@@ -761,6 +761,252 @@ describe('audio digital human studio', () => {
   });
 
   test.each([
+    { label: '动作/画面提示词', value: 'pending 后修改的原文' },
+    { label: '起始截取（秒）', value: '2' },
+    { label: '截取时长（秒）', value: '5' },
+  ])('discards a stale polish response after changing $label', async ({ label, value }) => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\stale-context.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '发起润色时的原文' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    fireEvent.change(panel.getByLabelText(label), { target: { value } });
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '不应覆盖新草稿的旧润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByRole('textbox', { name: '润色结果' })).not.toBeInTheDocument();
+    expect(panel.getByLabelText(label)).toHaveValue(
+      label === '动作/画面提示词' ? value : Number(value),
+    );
+  });
+
+  test('invalidates an old request when audio changes and only applies the newest polish', async () => {
+    const resolvers: Array<(value: PolishResult) => void> = [];
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\first-pending.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '连续润色的原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(smo.llm.polish).toHaveBeenCalledTimes(1);
+
+    smo.files.selectAudio.mockResolvedValueOnce('G:\\recordings\\second-pending.mp3');
+    fireEvent.click(panel.getByRole('button', { name: '选择音频' }));
+    expect(await panel.findByText('second-pending.mp3')).toBeInTheDocument();
+    const secondAudio = panel.getByLabelText('所选音频');
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(smo.llm.polish).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolvers[0]({
+        text: '第一个音频的过期结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '正在润色…' })).toBeDisabled();
+
+    await act(async () => {
+      resolvers[1]({
+        text: '第二个音频的最新结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '第二个音频的最新结果',
+    );
+  });
+
+  test('blocks generation entry while a polish request is pending', async () => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\polish-exclusive.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '润色期间不能生成' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    const generateButton = panel.getByRole('button', { name: '生成视频' });
+    expect(generateButton).toBeDisabled();
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '互斥测试润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toBeInTheDocument();
+  });
+
+  test('blocks polish entry while generation is pending', async () => {
+    let resolveStart: ((value: { id: string }) => void) | undefined;
+    smo.jobs.start.mockImplementation(
+      () =>
+        new Promise<{ id: string }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\generation-exclusive.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '生成期间不能润色' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    const polishButton = panel.getByRole('button', { name: 'AI 润色' });
+    expect(polishButton).toBeDisabled();
+    fireEvent.click(polishButton);
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveStart?.({ id: 'exclusive-job' });
+    });
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
+  });
+
+  test('supports keyboard tabs and returns to original when polished text is cleared', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '可键盘切换的润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio('G:\\recordings\\keyboard-tabs.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '键盘 tabs 原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toBeInTheDocument();
+    const originalTab = panel.getByRole('tab', { name: '原文' });
+    const polishedTab = panel.getByRole('tab', { name: '润色结果' });
+
+    fireEvent.click(originalTab);
+    expect(originalTab).toHaveAttribute('tabindex', '0');
+    expect(polishedTab).toHaveAttribute('tabindex', '-1');
+    fireEvent.keyDown(originalTab, { key: 'ArrowRight' });
+    expect(polishedTab).toHaveFocus();
+    expect(polishedTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(polishedTab, { key: 'ArrowRight' });
+    expect(originalTab).toHaveFocus();
+    fireEvent.keyDown(originalTab, { key: 'ArrowLeft' });
+    expect(polishedTab).toHaveFocus();
+    fireEvent.keyDown(polishedTab, { key: 'Home' });
+    expect(originalTab).toHaveFocus();
+    fireEvent.keyDown(originalTab, { key: 'End' });
+    expect(polishedTab).toHaveFocus();
+    expect(polishedTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.change(panel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '' },
+    });
+    expect(originalTab).toHaveAttribute('aria-selected', 'true');
+    expect(originalTab).toHaveAttribute('tabindex', '0');
+    expect(originalTab).toHaveFocus();
+    expect(polishedTab).toBeDisabled();
+    expect(polishedTab).toHaveAttribute('tabindex', '-1');
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('键盘 tabs 原文');
+  });
+
+  test('starts only one job for repeated generation clicks', async () => {
+    await renderLoadedAudio('G:\\recordings\\duplicate-generation.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '重复点击只生成一次' },
+    });
+    const generateButton = panel.getByRole('button', { name: '生成视频' });
+
+    act(() => {
+      fireEvent.click(generateButton);
+      fireEvent.click(generateButton);
+    });
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps audio, original text, and options when generation fails', async () => {
+    const audioPath = 'G:\\recordings\\generation-failure.mp3';
+    smo.jobs.start.mockRejectedValue(new Error('生成服务不可用'));
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '生成失败后保留原文' },
+    });
+    fireEvent.change(panel.getByLabelText('视频风格（Skill）'), {
+      target: { value: 'auto' },
+    });
+    fireEvent.change(panel.getByLabelText('H3 模型'), { target: { value: 'bf16' } });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1.25' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('生成服务不可用');
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('生成失败后保留原文');
+    expect(panel.getByText('generation-failure.mp3')).toBeInTheDocument();
+    expect(panel.getByLabelText('所选音频')).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(audioPath)}`,
+    );
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('auto');
+    expect(panel.getByLabelText('H3 模型')).toHaveValue('bf16');
+    expect(panel.getByLabelText('起始截取（秒）')).toHaveValue(1.25);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6);
+    expect(panel.getByRole('button', { name: '生成视频' })).toBeEnabled();
+  });
+
+  test.each([
     { scenario: 'blank', trimStart: '' },
     { scenario: 'out-of-range', trimStart: '13' },
   ])('shows generic automatic duration feedback when trim start is $scenario', async ({ trimStart }) => {
