@@ -13,7 +13,7 @@
   <a href="https://github.com/arronfan23/SMO-H3-Studio/releases/latest"><img alt="最新版本" src="https://img.shields.io/github/v/release/arronfan23/SMO-H3-Studio?display_name=tag" /></a>
   <a href="./LICENSE"><img alt="许可证 MIT" src="https://img.shields.io/badge/license-MIT-green" /></a>
   <img alt="平台 Windows" src="https://img.shields.io/badge/platform-Windows-blue" />
-  <a href="https://github.com/arronfan23/SMO-H3-Runtime/releases/tag/runtime-v1"><img alt="运行环境 runtime-v1" src="https://img.shields.io/badge/runtime-v1-2f7ea6" /></a>
+  <a href="https://github.com/arronfan23/SMO-H3-Studio/releases/tag/runtime-v1"><img alt="运行环境 runtime-v1" src="https://img.shields.io/badge/runtime-v1-2f7ea6" /></a>
 </p>
 
 ---
@@ -52,7 +52,7 @@
 
 1. 从 [Releases](https://github.com/arronfan23/SMO-H3-Studio/releases/latest) 下载 `SMO.H3-Studio-<版本>.exe`（Windows portable，无需安装）。
 2. 首次打开会自动检测硬件，并进入环境配置向导。
-3. 确认性能档位与安装目录后开始安装。运行环境从 [SMO-H3-Runtime](https://github.com/arronfan23/SMO-H3-Runtime/releases/tag/runtime-v1) 下载，模型文件由各发布方原始链接提供并逐一校验。
+3. 确认性能档位与安装目录后开始安装。运行环境从 [runtime-v1 Release](https://github.com/arronfan23/SMO-H3-Studio/releases/tag/runtime-v1) 下载，模型文件由各发布方原始链接提供并逐一校验。
 4. 安装完成后自动进入制作台。
 
 首次安装需要下载运行包与模型文件，请保持网络畅通并预留充足磁盘空间。安装中断后可继续，已校验的文件不会重复下载。
@@ -77,8 +77,8 @@ npx playwright test tests/e2e/screenshots.spec.ts
 
 ## 运行环境与模型来源
 
-- 运行包分块与清单：[SMO-H3-Runtime](https://github.com/arronfan23/SMO-H3-Runtime)
-- 模型文件不上传到本仓库，安装时从 Hugging Face 各发布方原始地址下载并校验大小与 SHA256，详见 [第三方声明](https://github.com/arronfan23/SMO-H3-Runtime/blob/main/THIRD_PARTY_NOTICES.md)。
+- 运行包分块与清单：[runtime-v1 Release](https://github.com/arronfan23/SMO-H3-Studio/releases/tag/runtime-v1)
+- 模型文件不上传到本仓库，安装时从 Hugging Face 各发布方原始地址下载并校验大小与 SHA256，详见 [第三方声明](./THIRD_PARTY_NOTICES.md)。
 
 ## 技术栈
 

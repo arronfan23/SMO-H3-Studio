@@ -22,7 +22,7 @@ const projectRoot = fileURLToPath(new URL('../../', import.meta.url));
 const packageScript = join(projectRoot, 'scripts/package-runtime.ps1');
 const builderScript = join(projectRoot, 'scripts/build-environment-manifest.mjs');
 const releaseBaseUrl =
-  'https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1';
+  'https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1';
 
 interface RuntimeMetadata {
   id: 'sm89' | 'sm120';

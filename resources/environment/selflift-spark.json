@@ -6,19 +6,19 @@
       "displayName": "SM89 compatibility candidate (NVIDIA RTX 30/40 series)",
       "archiveParts": [
         {
-          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part1",
+          "url": "https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part1",
           "path": "ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part1",
           "size": 1900000000,
           "sha256": "AEBC84D5367ECE8E241AE291C0F8CAEBF07E9E98E9B65855EE910AB08C739433"
         },
         {
-          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part2",
+          "url": "https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part2",
           "path": "ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part2",
           "size": 1900000000,
           "sha256": "E39EE6FB3E3FCC518B3E895D505047DA16241FC420848662F526B0B3D72070FC"
         },
         {
-          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part3",
+          "url": "https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part3",
           "path": "ComfyUI_SelfLift_Spark_SM89_CUDA130_NoModels.zip.part3",
           "size": 754044560,
           "sha256": "0BBAA7EF01B1E8B385729BBCFECDDDBA023EEA23C343FDA17D1596451F062078"
@@ -36,19 +36,19 @@
       "displayName": "SM120 (NVIDIA RTX 50 series)",
       "archiveParts": [
         {
-          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part1",
+          "url": "https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part1",
           "path": "ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part1",
           "size": 1900000000,
           "sha256": "8C73DEEB98EFC0498903C88C2776E474EC88EA19E26D16B373B1220FDF050BB3"
         },
         {
-          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part2",
+          "url": "https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part2",
           "path": "ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part2",
           "size": 1900000000,
           "sha256": "5B096872BF1FB33DB3640D0DF0016CBF6A45DEB7041ED1135D071C5BF5F27C9B"
         },
         {
-          "url": "https://github.com/arronfan23/SMO-H3-Runtime/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part3",
+          "url": "https://github.com/arronfan23/SMO-H3-Studio/releases/download/runtime-v1/ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part3",
           "path": "ComfyUI_SelfLift_Spark_SM120_CUDA130_NoModels.zip.part3",
           "size": 753973576,
           "sha256": "CD32CA3D6CDACD0AF25963943B761C6289737570C845E1240BA5B53E0F4CB10A"
