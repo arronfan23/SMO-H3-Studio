@@ -30,6 +30,7 @@ export function AvatarsPage({
   const [name, setName] = useState('');
   const [photoPath, setPhotoPath] = useState<string | null>(null);
   const [selecting, setSelecting] = useState(false);
+  const [authorizing, setAuthorizing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -40,6 +41,9 @@ export function AvatarsPage({
   const [mutationError, setMutationError] = useState<string | null>(null);
   const { url: photoUrl, error: photoUrlError } = useMediaUrl(photoPath);
   const mountedRef = useRef(true);
+  // Monotonic id for photo-selection operations (dialog select, drag-drop,
+  // remove); only the latest request may update photoPath or pending flags.
+  const photoRequestRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -49,25 +53,34 @@ export function AvatarsPage({
   }, []);
 
   const selectPhoto = async (): Promise<void> => {
+    const requestId = ++photoRequestRef.current;
+    setAuthorizing(false);
     setSelecting(true);
     setError(null);
     try {
       const selected = await window.smo.files.selectImage();
-      if (mountedRef.current && selected !== null) {
+      if (
+        mountedRef.current &&
+        photoRequestRef.current === requestId &&
+        selected !== null
+      ) {
         setPhotoPath(selected);
       }
     } catch (selectError) {
-      if (mountedRef.current) {
+      if (mountedRef.current && photoRequestRef.current === requestId) {
         setError(errorMessage(selectError));
       }
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && photoRequestRef.current === requestId) {
         setSelecting(false);
       }
     }
   };
 
   const save = async (): Promise<void> => {
+    if (selecting || authorizing) {
+      return;
+    }
     if (name.trim().length === 0 || photoPath === null) {
       setError('请填写模特名称并选择照片。');
       return;
@@ -95,6 +108,9 @@ export function AvatarsPage({
   };
 
   const removePhoto = (): void => {
+    photoRequestRef.current += 1;
+    setSelecting(false);
+    setAuthorizing(false);
     setPhotoPath(null);
     setError(null);
   };
@@ -102,31 +118,40 @@ export function AvatarsPage({
   const handlePhotoDrop = (event: DragEvent<HTMLDivElement>): void => {
     event.preventDefault();
     setDropActive(false);
+    const requestId = ++photoRequestRef.current;
+    setSelecting(false);
     const files = Array.from(event.dataTransfer.files);
     if (files.length !== 1) {
+      setAuthorizing(false);
       setError('一次只能拖入一张照片。');
       return;
     }
     const file = files[0];
     const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
     if (!DROPPED_IMAGE_EXTENSIONS.has(extension)) {
+      setAuthorizing(false);
       setError('仅支持 PNG、JPG、JPEG 或 WebP 图片。');
       return;
     }
     setError(null);
+    setAuthorizing(true);
     void (async () => {
       try {
         // The renderer never trusts the dropped path directly: the main
         // process must authorize it before it becomes the photo path.
         const droppedPath = window.smo.files.getDroppedFilePath(file);
         const authorized = await window.smo.files.authorizeDroppedImage(droppedPath);
-        if (mountedRef.current) {
+        if (mountedRef.current && photoRequestRef.current === requestId) {
           setPhotoPath(authorized);
           setNotice(null);
         }
       } catch (dropError) {
-        if (mountedRef.current) {
+        if (mountedRef.current && photoRequestRef.current === requestId) {
           setError(errorMessage(dropError));
+        }
+      } finally {
+        if (mountedRef.current && photoRequestRef.current === requestId) {
+          setAuthorizing(false);
         }
       }
     })();
@@ -284,7 +309,11 @@ export function AvatarsPage({
           </div>
           {error && <p className="form-error" role="alert">{error}</p>}
           {notice && <p className="form-notice" role="status">{notice}</p>}
-          <button className="button button-primary" type="submit" disabled={saving}>
+          <button
+            className="button button-primary"
+            type="submit"
+            disabled={saving || selecting || authorizing}
+          >
             <Plus size={16} aria-hidden="true" />
             {saving ? '正在保存…' : '保存模特'}
           </button>

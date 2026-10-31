@@ -349,6 +349,141 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
   });
 
+  test('discards a stale drop authorization that resolves after a newer drop', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    let resolveFirst!: (path: string) => void;
+    smo.files.authorizeDroppedImage
+      .mockImplementationOnce(
+        () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
+      )
+      .mockImplementationOnce(async (path: string) => path);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'first.png')] } });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['b'], 'second.png')] } });
+
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\second.png')}`,
+    );
+
+    await act(async () => {
+      resolveFirst('G:\\dropped\\first.png');
+    });
+
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\second.png')}`,
+    );
+    expect(screen.getByText('second.png')).toBeInTheDocument();
+    expect(screen.queryByText('first.png')).not.toBeInTheDocument();
+  });
+
+  test('ignores a drop authorization that resolves after the photo is removed', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\original.png');
+    let resolveAuth!: (path: string) => void;
+    smo.files.authorizeDroppedImage.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'replacement.png')] },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '移除照片' }));
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveAuth('G:\\dropped\\replacement.png');
+    });
+
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('img', { name: '待保存模特照片预览' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('replacement.png')).not.toBeInTheDocument();
+  });
+
+  test('a newer selection invalidates a pending drop authorization', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\reselected.png');
+    let resolveAuth!: (path: string) => void;
+    smo.files.authorizeDroppedImage.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], 'dropped.png')] } });
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\photos\\reselected.png')}`,
+    );
+
+    await act(async () => {
+      resolveAuth('G:\\dropped\\dropped.png');
+    });
+
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\photos\\reselected.png')}`,
+    );
+    expect(screen.getByText('reselected.png')).toBeInTheDocument();
+    expect(screen.queryByText('dropped.png')).not.toBeInTheDocument();
+  });
+
+  test('blocks saving while a drop authorization is pending', async () => {
+    const created: Avatar = {
+      ...avatar,
+      id: 'avatar-pending',
+      name: '待定模特',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\pending.png',
+    };
+    smo.avatars.list.mockResolvedValue([]);
+    smo.avatars.create.mockResolvedValue(created);
+    let resolveAuth!: (path: string) => void;
+    smo.files.authorizeDroppedImage.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '待定模特' } });
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], 'pending.png')] } });
+
+    const saveButton = screen.getByRole('button', { name: '保存模特' });
+    expect(saveButton).toBeDisabled();
+    fireEvent.submit(saveButton.closest('form') as HTMLFormElement);
+    expect(smo.avatars.create).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveAuth('G:\\dropped\\pending.png');
+    });
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+    expect(smo.avatars.create).toHaveBeenCalledWith({
+      name: '待定模特',
+      photoPath: 'G:\\dropped\\pending.png',
+    });
+  });
+
   test('clears the form error when removing the selected photo', async () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\clear-error.png');
