@@ -296,6 +296,8 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
   test.each([
     '旁白在第10秒结束，最后2秒无旁白，仅保留环境声。',
     '对白在第10秒结束，最后2秒没有对话，仅保留音乐。',
+    '旁白持续到第9秒结束，最后2秒无旁白。',
+    '旁白持续到第10秒结束，最后2秒无旁白。',
     '最后2秒无旁白，前10秒有对白。',
   ])('accepts a valid tail after an earlier speech schedule: %s', (declaration) => {
     const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
