@@ -326,6 +326,8 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
     '最后2秒仍有对话，仅保留音乐。',
     '最后2秒无旁白，但对白继续。',
     '旁白持续到视频结束，最后2秒无旁白。',
+    '旁白从第8秒持续到视频结束，最后2秒无旁白。',
+    '旁白从第10秒持续到视频结束，最后2秒无旁白。',
     '最后2秒无旁白，第11秒仍有对白。',
     'The last 2 seconds still contain dialogue and narration; only music remains.',
   ])('rejects speech that continues into the final two seconds: %s', (declaration) => {

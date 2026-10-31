@@ -243,9 +243,13 @@ function hasChineseSpeechBeyondTail(clause: string, duration: number): boolean {
   if (!hasChineseVocalConflict(clause)) {
     return false;
   }
+  const continuesThroughEnd = CHINESE_SPEECH_THROUGH_END_PATTERN.test(clause);
+  if (continuesThroughEnd) {
+    return true;
+  }
   const time = CHINESE_NUMBERED_TIME_PATTERN.exec(clause);
   if (!time) {
-    return CHINESE_SPEECH_THROUGH_END_PATTERN.test(clause);
+    return false;
   }
   const second = Number(time[1]);
   const tailStart = Math.max(0, duration - 2);
