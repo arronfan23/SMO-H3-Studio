@@ -50,6 +50,7 @@ const ONLY_ALLOWED_TAIL_PATTERN = new RegExp(
 );
 const CHINESE_TAIL_PERIOD_PATTERN = /(?:最后|结尾)(?:的)?\s*(?:2|两)\s*秒/;
 const CHINESE_OTHER_TIME_PERIOD_PATTERN = /(?:前|第)\s*\d+(?:\.\d+)?\s*秒/;
+const CHINESE_NUMBERED_TIME_PATTERN = /第\s*(\d+(?:\.\d+)?)\s*秒/;
 const CHINESE_VOCAL_WORDS = String.raw`(?:旁白|对白|对话|语音|人声|配音|解说|歌声|说话|讲话|朗读)`;
 const CHINESE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
   String.raw`(?:没有|无|不包含|不含|不再包含|不再有)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS}(?:\s*(?:、|/|或|和|与)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS})*`,
@@ -59,6 +60,9 @@ const CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
 );
 const CHINESE_ONLY_ALLOWED_TAIL_PATTERN =
   /(?:仅|只)(?:保留|剩下|留下|有)?[^。！？\n]{0,60}(?:环境声|环境音|音乐|画面)/;
+const CHINESE_SPEECH_END_PATTERN = /(?:结束|停止|终止|完结)/;
+const CHINESE_SPEECH_THROUGH_END_PATTERN =
+  /(?:持续|延续|直到|直至|贯穿|一直)[^，。；\n]{0,30}(?:结束|结尾|末尾|收尾|最后)/;
 
 const INTERACTIVE_OUTPUT_PATTERNS = [
   /^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:required\s+)?(?:clarifications?|questions?|next steps?|start gate|approval|confirmation)\b/im,
@@ -224,7 +228,34 @@ function maskNegatedTailVocals(text: string): string {
   );
 }
 
-function hasNonNarrationTail(text: string): boolean {
+function hasChineseVocalConflict(text: string): boolean {
+  const remaining = text.replace(
+    new RegExp(CHINESE_NEGATED_TAIL_VOCAL_PATTERN.source, 'g'),
+    '',
+  );
+  return (
+    CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN.test(text) ||
+    new RegExp(CHINESE_VOCAL_WORDS).test(remaining)
+  );
+}
+
+function hasChineseSpeechBeyondTail(clause: string, duration: number): boolean {
+  if (!hasChineseVocalConflict(clause)) {
+    return false;
+  }
+  const time = CHINESE_NUMBERED_TIME_PATTERN.exec(clause);
+  if (!time) {
+    return CHINESE_SPEECH_THROUGH_END_PATTERN.test(clause);
+  }
+  const second = Number(time[1]);
+  const tailStart = Math.max(0, duration - 2);
+  if (second < tailStart) {
+    return false;
+  }
+  return second > tailStart || !CHINESE_SPEECH_END_PATTERN.test(clause);
+}
+
+function hasNonNarrationTail(text: string, duration: number): boolean {
   const scope = stripDialogueAndVisibleText(text);
   let foundValidDeclaration = false;
   for (const sentence of scope.split(/(?<=[。！？])|[.!?]\s+|\n+/)) {
@@ -232,6 +263,11 @@ function hasNonNarrationTail(text: string): boolean {
       continue;
     }
     const clauses = sentence.split(/[,，;；]+/);
+    for (const clause of clauses) {
+      if (hasChineseSpeechBeyondTail(clause, duration)) {
+        return false;
+      }
+    }
     for (let index = 0; index < clauses.length; index += 1) {
       if (!CHINESE_TAIL_PERIOD_PATTERN.test(clauses[index])) {
         continue;
@@ -244,14 +280,7 @@ function hasNonNarrationTail(text: string): boolean {
         tailClauses.push(clause);
       }
       const tailScope = tailClauses.join('，');
-      const remaining = tailScope.replace(
-        new RegExp(CHINESE_NEGATED_TAIL_VOCAL_PATTERN.source, 'g'),
-        '',
-      );
-      if (
-        CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN.test(tailScope) ||
-        new RegExp(CHINESE_VOCAL_WORDS).test(remaining)
-      ) {
+      if (hasChineseVocalConflict(tailScope)) {
         return false;
       }
       if (
@@ -438,7 +467,7 @@ export function validatePrompt(
     issues.push('Visible text was modified');
   }
 
-  if (/<d>[\s\S]*?<\/d>/.test(stripped) && !hasNonNarrationTail(stripped)) {
+  if (/<d>[\s\S]*?<\/d>/.test(stripped) && !hasNonNarrationTail(stripped, duration)) {
     issues.push('Missing narration tail');
   }
 
