@@ -61,8 +61,9 @@ const CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
 const CHINESE_ONLY_ALLOWED_TAIL_PATTERN =
   /(?:仅|只)(?:保留|剩下|留下|有)?[^。！？\n]{0,60}(?:环境声|环境音|音乐|画面)/;
 const CHINESE_SPEECH_END_PATTERN = /(?:结束|停止|终止|完结)/;
+// Numbered endings are evaluated against the actual tail start below.
 const CHINESE_SPEECH_THROUGH_END_PATTERN =
-  /(?:持续|延续|直到|直至|贯穿|一直)[^，。；\n]{0,30}(?:视频|影片|画面|全片|整段)(?:的)?(?:结束|结尾|末尾|收尾)/;
+  /(?:持续|延续|直到|直至|贯穿|一直)(?:(?!第\s*\d+(?:\.\d+)?\s*秒)[^，。；\n]){0,30}(?:结束|结尾|末尾|收尾|最后)/;
 
 const INTERACTIVE_OUTPUT_PATTERNS = [
   /^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:required\s+)?(?:clarifications?|questions?|next steps?|start gate|approval|confirmation)\b/im,
