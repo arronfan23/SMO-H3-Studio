@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { FileAudio, Video } from 'lucide-react';
+import { FileAudio, Sparkles, Video } from 'lucide-react';
+import { SKILL_NAMES, type SkillName } from '../shared/skills';
 import {
   DEFAULT_GENERATION_OPTIONS,
   buildHardwareProfile,
@@ -7,8 +8,11 @@ import {
 } from '../shared/generation-options';
 import { GenerationOptions } from './GenerationOptions';
 import { JobStatus } from './JobStatus';
+import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName } from './ui';
+
+type PromptTab = 'original' | 'polished';
 
 export function AudioDigitalHumanForm({
   avatarId,
@@ -23,7 +27,10 @@ export function AudioDigitalHumanForm({
 }) {
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioSeconds, setAudioSeconds] = useState<number | null>(null);
-  const [prompt, setPrompt] = useState('');
+  const [originalText, setOriginalText] = useState('');
+  const [polishedText, setPolishedText] = useState('');
+  const [activeTab, setActiveTab] = useState<PromptTab>('original');
+  const [skill, setSkill] = useState<'auto' | SkillName>('h3-prompt-writing');
   const [trimStart, setTrimStart] = useState(0);
   const [duration, setDuration] = useState<number | ''>(0);
   const [seed, setSeed] = useState(42);
@@ -31,6 +38,7 @@ export function AudioDigitalHumanForm({
     DEFAULT_GENERATION_OPTIONS,
   );
   const [selecting, setSelecting] = useState(false);
+  const [polishing, setPolishing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -48,6 +56,11 @@ export function AudioDigitalHumanForm({
     audioSeconds !== null && Number.isFinite(trimStart) && trimStart >= 0
       ? audioSeconds - trimStart
       : null;
+
+  const skillDescription =
+    skill === 'auto'
+      ? AUTO_SKILL_OPTION.description
+      : SKILL_OPTIONS[skill].description;
 
   const selectAudio = async (): Promise<void> => {
     setSelecting(true);
@@ -67,23 +80,22 @@ export function AudioDigitalHumanForm({
     }
   };
 
-  const startGeneration = async (): Promise<void> => {
-    const normalizedPrompt = prompt.trim();
+  const resolveValidClip = (text: string): { audioPath: string; duration: number } | null => {
     if (audioPath === null || audioSeconds === null) {
       setError('请选择音频并等待时长读取完成。');
-      return;
+      return null;
     }
-    if (normalizedPrompt.length === 0) {
+    if (text.length === 0) {
       setError('请填写动作/画面提示词。');
-      return;
+      return null;
     }
     if (!Number.isFinite(trimStart) || trimStart < 0) {
       setError('起始截取时间必须是非负数字。');
-      return;
+      return null;
     }
     if (trimStart >= audioSeconds) {
       setError('截取范围不能超出实际音频时长。');
-      return;
+      return null;
     }
     const resolvedDuration = duration === '' ? audioSeconds - trimStart : duration;
     if (
@@ -92,6 +104,43 @@ export function AudioDigitalHumanForm({
       trimStart + resolvedDuration > audioSeconds + 0.001
     ) {
       setError('截取范围不能超出实际音频时长。');
+      return null;
+    }
+    return { audioPath, duration: resolvedDuration };
+  };
+
+  const polish = async (): Promise<void> => {
+    const text = originalText.trim();
+    const clip = resolveValidClip(text);
+    if (clip === null) {
+      return;
+    }
+
+    setPolishing(true);
+    setError(null);
+    try {
+      const result = await window.smo.llm.polish({
+        text,
+        duration: clip.duration,
+        imageCount: 1,
+        mode: 'ref2va',
+        referenceLabels: ['<Picture 1>', '<Audio 1>'],
+        skill,
+      });
+      setPolishedText(result.text);
+      setActiveTab('polished');
+    } catch (polishError) {
+      setActiveTab('original');
+      setError(errorMessage(polishError));
+    } finally {
+      setPolishing(false);
+    }
+  };
+
+  const startGeneration = async (): Promise<void> => {
+    const prompt = (activeTab === 'polished' ? polishedText : originalText).trim();
+    const clip = resolveValidClip(prompt);
+    if (clip === null) {
       return;
     }
     if (!Number.isInteger(seed) || seed < 0) {
@@ -112,10 +161,10 @@ export function AudioDigitalHumanForm({
       const result = await window.smo.jobs.start({
         mode: 'audio',
         avatarId,
-        prompt: normalizedPrompt,
-        audioPath,
+        prompt,
+        audioPath: clip.audioPath,
         trimStart,
-        duration: resolvedDuration,
+        duration: clip.duration,
         seed,
       });
       setJobId(result.id);
@@ -165,6 +214,22 @@ export function AudioDigitalHumanForm({
       )}
       {mediaError && <p className="form-error" role="alert">{mediaError}</p>}
 
+      <div className="field">
+        <label htmlFor="audio-skill">视频风格（Skill）</label>
+        <select
+          id="audio-skill"
+          aria-describedby="audio-skill-description"
+          value={skill}
+          onChange={(event) => setSkill(event.target.value as 'auto' | SkillName)}
+        >
+          <option value="auto">{AUTO_SKILL_OPTION.title}</option>
+          {SKILL_NAMES.map((name) => (
+            <option key={name} value={name}>{SKILL_OPTIONS[name].title}</option>
+          ))}
+        </select>
+        <p id="audio-skill-description" className="skill-description">{skillDescription}</p>
+      </div>
+
       <GenerationOptions
         idPrefix="audio"
         value={options}
@@ -172,15 +237,52 @@ export function AudioDigitalHumanForm({
         disabled={submitting}
       />
 
-      <div className="field">
-        <label htmlFor="audio-prompt">动作/画面提示词</label>
-        <textarea
-          id="audio-prompt"
-          rows={5}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder="描述说话时的表情、动作和镜头"
-        />
+      <div className="prompt-editor">
+        <div className="tab-list" role="tablist" aria-label="音频提示词版本">
+          <button
+            id="audio-original-tab"
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'original'}
+            aria-controls="audio-original-panel"
+            onClick={() => setActiveTab('original')}
+          >
+            原文
+          </button>
+          <button
+            id="audio-polished-tab"
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'polished'}
+            aria-controls="audio-polished-panel"
+            disabled={polishedText.length === 0}
+            onClick={() => setActiveTab('polished')}
+          >
+            润色结果
+          </button>
+        </div>
+        {activeTab === 'original' ? (
+          <div id="audio-original-panel" role="tabpanel" aria-labelledby="audio-original-tab">
+            <label className="sr-only" htmlFor="audio-prompt">动作/画面提示词</label>
+            <textarea
+              id="audio-prompt"
+              rows={7}
+              value={originalText}
+              onChange={(event) => setOriginalText(event.target.value)}
+              placeholder="描述说话时的表情、动作和镜头"
+            />
+          </div>
+        ) : (
+          <div id="audio-polished-panel" role="tabpanel" aria-labelledby="audio-polished-tab">
+            <label className="sr-only" htmlFor="audio-polished-text">润色结果</label>
+            <textarea
+              id="audio-polished-text"
+              rows={7}
+              value={polishedText}
+              onChange={(event) => setPolishedText(event.target.value)}
+            />
+          </div>
+        )}
       </div>
       <div className="form-row form-row-three">
         <div className="field">
@@ -231,6 +333,10 @@ export function AudioDigitalHumanForm({
           />
         </div>
       </div>
+      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing}>
+        <Sparkles size={16} aria-hidden="true" />
+        {polishing ? '正在润色…' : 'AI 润色'}
+      </button>
       {error && <p className="form-error" role="alert">{error}</p>}
       <button className="button button-generate" type="submit" disabled={submitting}>
         <Video size={17} aria-hidden="true" />

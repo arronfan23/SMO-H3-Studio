@@ -428,9 +428,12 @@ describe('text-to-video studio', () => {
     fireEvent.change(screen.getByLabelText('原始文字'), {
       target: { value: '主播转身并挥手' },
     });
-    fireEvent.change(screen.getByLabelText('视频风格（Skill）'), {
-      target: { value: 'h3-prompt-writing' },
-    });
+    fireEvent.change(
+      within(screen.getByRole('tabpanel', { name: '文字生视频' })).getByLabelText(
+        '视频风格（Skill）',
+      ),
+      { target: { value: 'h3-prompt-writing' } },
+    );
     fireEvent.change(screen.getByLabelText('视频时长（秒）'), { target: { value: '9' } });
     fireEvent.change(screen.getByRole('spinbutton', { name: '随机种子' }), { target: { value: '42' } });
 
@@ -587,6 +590,10 @@ describe('text-to-video studio', () => {
 });
 
 describe('audio digital human studio', () => {
+  function audioPanel(): HTMLElement {
+    return screen.getByRole('tabpanel', { name: '音频数字人' });
+  }
+
   async function renderLoadedAudio(audioPath: string, seconds: number): Promise<void> {
     smo.files.selectAudio.mockResolvedValue(audioPath);
     await renderStudio();
@@ -597,6 +604,161 @@ describe('audio digital human studio', () => {
     fireEvent.loadedMetadata(audio);
     expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(seconds);
   }
+
+  test('polishes the actual clip without media payloads and generates the edited result once', async () => {
+    const audioPath = 'G:\\recordings\\polish.mp3';
+    smo.llm.polish.mockResolvedValue({
+      text: '润色后的音频数字人镜头',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('h3-prompt-writing');
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '自然说话，轻微点头' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1.25' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '润色后的音频数字人镜头',
+    );
+    expect(smo.llm.polish).toHaveBeenCalledWith({
+      text: '自然说话，轻微点头',
+      duration: 6,
+      imageCount: 1,
+      mode: 'ref2va',
+      referenceLabels: ['<Picture 1>', '<Audio 1>'],
+      skill: 'h3-prompt-writing',
+    });
+    const polishRequest = smo.llm.polish.mock.calls[0][0];
+    expect(polishRequest).not.toHaveProperty('audioPath');
+    expect(JSON.stringify(polishRequest)).not.toContain(audioPath);
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+
+    fireEvent.change(panel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '用户确认的音频数字人镜头' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'audio',
+      avatarId: avatar.id,
+      prompt: '用户确认的音频数字人镜头',
+      audioPath,
+      trimStart: 1.25,
+      duration: 6,
+      seed: 42,
+    });
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps the original audio draft and options after a polish failure', async () => {
+    const audioPath = 'G:\\recordings\\polish-failure.mp3';
+    smo.llm.polish.mockRejectedValue(new Error('LLM 暂时不可用'));
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '失败后保留的原文' },
+    });
+    fireEvent.change(panel.getByLabelText('视频风格（Skill）'), {
+      target: { value: 'auto' },
+    });
+    fireEvent.change(panel.getByLabelText('H3 模型'), { target: { value: 'bf16' } });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1.25' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.change(panel.getByRole('spinbutton', { name: '随机种子' }), {
+      target: { value: '7' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('LLM 暂时不可用');
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('失败后保留的原文');
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByText('polish-failure.mp3')).toBeInTheDocument();
+    expect(panel.getByLabelText('所选音频')).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(audioPath)}`,
+    );
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('auto');
+    expect(panel.getByLabelText('H3 模型')).toHaveValue('bf16');
+    expect(panel.getByLabelText('起始截取（秒）')).toHaveValue(1.25);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6);
+    expect(panel.getByRole('spinbutton', { name: '随机种子' })).toHaveValue(7);
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt: '失败后保留的原文', mode: 'audio' }),
+      ),
+    );
+  });
+
+  test('keeps audio prompt drafts and the selected clip when switching modules', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '跨模块保留的润色草稿',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio('G:\\recordings\\draft.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '跨模块保留的原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '跨模块保留的润色草稿',
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    expect(panel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '跨模块保留的润色草稿',
+    );
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      expect(panel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+        '跨模块保留的润色草稿',
+      );
+      expect(panel.getByText('draft.mp3')).toBeInTheDocument();
+    }
+
+    fireEvent.click(panel.getByRole('tab', { name: '原文' }));
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('跨模块保留的原文');
+  });
+
+  test('rejects an invalid actual audio trim before polishing', async () => {
+    await renderLoadedAudio('G:\\recordings\\invalid-polish-trim.mp3', 5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '不能绕过时长校验' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '4' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '2' } });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent(
+      '截取范围不能超出实际音频时长',
+    );
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
 
   test.each([
     { scenario: 'blank', trimStart: '' },
