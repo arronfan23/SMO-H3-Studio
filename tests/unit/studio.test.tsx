@@ -43,6 +43,8 @@ function createSmoMock() {
       selectAudio: vi.fn(),
       mediaUrl: vi.fn(),
       openFolder: vi.fn(),
+      authorizeDroppedImage: vi.fn(),
+      getDroppedFilePath: vi.fn(),
     },
     llm: {
       saveProfile: vi.fn(),
@@ -84,6 +86,10 @@ beforeEach(() => {
   smo.files.mediaUrl.mockImplementation(async (path: string) =>
     `smo-media://media/${encodeURIComponent(path)}`,
   );
+  smo.files.getDroppedFilePath.mockImplementation(
+    (file: { name: string }) => `G:\\dropped\\${file.name}`,
+  );
+  smo.files.authorizeDroppedImage.mockImplementation(async (path: string) => path);
   smo.works.list.mockResolvedValue([]);
   smo.jobs.start.mockResolvedValue({ id: 'job-1' });
   smo.jobs.retry.mockRejectedValue(new Error('Unexpected retry'));
@@ -248,6 +254,99 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(screen.queryByRole('img', { name: '待保存模特照片预览' })).not.toBeInTheDocument();
     expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
     expect(smo.avatars.delete).not.toHaveBeenCalled();
+  });
+
+  test('authorizes a dropped photo through IPC, previews it, and saves with the dropped path', async () => {
+    const created: Avatar = {
+      ...avatar,
+      id: 'avatar-drop',
+      name: '拖放模特',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\drop.png',
+    };
+    smo.avatars.list.mockResolvedValueOnce([]).mockResolvedValueOnce([created]);
+    smo.avatars.create.mockResolvedValue(created);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+    fireEvent.dragLeave(dropzone);
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+
+    const file = new File(['image'], 'dropped.png', { type: 'image/png' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [file] } });
+
+    expect(smo.files.getDroppedFilePath).toHaveBeenCalledWith(file);
+    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith('G:\\dropped\\dropped.png');
+    expect(smo.files.selectImage).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole('img', { name: '待保存模特照片预览' }),
+    ).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.png')}`,
+    );
+    expect(screen.getByText('dropped.png')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '拖放模特' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+
+    await screen.findByRole('heading', { name: '拖放模特' });
+    expect(smo.avatars.create).toHaveBeenCalledWith({
+      name: '拖放模特',
+      photoPath: 'G:\\dropped\\dropped.png',
+    });
+  });
+
+  test('rejects dropping multiple files with a clear error', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, {
+      dataTransfer: {
+        files: [new File(['a'], 'a.png'), new File(['b'], 'b.png')],
+      },
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('一次只能拖入一张照片');
+    expect(smo.files.getDroppedFilePath).not.toHaveBeenCalled();
+    expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+  });
+
+  test.each(['notes.txt', 'clip.gif', 'voice.mp3'])(
+    'rejects a dropped %s with a clear error',
+    async (name) => {
+      smo.avatars.list.mockResolvedValue([]);
+      render(<App />);
+      fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+      const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+      fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], name)] } });
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        '仅支持 PNG、JPG、JPEG 或 WebP 图片',
+      );
+      expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+      expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+    },
+  );
+
+  test('surfaces a main-process authorization failure for a dropped photo', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.authorizeDroppedImage.mockRejectedValue(new Error('文件不存在'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'missing.png')] },
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('文件不存在');
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
   });
 
   test('clears the form error when removing the selected photo', async () => {

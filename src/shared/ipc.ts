@@ -47,6 +47,7 @@ export const IPC_CHANNELS = [
   'jobs:cancel',
   'files:selectImage',
   'files:selectAudio',
+  'files:authorizeDroppedImage',
   'files:mediaUrl',
   'files:openFolder',
   'llm:saveProfile',
@@ -260,6 +261,10 @@ export function createIpcSchema() {
     requestSchema('files:selectImage', emptyPayload),
     requestSchema('files:selectAudio', emptyPayload),
     requestSchema(
+      'files:authorizeDroppedImage',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
+    requestSchema(
       'files:mediaUrl',
       z.object({ path: nonEmptyString }).strict(),
     ),
@@ -348,6 +353,11 @@ export interface SmoApi {
   readonly files: {
     selectImage(): Promise<string | null>;
     selectAudio(): Promise<string | null>;
+    authorizeDroppedImage(path: string): Promise<string>;
+    // Resolves the absolute path of a dropped File via Electron webUtils in
+    // the preload; typed structurally so the main-process tsconfig (no DOM
+    // lib) still compiles the shared API surface.
+    getDroppedFilePath(file: unknown): string;
     mediaUrl(path: string): Promise<string>;
     openFolder(path: string): Promise<void>;
   };

@@ -38,7 +38,7 @@ import {
   type LocalLlmUpstream,
 } from '../fixtures/llm-upstream';
 
-const { cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke } = vi.hoisted(() => {
+const { cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke, webUtilsGetPathForFile } = vi.hoisted(() => {
   const prefix = Buffer.from('ipc-test-cipher\0');
   const transform = (value: Buffer) =>
     Buffer.from(value.map((byte) => byte ^ 0x5a));
@@ -47,6 +47,7 @@ const { cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke } = vi.hoist
     exposeInMainWorld: vi.fn(),
     ipcMainHandle: vi.fn(),
     ipcRendererInvoke: vi.fn(),
+    webUtilsGetPathForFile: vi.fn(),
     cipher: {
       isEncryptionAvailable: () => true,
       encryptString: (value: string) =>
@@ -66,6 +67,7 @@ vi.mock('electron', () => ({
   ipcMain: { handle: ipcMainHandle },
   ipcRenderer: { invoke: ipcRendererInvoke },
   safeStorage: cipher,
+  webUtils: { getPathForFile: webUtilsGetPathForFile },
 }));
 
 const generationRequest = {
@@ -290,6 +292,7 @@ describe('IPC input schema', () => {
     { channel: 'files:selectImage', payload: {} },
     { channel: 'files:selectAudio', payload: {} },
     { channel: 'files:mediaUrl', payload: { path: 'G:\\media\\result.mp4' } },
+    { channel: 'files:authorizeDroppedImage', payload: { path: 'G:\\photos\\dropped.png' } },
   ])('accepts controlled file request $channel', (request) => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
@@ -537,6 +540,13 @@ describe('IPC input schema', () => {
     { channel: 'jobs:retry', payload: { id: '' } },
     { channel: 'files:openFolder', payload: { path: '' } },
     { channel: 'files:openFolder', payload: { path: 'G:\\output', extra: true } },
+    { channel: 'files:authorizeDroppedImage', payload: {} },
+    { channel: 'files:authorizeDroppedImage', payload: { path: '' } },
+    { channel: 'files:authorizeDroppedImage', payload: { path: '   ' } },
+    {
+      channel: 'files:authorizeDroppedImage',
+      payload: { path: 'G:\\photos\\dropped.png', shell: true },
+    },
     { channel: 'comfy:open', payload: { url: 'http://example.com' } },
     { channel: 'avatars:update', payload: { id: '', name: 'Renamed' } },
     { channel: 'avatars:update', payload: { id: 'avatar-1', name: ' ' } },
@@ -804,6 +814,46 @@ describe('main-process IPC handlers', () => {
 
     harness.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] });
     await expect(harness.invoke('files:selectImage')).resolves.toBeNull();
+  });
+
+  test('authorizes a dropped image so it can be used as an avatar photo', async () => {
+    const harness = await createHarness();
+    const source = join(harness.directory, 'dropped.png');
+    await writeFile(source, 'image-data');
+
+    await expect(
+      harness.invoke('avatars:create', { name: 'Dropped', photoPath: source }),
+    ).rejects.toThrow(/selectImage/i);
+
+    await expect(
+      harness.invoke('files:authorizeDroppedImage', { path: source }),
+    ).resolves.toBe(source);
+
+    const avatar = (await harness.invoke('avatars:create', {
+      name: 'Dropped',
+      photoPath: source,
+    })) as Avatar;
+    expect(avatar.photoPath).toContain(join(harness.directory, 'avatars'));
+    expect(await readFile(avatar.photoPath, 'utf8')).toBe('image-data');
+
+    const mediaUrl = await harness.invoke('files:mediaUrl', { path: source });
+    expect(mediaUrl).toMatch(/^smo-media:\/\/media\//);
+  });
+
+  test('rejects dropped non-image files without authorizing them', async () => {
+    const harness = await createHarness();
+    const audioPath = join(harness.directory, 'voice.mp3');
+    await writeFile(audioPath, 'audio');
+
+    await expect(
+      harness.invoke('files:authorizeDroppedImage', { path: audioPath }),
+    ).rejects.toThrow(/extension/i);
+    await expect(
+      harness.invoke('files:mediaUrl', { path: audioPath }),
+    ).rejects.toThrow(/not allowed/i);
+    await expect(
+      harness.invoke('avatars:create', { name: 'Nope', photoPath: audioPath }),
+    ).rejects.toThrow();
   });
 
   test('retries a work through the real retry handler', async () => {
@@ -1380,6 +1430,16 @@ describe('preload API', () => {
   beforeEach(() => {
     ipcRendererInvoke.mockReset();
     ipcRendererInvoke.mockImplementation(async () => undefined);
+    webUtilsGetPathForFile.mockReset();
+  });
+
+  test('resolves dropped file paths through webUtils without IPC', () => {
+    webUtilsGetPathForFile.mockReturnValue('G:\\photos\\dropped.png');
+    const file = { name: 'dropped.png' };
+
+    expect(api.files.getDroppedFilePath(file)).toBe('G:\\photos\\dropped.png');
+    expect(webUtilsGetPathForFile).toHaveBeenCalledWith(file);
+    expect(ipcRendererInvoke).not.toHaveBeenCalled();
   });
 
   test('exposes only the fixed domain methods', () => {
@@ -1415,6 +1475,8 @@ describe('preload API', () => {
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
     expect(Object.keys(api.works)).toEqual(['delete', 'list']);
     expect(Object.keys(api.files).sort()).toEqual([
+      'authorizeDroppedImage',
+      'getDroppedFilePath',
       'mediaUrl',
       'openFolder',
       'selectAudio',
@@ -1487,6 +1549,11 @@ describe('preload API', () => {
       channel: 'files:mediaUrl',
       payload: { path: 'G:\\media\\result.mp4' },
       call: (smo: SmoApi) => smo.files.mediaUrl('G:\\media\\result.mp4'),
+    },
+    {
+      channel: 'files:authorizeDroppedImage',
+      payload: { path: 'G:\\photos\\dropped.png' },
+      call: (smo: SmoApi) => smo.files.authorizeDroppedImage('G:\\photos\\dropped.png'),
     },
     {
       channel: 'llm:saveProfile',

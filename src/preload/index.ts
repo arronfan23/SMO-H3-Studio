@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SmoApi } from '../shared/ipc';
 
 const api: SmoApi = {
@@ -16,6 +16,10 @@ const api: SmoApi = {
   files: {
     selectImage: () => ipcRenderer.invoke('files:selectImage', {}),
     selectAudio: () => ipcRenderer.invoke('files:selectAudio', {}),
+    authorizeDroppedImage: (path) =>
+      ipcRenderer.invoke('files:authorizeDroppedImage', { path }),
+    getDroppedFilePath: (file) =>
+      webUtils.getPathForFile(file as Parameters<typeof webUtils.getPathForFile>[0]),
     mediaUrl: (path) => ipcRenderer.invoke('files:mediaUrl', { path }),
     openFolder: (path) => ipcRenderer.invoke('files:openFolder', { path }),
   },

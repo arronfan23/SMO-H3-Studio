@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { ImagePlus, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import { AvatarImage } from './AvatarImage';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName } from './ui';
+
+const DROPPED_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp']);
 
 type DialogState =
   | { kind: 'rename'; avatar: Avatar }
@@ -31,6 +33,7 @@ export function AvatarsPage({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [renameValue, setRenameValue] = useState('');
   const [mutationLoading, setMutationLoading] = useState(false);
@@ -94,6 +97,39 @@ export function AvatarsPage({
   const removePhoto = (): void => {
     setPhotoPath(null);
     setError(null);
+  };
+
+  const handlePhotoDrop = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    setDropActive(false);
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length !== 1) {
+      setError('一次只能拖入一张照片。');
+      return;
+    }
+    const file = files[0];
+    const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+    if (!DROPPED_IMAGE_EXTENSIONS.has(extension)) {
+      setError('仅支持 PNG、JPG、JPEG 或 WebP 图片。');
+      return;
+    }
+    setError(null);
+    void (async () => {
+      try {
+        // The renderer never trusts the dropped path directly: the main
+        // process must authorize it before it becomes the photo path.
+        const droppedPath = window.smo.files.getDroppedFilePath(file);
+        const authorized = await window.smo.files.authorizeDroppedImage(droppedPath);
+        if (mountedRef.current) {
+          setPhotoPath(authorized);
+          setNotice(null);
+        }
+      } catch (dropError) {
+        if (mountedRef.current) {
+          setError(errorMessage(dropError));
+        }
+      }
+    })();
   };
 
   const openRename = (avatar: Avatar): void => {
@@ -196,7 +232,23 @@ export function AvatarsPage({
             <ImagePlus size={16} aria-hidden="true" />
             {selecting ? '正在选择…' : '选择照片'}
           </button>
-          <div className="avatar-preview">
+          <div
+            className="avatar-preview"
+            role="group"
+            aria-label="模特照片拖放区"
+            data-drop-active={dropActive ? 'true' : undefined}
+            style={
+              dropActive
+                ? { outline: '2px dashed #258665', outlineOffset: '4px' }
+                : undefined
+            }
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDropActive(true);
+            }}
+            onDragLeave={() => setDropActive(false)}
+            onDrop={handlePhotoDrop}
+          >
             {photoPath === null ? (
               <div className="avatar-preview-empty">尚未选择照片</div>
             ) : (

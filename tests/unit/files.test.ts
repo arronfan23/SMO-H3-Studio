@@ -193,6 +193,85 @@ describe('FileService', () => {
 });
 
 
+describe('FileService.authorizeDroppedImage', () => {
+  test('authorizes a dropped image and returns the same path', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-drop-'));
+    const photoPath = join(directory, 'dropped.png');
+    await writeFile(photoPath, 'image');
+    const registry = new MediaRegistry({
+      avatarsDirectory: join(directory, 'avatars'),
+      outputDirectory: join(directory, 'output'),
+    });
+    const service = new FileService({
+      mediaRegistry: registry,
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory: join(directory, 'output'),
+      dataDirectory: directory,
+    });
+
+    try {
+      await expect(registry.createMediaUrl(photoPath)).rejects.toThrow(/not allowed/i);
+      await expect(registry.isSelectedImage(photoPath)).resolves.toBe(false);
+
+      await expect(service.authorizeDroppedImage(photoPath)).resolves.toBe(photoPath);
+
+      await expect(registry.isSelectedImage(photoPath)).resolves.toBe(true);
+      await expect(registry.createMediaUrl(photoPath)).resolves.toMatch(/^smo-media:/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['dropped.gif', 'dropped.mp3', 'dropped.txt'])(
+    'rejects a dropped %s without authorizing it',
+    async (filename) => {
+      const directory = await mkdtemp(join(tmpdir(), 'smo-drop-'));
+      const filePath = join(directory, filename);
+      await writeFile(filePath, 'data');
+      const registry = new MediaRegistry({
+        avatarsDirectory: join(directory, 'avatars'),
+        outputDirectory: join(directory, 'output'),
+      });
+      const service = new FileService({
+        mediaRegistry: registry,
+        dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+        outputDirectory: join(directory, 'output'),
+        dataDirectory: directory,
+      });
+
+      try {
+        await expect(service.authorizeDroppedImage(filePath)).rejects.toThrow(/extension/i);
+        await expect(registry.isSelectedImage(filePath)).resolves.toBe(false);
+        await expect(registry.createMediaUrl(filePath)).rejects.toThrow();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test('rejects a dropped file that does not exist', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-drop-'));
+    const registry = new MediaRegistry({
+      avatarsDirectory: join(directory, 'avatars'),
+      outputDirectory: join(directory, 'output'),
+    });
+    const service = new FileService({
+      mediaRegistry: registry,
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory: join(directory, 'output'),
+      dataDirectory: directory,
+    });
+
+    try {
+      await expect(
+        service.authorizeDroppedImage(join(directory, 'missing.png')),
+      ).rejects.toThrow(/does not exist/i);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('FileService.openFolder', () => {
   test('opens a folder inside the output directory', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));

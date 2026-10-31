@@ -1,5 +1,5 @@
 import { realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { MediaRegistry } from './media';
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp'];
@@ -51,6 +51,15 @@ export class FileService {
 
   selectAudio(): Promise<string | null> {
     return this.select('选择配音音频', '音频', AUDIO_EXTENSIONS, 'audio');
+  }
+
+  async authorizeDroppedImage(filePath: string): Promise<string> {
+    const extension = extname(filePath).toLowerCase().replace(/^\./, '');
+    if (!IMAGE_EXTENSIONS.includes(extension)) {
+      throw new Error(`Unsupported image extension: ${extension || '(none)'}`);
+    }
+    await this.mediaRegistry.authorizeSelectedImage(filePath);
+    return filePath;
   }
 
   mediaUrl(filePath: string): Promise<string> {

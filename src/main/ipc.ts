@@ -46,7 +46,10 @@ export interface IpcServices {
   llmConfig: LlmConfigStore;
   store: Pick<Store, 'listAvatars' | 'listWorks'>;
   avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
-  files: Pick<FileService, 'selectImage' | 'selectAudio' | 'mediaUrl' | 'openFolder'>;
+  files: Pick<
+    FileService,
+    'selectImage' | 'selectAudio' | 'authorizeDroppedImage' | 'mediaUrl' | 'openFolder'
+  >;
   comfy: Pick<ComfyClient, 'health'>;
   startComfy: () => Promise<ComfySystemStats>;
   openComfy: () => Promise<void>;
@@ -92,6 +95,8 @@ async function dispatch(
       return services.files.selectImage();
     case 'files:selectAudio':
       return services.files.selectAudio();
+    case 'files:authorizeDroppedImage':
+      return services.files.authorizeDroppedImage(request.payload.path);
     case 'files:mediaUrl':
       return services.files.mediaUrl(request.payload.path);
     case 'files:openFolder':
