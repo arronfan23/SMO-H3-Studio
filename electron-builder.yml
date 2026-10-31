@@ -1,0 +1,21 @@
+appId: com.smo.h3studio
+productName: SMO.H3 Studio
+directories:
+  output: release
+npmRebuild: false
+files:
+  - dist/**
+extraResources:
+  - from: resources/brand
+    to: resources/brand
+  - from: resources/environment
+    to: resources/environment
+  - from: resources/workflows
+    to: resources/workflows
+  - from: resources/skills
+    to: resources/skills
+win:
+  target: portable
+  icon: resources/brand/icon.ico
+portable:
+  artifactName: SMO.H3-Studio-${version}.${ext}

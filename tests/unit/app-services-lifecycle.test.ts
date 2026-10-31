@@ -1,0 +1,236 @@
+// @vitest-environment node
+
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { ComfyProcessManager } from '../../src/main/comfy-process';
+import { createAppServices } from '../../src/main/app-services';
+
+const { protocolRegisterFileProtocol } = vi.hoisted(() => ({
+  protocolRegisterFileProtocol: vi.fn(() => true),
+}));
+
+vi.mock('electron', () => ({
+  app: { isPackaged: false },
+  dialog: { showOpenDialog: vi.fn() },
+  ipcMain: { handle: vi.fn() },
+  protocol: { registerFileProtocol: protocolRegisterFileProtocol },
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(value, 'utf8'),
+    decryptString: (value: Buffer) => value.toString('utf8'),
+  },
+}));
+
+const cleanups: Array<() => void | Promise<void>> = [];
+
+async function useDataDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), 'smo-lifecycle-'));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    await cleanup();
+  }
+});
+
+describe('AppServices lifecycle', () => {
+  test('startComfy delegates to the ComfyUI process manager', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+    const stats = { system: { os: 'test' }, devices: [] };
+    const ensureReady = vi
+      .spyOn(ComfyProcessManager.prototype, 'ensureReady')
+      .mockResolvedValue(stats);
+
+    try {
+      await expect(services.startComfy()).resolves.toEqual(stats);
+      expect(ensureReady).toHaveBeenCalledTimes(1);
+    } finally {
+      ensureReady.mockRestore();
+      await services.close();
+    }
+  });
+
+  test('close stops the ComfyUI process manager after the coordinator and before ComfyClient', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const order: string[] = [];
+    vi.spyOn(services.jobCoordinator, 'close').mockImplementation(async () => {
+      order.push('coordinator');
+    });
+    const managerClose = vi
+      .spyOn(ComfyProcessManager.prototype, 'close')
+      .mockImplementation(async () => {
+        order.push('manager');
+      });
+    vi.spyOn(services.comfy, 'close').mockImplementation(async () => {
+      order.push('comfy');
+    });
+    const storeClose = vi.spyOn(services.store, 'close');
+
+    try {
+      await services.close();
+
+      expect(order).toEqual(['coordinator', 'manager', 'comfy']);
+      expect(managerClose).toHaveBeenCalledTimes(1);
+      expect(storeClose).toHaveBeenCalledTimes(1);
+    } finally {
+      managerClose.mockRestore();
+    }
+  });
+
+  test('close releases ComfyClient, JobCoordinator, and Store', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const comfyClose = vi.spyOn(services.comfy, 'close');
+    const coordinatorClose = vi.spyOn(services.jobCoordinator, 'close');
+    const storeClose = vi.spyOn(services.store, 'close');
+
+    await services.close();
+
+    expect(comfyClose).toHaveBeenCalledTimes(1);
+    expect(coordinatorClose).toHaveBeenCalledTimes(1);
+    expect(storeClose).toHaveBeenCalledTimes(1);
+  });
+
+  test('close awaits all component releases and does not stop on one failure', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const comfyClose = vi
+      .spyOn(services.comfy, 'close')
+      .mockRejectedValueOnce(new Error('comfy close failed'));
+    const coordinatorClose = vi.spyOn(services.jobCoordinator, 'close');
+    const storeClose = vi.spyOn(services.store, 'close');
+
+    await expect(services.close()).resolves.toBeUndefined();
+
+    expect(coordinatorClose).toHaveBeenCalledTimes(1);
+    expect(comfyClose).toHaveBeenCalledTimes(1);
+    expect(storeClose).toHaveBeenCalledTimes(1);
+  });
+
+  test('close waits for jobCoordinator so active job failed events reach Store before Store closes', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const avatar = services.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    services.store.addWork({
+      id: 'active-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'pending',
+    });
+
+    const run = services.jobCoordinator.enqueue({
+      id: 'active-work',
+      run: async () => {
+        await new Promise(() => undefined);
+      },
+      cancel: async () => undefined,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(services.jobCoordinator.activeCount).toBe(1);
+
+    let failedWorkBeforeStoreClose = false;
+    const realClose = services.store.close.bind(services.store);
+    vi.spyOn(services.store, 'close').mockImplementation(() => {
+      failedWorkBeforeStoreClose =
+        services.store.listWorks().some((work) => work.status === 'failed');
+      return realClose();
+    });
+
+    const closePromise = services.close();
+    await expect(run).rejects.toThrow(/cancelled/i);
+    await closePromise;
+
+    expect(failedWorkBeforeStoreClose).toBe(true);
+  });
+
+  test('close is idempotent and only releases components once', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+
+    const comfyClose = vi.spyOn(services.comfy, 'close');
+    const coordinatorClose = vi.spyOn(services.jobCoordinator, 'close');
+    const storeClose = vi.spyOn(services.store, 'close');
+
+    await services.close();
+    await services.close();
+    await services.close();
+
+    expect(comfyClose).toHaveBeenCalledTimes(1);
+    expect(coordinatorClose).toHaveBeenCalledTimes(1);
+    expect(storeClose).toHaveBeenCalledTimes(1);
+    expect(services.store).toBeDefined();
+  });
+
+  test('reopening services fails interrupted works and reserves completed ones', async () => {
+    const dataDirectory = await useDataDirectory();
+
+    const first = await createAppServices({ dataDirectory });
+    const avatar = first.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    first.store.addWork({
+      id: 'running-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'running',
+    });
+    first.store.addWork({
+      id: 'pending-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'pending',
+    });
+    first.store.addWork({
+      id: 'done-work',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: 'output/done-work.mp4',
+      status: 'done',
+    });
+    await first.close();
+
+    const second = await createAppServices({ dataDirectory });
+    try {
+      const works = new Map(second.store.listWorks().map((work) => [work.id, work]));
+
+      const running = works.get('running-work');
+      expect(running?.status).toBe('failed');
+      expect(running?.error).toMatch(/interrupted.*restart/i);
+
+      const pending = works.get('pending-work');
+      expect(pending?.status).toBe('failed');
+      expect(pending?.error).toMatch(/interrupted.*restart/i);
+
+      expect(works.get('done-work')?.status).toBe('done');
+      expect(second.jobCoordinator.completedIds).toEqual(['done-work']);
+      expect(second.jobCoordinator.activeCount).toBe(0);
+
+      await expect(
+        second.jobCoordinator.enqueue({
+          id: 'done-work',
+          run: async () => undefined,
+        }),
+      ).rejects.toThrow(/duplicate job id/i);
+    } finally {
+      await second.close();
+    }
+  });
+});
