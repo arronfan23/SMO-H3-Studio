@@ -49,12 +49,13 @@ const ONLY_ALLOWED_TAIL_PATTERN = new RegExp(
   'i',
 );
 const CHINESE_TAIL_PERIOD_PATTERN = /(?:最后|结尾)(?:的)?\s*(?:2|两)\s*秒/;
-const CHINESE_VOCAL_WORDS = String.raw`(?:旁白|对白|语音|人声|配音|解说|歌声|说话|讲话|朗读)`;
+const CHINESE_OTHER_TIME_PERIOD_PATTERN = /(?:前|第)\s*\d+(?:\.\d+)?\s*秒/;
+const CHINESE_VOCAL_WORDS = String.raw`(?:旁白|对白|对话|语音|人声|配音|解说|歌声|说话|讲话|朗读)`;
 const CHINESE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
   String.raw`(?:没有|无|不包含|不含|不再包含|不再有)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS}(?:\s*(?:、|/|或|和|与)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS})*`,
 );
 const CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
-  String.raw`(?:并非|不是)\s*(?:没有|无|不包含|不含|不再包含|不再有)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS}`,
+  String.raw`(?:并非|不是)\s*(?:(?:完全|根本|彻底|绝对)\s*)?(?:没有|无|不包含|不含|不再包含|不再有)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS}`,
 );
 const CHINESE_ONLY_ALLOWED_TAIL_PATTERN =
   /(?:仅|只)(?:保留|剩下|留下|有)?[^。！？\n]{0,60}(?:环境声|环境音|音乐|画面)/;
@@ -230,21 +231,35 @@ function hasNonNarrationTail(text: string): boolean {
     if (!CHINESE_TAIL_PERIOD_PATTERN.test(sentence)) {
       continue;
     }
-    const remaining = sentence.replace(
-      new RegExp(CHINESE_NEGATED_TAIL_VOCAL_PATTERN.source, 'g'),
-      '',
-    );
-    if (
-      CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN.test(sentence) ||
-      new RegExp(CHINESE_VOCAL_WORDS).test(remaining)
-    ) {
-      return false;
-    }
-    if (
-      CHINESE_NEGATED_TAIL_VOCAL_PATTERN.test(sentence) ||
-      CHINESE_ONLY_ALLOWED_TAIL_PATTERN.test(sentence)
-    ) {
-      foundValidDeclaration = true;
+    const clauses = sentence.split(/[,，;；]+/);
+    for (let index = 0; index < clauses.length; index += 1) {
+      if (!CHINESE_TAIL_PERIOD_PATTERN.test(clauses[index])) {
+        continue;
+      }
+      const tailClauses = [clauses[index]];
+      for (const clause of clauses.slice(index + 1)) {
+        if (CHINESE_OTHER_TIME_PERIOD_PATTERN.test(clause)) {
+          break;
+        }
+        tailClauses.push(clause);
+      }
+      const tailScope = tailClauses.join('，');
+      const remaining = tailScope.replace(
+        new RegExp(CHINESE_NEGATED_TAIL_VOCAL_PATTERN.source, 'g'),
+        '',
+      );
+      if (
+        CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN.test(tailScope) ||
+        new RegExp(CHINESE_VOCAL_WORDS).test(remaining)
+      ) {
+        return false;
+      }
+      if (
+        CHINESE_NEGATED_TAIL_VOCAL_PATTERN.test(tailScope) ||
+        CHINESE_ONLY_ALLOWED_TAIL_PATTERN.test(tailScope)
+      ) {
+        foundValidDeclaration = true;
+      }
     }
   }
   for (const sentence of scope.split(/(?<=[.!?])\s+|\n+/)) {
