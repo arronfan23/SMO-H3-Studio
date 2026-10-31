@@ -44,7 +44,6 @@ function createSmoMock() {
       mediaUrl: vi.fn(),
       openFolder: vi.fn(),
       authorizeDroppedImage: vi.fn(),
-      getDroppedFilePath: vi.fn(),
     },
     llm: {
       saveProfile: vi.fn(),
@@ -86,10 +85,9 @@ beforeEach(() => {
   smo.files.mediaUrl.mockImplementation(async (path: string) =>
     `smo-media://media/${encodeURIComponent(path)}`,
   );
-  smo.files.getDroppedFilePath.mockImplementation(
-    (file: { name: string }) => `G:\\dropped\\${file.name}`,
+  smo.files.authorizeDroppedImage.mockImplementation(
+    async (file: { name: string }) => `G:\\dropped\\${file.name}`,
   );
-  smo.files.authorizeDroppedImage.mockImplementation(async (path: string) => path);
   smo.works.list.mockResolvedValue([]);
   smo.jobs.start.mockResolvedValue({ id: 'job-1' });
   smo.jobs.retry.mockRejectedValue(new Error('Unexpected retry'));
@@ -277,8 +275,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     const file = new File(['image'], 'dropped.png', { type: 'image/png' });
     fireEvent.drop(dropzone, { dataTransfer: { files: [file] } });
 
-    expect(smo.files.getDroppedFilePath).toHaveBeenCalledWith(file);
-    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith('G:\\dropped\\dropped.png');
+    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith(file);
     expect(smo.files.selectImage).not.toHaveBeenCalled();
     expect(
       await screen.findByRole('img', { name: '待保存模特照片预览' }),
@@ -298,6 +295,67 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     });
   });
 
+  test('keeps the drop highlight when moving into a child element', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    const child = screen.getByText('尚未选择照片');
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+
+    // jsdom's DragEvent does not reliably populate relatedTarget, so set it
+    // explicitly on a bubbling mouse event.
+    const enterChild = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(enterChild, 'relatedTarget', { value: child });
+    fireEvent(dropzone, enterChild);
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+
+    const leaveZone = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(leaveZone, 'relatedTarget', { value: document.body });
+    fireEvent(dropzone, leaveZone);
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'reset.png')] },
+    });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+  });
+
+  test('discards a stale dialog selection that resolves after a newer drop', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    let resolveSelect!: (path: string | null) => void;
+    smo.files.selectImage.mockImplementationOnce(
+      () => new Promise<string | null>((resolve) => { resolveSelect = resolve; }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], 'dropped.png')] } });
+
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.png')}`,
+    );
+
+    await act(async () => {
+      resolveSelect('G:\\photos\\stale-dialog.png');
+    });
+
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.png')}`,
+    );
+    expect(screen.getByText('dropped.png')).toBeInTheDocument();
+    expect(screen.queryByText('stale-dialog.png')).not.toBeInTheDocument();
+  });
+
   test('rejects dropping multiple files with a clear error', async () => {
     smo.avatars.list.mockResolvedValue([]);
     render(<App />);
@@ -311,7 +369,6 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     });
 
     expect(await screen.findByRole('alert')).toHaveTextContent('一次只能拖入一张照片');
-    expect(smo.files.getDroppedFilePath).not.toHaveBeenCalled();
     expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
     expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
   });
@@ -356,7 +413,9 @@ describe('SMO.H3 Studio navigation and avatars', () => {
       .mockImplementationOnce(
         () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
       )
-      .mockImplementationOnce(async (path: string) => path);
+      .mockImplementationOnce(
+        async (file: { name: string }) => `G:\\dropped\\${file.name}`,
+      );
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
@@ -513,7 +572,6 @@ describe('SMO.H3 Studio navigation and avatars', () => {
       dataTransfer: { files: [new File(['b'], 'during-save.png')] },
     });
 
-    expect(smo.files.getDroppedFilePath).not.toHaveBeenCalled();
     expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
     expect(preview).toHaveAttribute(
       'src',
@@ -526,8 +584,9 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     await screen.findByText(/已保存并选择/);
     expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
 
-    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['c'], 'after-save.png')] } });
-    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith('G:\\dropped\\after-save.png');
+    const afterFile = new File(['c'], 'after-save.png');
+    fireEvent.drop(dropzone, { dataTransfer: { files: [afterFile] } });
+    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith(afterFile);
     const nextPreview = await screen.findByRole('img', { name: '待保存模特照片预览' });
     expect(nextPreview).toHaveAttribute(
       'src',

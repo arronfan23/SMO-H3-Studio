@@ -16,10 +16,14 @@ const api: SmoApi = {
   files: {
     selectImage: () => ipcRenderer.invoke('files:selectImage', {}),
     selectAudio: () => ipcRenderer.invoke('files:selectAudio', {}),
-    authorizeDroppedImage: (path) =>
-      ipcRenderer.invoke('files:authorizeDroppedImage', { path }),
-    getDroppedFilePath: (file) =>
-      webUtils.getPathForFile(file as Parameters<typeof webUtils.getPathForFile>[0]),
+    authorizeDroppedImage: (file) =>
+      ipcRenderer.invoke('files:authorizeDroppedImage', {
+        // webUtils only accepts a real File from a drop event, which keeps
+        // the renderer from authorizing arbitrary string paths.
+        path: webUtils.getPathForFile(
+          file as Parameters<typeof webUtils.getPathForFile>[0],
+        ),
+      }),
     mediaUrl: (path) => ipcRenderer.invoke('files:mediaUrl', { path }),
     openFolder: (path) => ipcRenderer.invoke('files:openFolder', { path }),
   },

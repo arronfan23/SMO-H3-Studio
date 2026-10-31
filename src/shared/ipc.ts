@@ -353,11 +353,11 @@ export interface SmoApi {
   readonly files: {
     selectImage(): Promise<string | null>;
     selectAudio(): Promise<string | null>;
-    authorizeDroppedImage(path: string): Promise<string>;
-    // Resolves the absolute path of a dropped File via Electron webUtils in
-    // the preload; typed structurally so the main-process tsconfig (no DOM
-    // lib) still compiles the shared API surface.
-    getDroppedFilePath(file: unknown): string;
+    // Accepts the dropped File itself; the preload resolves its absolute path
+    // via Electron webUtils before invoking IPC, so the renderer can never
+    // authorize an arbitrary string path. Typed structurally (unknown) so the
+    // main-process tsconfig (no DOM lib) still compiles this API surface.
+    authorizeDroppedImage(file: unknown): Promise<string>;
     mediaUrl(path: string): Promise<string>;
     openFolder(path: string): Promise<void>;
   };

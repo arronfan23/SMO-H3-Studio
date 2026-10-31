@@ -1433,12 +1433,29 @@ describe('preload API', () => {
     webUtilsGetPathForFile.mockReset();
   });
 
-  test('resolves dropped file paths through webUtils without IPC', () => {
+  test('authorizes dropped images by resolving the File through webUtils, never a raw path', async () => {
     webUtilsGetPathForFile.mockReturnValue('G:\\photos\\dropped.png');
     const file = { name: 'dropped.png' };
 
-    expect(api.files.getDroppedFilePath(file)).toBe('G:\\photos\\dropped.png');
+    await api.files.authorizeDroppedImage(file);
+
     expect(webUtilsGetPathForFile).toHaveBeenCalledWith(file);
+    expect(ipcRendererInvoke).toHaveBeenCalledTimes(1);
+    expect(ipcRendererInvoke).toHaveBeenCalledWith('files:authorizeDroppedImage', {
+      path: 'G:\\photos\\dropped.png',
+    });
+  });
+
+  test('cannot authorize an arbitrary string path from the renderer', async () => {
+    webUtilsGetPathForFile.mockImplementation(() => {
+      throw new Error('getPathForFile expects a File object');
+    });
+
+    // webUtils.getPathForFile rejects non-File input synchronously, before
+    // any IPC round-trip can happen.
+    expect(() => api.files.authorizeDroppedImage('G:\\private\\hacked.png')).toThrow(
+      /File object/,
+    );
     expect(ipcRendererInvoke).not.toHaveBeenCalled();
   });
 
@@ -1476,7 +1493,6 @@ describe('preload API', () => {
     expect(Object.keys(api.works)).toEqual(['delete', 'list']);
     expect(Object.keys(api.files).sort()).toEqual([
       'authorizeDroppedImage',
-      'getDroppedFilePath',
       'mediaUrl',
       'openFolder',
       'selectAudio',
@@ -1553,7 +1569,10 @@ describe('preload API', () => {
     {
       channel: 'files:authorizeDroppedImage',
       payload: { path: 'G:\\photos\\dropped.png' },
-      call: (smo: SmoApi) => smo.files.authorizeDroppedImage('G:\\photos\\dropped.png'),
+      call: (smo: SmoApi) => {
+        webUtilsGetPathForFile.mockReturnValueOnce('G:\\photos\\dropped.png');
+        return smo.files.authorizeDroppedImage({ name: 'dropped.png' });
+      },
     },
     {
       channel: 'llm:saveProfile',

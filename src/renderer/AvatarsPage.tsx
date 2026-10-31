@@ -147,10 +147,10 @@ export function AvatarsPage({
     setAuthorizing(true);
     void (async () => {
       try {
-        // The renderer never trusts the dropped path directly: the main
-        // process must authorize it before it becomes the photo path.
-        const droppedPath = window.smo.files.getDroppedFilePath(file);
-        const authorized = await window.smo.files.authorizeDroppedImage(droppedPath);
+        // The renderer hands over the dropped File itself; the preload
+        // resolves its path and the main process must authorize it before it
+        // becomes the photo path.
+        const authorized = await window.smo.files.authorizeDroppedImage(file);
         if (mountedRef.current && photoRequestRef.current === requestId) {
           setPhotoPath(authorized);
           setNotice(null);
@@ -283,7 +283,14 @@ export function AvatarsPage({
                 setDropActive(true);
               }
             }}
-            onDragLeave={() => setDropActive(false)}
+            onDragLeave={(event) => {
+              // Moving into a child element fires dragleave on the zone; only
+              // clear the highlight when the pointer truly leaves it.
+              const next = event.relatedTarget;
+              if (!(next instanceof Node && event.currentTarget.contains(next))) {
+                setDropActive(false);
+              }
+            }}
             onDrop={handlePhotoDrop}
           >
             {photoPath === null ? (
