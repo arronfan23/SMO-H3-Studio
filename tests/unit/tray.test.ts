@@ -147,6 +147,7 @@ describe('tray lifecycle', () => {
     const first = controller.open();
     const second = controller.open();
 
+    expect(second).toBe(first);
     expect(createWindow).toHaveBeenCalledTimes(1);
     creation.resolve(replacementWindow);
     await Promise.all([first, second]);
@@ -193,6 +194,51 @@ describe('tray lifecycle', () => {
     expect(createWindow).toHaveBeenCalledTimes(2);
     expect(replacementWindow.show).toHaveBeenCalledTimes(1);
     expect(replacementWindow.focus).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not show or reopen a window when quit happens during creation', async () => {
+    const {
+      window,
+      replacementWindow,
+      controller,
+      createWindow,
+      onQuit,
+    } = createHarness();
+    const creation = createDeferred<WindowStub>();
+    createWindow.mockReturnValue(creation.promise);
+    window.destroy();
+
+    const opening = controller.open();
+    controller.quit();
+    creation.resolve(replacementWindow);
+    await opening;
+    await controller.open();
+
+    expect(onQuit).toHaveBeenCalledTimes(1);
+    expect(createWindow).toHaveBeenCalledTimes(1);
+    expect(replacementWindow.show).not.toHaveBeenCalled();
+    expect(replacementWindow.focus).not.toHaveBeenCalled();
+  });
+
+  test('does not show or attach to a recreated window that is already destroyed', async () => {
+    const {
+      window,
+      replacementWindow,
+      controller,
+      createWindow,
+    } = createHarness();
+    const creation = createDeferred<WindowStub>();
+    createWindow.mockReturnValue(creation.promise);
+    window.destroy();
+    replacementWindow.destroy();
+
+    const opening = controller.open();
+    creation.resolve(replacementWindow);
+    await opening;
+
+    expect(replacementWindow.on).not.toHaveBeenCalled();
+    expect(replacementWindow.show).not.toHaveBeenCalled();
+    expect(replacementWindow.focus).not.toHaveBeenCalled();
   });
 
   test('requests quit only once across repeated exit commands', () => {

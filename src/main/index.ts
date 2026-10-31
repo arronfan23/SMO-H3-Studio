@@ -14,6 +14,7 @@ registerPrivilegedMediaScheme(protocol);
 
 let mainWindow: BrowserWindow | undefined;
 let trayController: TrayController | undefined;
+let tray: Tray | undefined;
 
 function getWindowOptions() {
   return createWindowOptions({
@@ -65,7 +66,7 @@ void app
         click: () => trayController?.quit(),
       },
     ]);
-    const tray = new Tray(getWindowOptions().icon!);
+    tray = new Tray(getWindowOptions().icon!);
     tray.setToolTip('SMO.H3 Studio');
     trayController = createTrayController({
       window: mainWindow!,

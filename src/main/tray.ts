@@ -59,6 +59,9 @@ export function createTrayController({
   };
 
   const open = (): Promise<void> => {
+    if (isQuitting) {
+      return Promise.resolve();
+    }
     if (!currentWindow.isDestroyed()) {
       currentWindow.show();
       currentWindow.focus();
@@ -70,6 +73,9 @@ export function createTrayController({
     opening = createWindow()
       .then((newWindow) => {
         currentWindow = newWindow;
+        if (isQuitting || newWindow.isDestroyed()) {
+          return;
+        }
         attachWindow(currentWindow);
         currentWindow.show();
         currentWindow.focus();
