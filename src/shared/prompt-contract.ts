@@ -53,6 +53,9 @@ const CHINESE_VOCAL_WORDS = String.raw`(?:旁白|对白|语音|人声|配音|解
 const CHINESE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
   String.raw`(?:没有|无|不包含|不含|不再包含|不再有)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS}(?:\s*(?:、|/|或|和|与)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS})*`,
 );
+const CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN = new RegExp(
+  String.raw`(?:并非|不是)\s*(?:没有|无|不包含|不含|不再包含|不再有)\s*(?:任何|其他|其它)?\s*${CHINESE_VOCAL_WORDS}`,
+);
 const CHINESE_ONLY_ALLOWED_TAIL_PATTERN =
   /(?:仅|只)(?:保留|剩下|留下|有)?[^。！？\n]{0,60}(?:环境声|环境音|音乐|画面)/;
 
@@ -231,7 +234,10 @@ function hasNonNarrationTail(text: string): boolean {
       new RegExp(CHINESE_NEGATED_TAIL_VOCAL_PATTERN.source, 'g'),
       '',
     );
-    if (new RegExp(CHINESE_VOCAL_WORDS).test(remaining)) {
+    if (
+      CHINESE_DOUBLE_NEGATED_TAIL_VOCAL_PATTERN.test(sentence) ||
+      new RegExp(CHINESE_VOCAL_WORDS).test(remaining)
+    ) {
       return false;
     }
     if (
