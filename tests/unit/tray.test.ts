@@ -4,7 +4,6 @@ import type { Menu } from 'electron';
 import { describe, expect, test, vi } from 'vitest';
 import {
   createTrayController,
-  type TrayController,
   type TrayLike,
 } from '../../src/main/tray';
 
@@ -38,6 +37,18 @@ function createWindowStub() {
       return event;
     },
   };
+}
+
+type WindowStub = ReturnType<typeof createWindowStub>;
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function createHarness({ onQuit = vi.fn() }: { onQuit?: () => void } = {}) {
@@ -122,6 +133,68 @@ describe('tray lifecycle', () => {
     expect(replacementWindow.hide).toHaveBeenCalledTimes(1);
   });
 
+  test('shares one window creation across concurrent open commands', async () => {
+    const {
+      window,
+      replacementWindow,
+      controller,
+      createWindow,
+    } = createHarness();
+    const creation = createDeferred<WindowStub>();
+    createWindow.mockReturnValue(creation.promise);
+    window.destroy();
+
+    const first = controller.open();
+    const second = controller.open();
+
+    expect(createWindow).toHaveBeenCalledTimes(1);
+    creation.resolve(replacementWindow);
+    await Promise.all([first, second]);
+    expect(replacementWindow.show).toHaveBeenCalledTimes(1);
+  });
+
+  test('shares one window creation across tray and menu open commands', async () => {
+    const {
+      window,
+      replacementWindow,
+      controller,
+      createWindow,
+      clickTray,
+    } = createHarness();
+    const creation = createDeferred<WindowStub>();
+    createWindow.mockReturnValue(creation.promise);
+    window.destroy();
+
+    const fromTray = clickTray();
+    const fromMenu = controller.open();
+
+    expect(createWindow).toHaveBeenCalledTimes(1);
+    creation.resolve(replacementWindow);
+    await Promise.all([fromTray, fromMenu]);
+    expect(replacementWindow.show).toHaveBeenCalledTimes(1);
+  });
+
+  test('retries window creation after a failed open', async () => {
+    const {
+      window,
+      replacementWindow,
+      controller,
+      createWindow,
+    } = createHarness();
+    const failure = new Error('window creation failed');
+    createWindow
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(replacementWindow);
+    window.destroy();
+
+    await expect(controller.open()).rejects.toBe(failure);
+    await controller.open();
+
+    expect(createWindow).toHaveBeenCalledTimes(2);
+    expect(replacementWindow.show).toHaveBeenCalledTimes(1);
+    expect(replacementWindow.focus).toHaveBeenCalledTimes(1);
+  });
+
   test('requests quit only once across repeated exit commands', () => {
     const { controller, onQuit } = createHarness();
 
@@ -151,25 +224,116 @@ describe('tray lifecycle', () => {
     expect(onQuit).not.toHaveBeenCalled();
   });
 
-  test('existing before-quit cleanup runs once across the real quit sequence', () => {
-    const closeServices = vi.fn();
-    let cleanupStarted = false;
-    let controller!: TrayController;
-    const onQuit = vi.fn(() => {
-      controller.handleBeforeQuit();
-      if (cleanupStarted) {
-        return;
-      }
-      cleanupStarted = true;
-      closeServices();
+});
+
+describe('main process quit wiring', () => {
+  test('index before-quit closes services once and quits after cleanup', async () => {
+    vi.resetModules();
+    const listeners = new Map<
+      string,
+      Array<(event: { preventDefault(): void }) => void>
+    >();
+    const sequence: string[] = [];
+    const closing = createDeferred<void>();
+    const close = vi.fn(() => {
+      sequence.push('close:start');
+      return closing.promise;
     });
-    const harness = createHarness({ onQuit });
-    controller = harness.controller;
+    const app = {
+      isPackaged: false,
+      whenReady: vi.fn(() => Promise.resolve()),
+      on: vi.fn(
+        (
+          event: string,
+          listener: (event: { preventDefault(): void }) => void,
+        ) => {
+          listeners.set(event, [...(listeners.get(event) ?? []), listener]);
+        },
+      ),
+      quit: vi.fn(() => {
+        sequence.push('quit');
+      }),
+    };
+    const allWindows: unknown[] = [];
+    class BrowserWindowMock {
+      static getAllWindows = vi.fn(() => allWindows);
 
-    controller.quit();
-    controller.quit();
-    onQuit();
+      constructor() {
+        Object.assign(this, createWindowStub());
+        allWindows.push(this);
+      }
+    }
+    class TrayMock {
+      on = vi.fn();
+      setContextMenu = vi.fn();
+      setToolTip = vi.fn();
+    }
 
-    expect(closeServices).toHaveBeenCalledTimes(1);
+    try {
+      vi.doMock('electron', () => ({
+        app,
+        BrowserWindow: BrowserWindowMock,
+        dialog: { showErrorBox: vi.fn() },
+        Menu: { buildFromTemplate: vi.fn(() => ({})) },
+        protocol: {},
+        Tray: TrayMock,
+      }));
+      vi.doMock('../../src/main/bootstrap', () => ({
+        bootstrapApplication: vi.fn(
+          async ({ createMainWindow }: { createMainWindow: () => Promise<void> }) => {
+            await createMainWindow();
+            return { close };
+          },
+        ),
+      }));
+      vi.doMock('../../src/main/media', () => ({
+        registerPrivilegedMediaScheme: vi.fn(),
+      }));
+      vi.doMock('../../src/main/renderer', () => ({
+        createRendererLoadFailureMessage: vi.fn(() => 'renderer failed'),
+        loadRenderer: vi.fn(async () => undefined),
+        selectRendererTarget: vi.fn(() => ({})),
+      }));
+      vi.doMock('../../src/main/window-options', () => ({
+        createWindowOptions: vi.fn(() => ({ icon: 'smo.ico' })),
+      }));
+      vi.doMock('../../src/main/window-controls', () => ({
+        registerWindowControls: vi.fn(),
+      }));
+
+      await import('../../src/main/index');
+      await vi.waitFor(() => {
+        expect(listeners.get('before-quit')).toHaveLength(1);
+      });
+      const beforeQuit = listeners.get('before-quit')![0];
+      const firstEvent = { preventDefault: vi.fn() };
+      const repeatedEvent = { preventDefault: vi.fn() };
+
+      beforeQuit(firstEvent);
+      beforeQuit(repeatedEvent);
+
+      expect(firstEvent.preventDefault).toHaveBeenCalledTimes(1);
+      expect(repeatedEvent.preventDefault).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(app.quit).not.toHaveBeenCalled();
+
+      sequence.push('close:finish');
+      closing.resolve(undefined);
+      await vi.waitFor(() => {
+        expect(app.quit).toHaveBeenCalledTimes(1);
+      });
+      beforeQuit({ preventDefault: vi.fn() });
+
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(sequence).toEqual(['close:start', 'close:finish', 'quit']);
+    } finally {
+      vi.doUnmock('electron');
+      vi.doUnmock('../../src/main/bootstrap');
+      vi.doUnmock('../../src/main/media');
+      vi.doUnmock('../../src/main/renderer');
+      vi.doUnmock('../../src/main/window-options');
+      vi.doUnmock('../../src/main/window-controls');
+      vi.resetModules();
+    }
   });
 });

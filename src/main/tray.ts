@@ -44,6 +44,7 @@ export function createTrayController({
   let currentWindow = window;
   let isQuitting = false;
   let quitRequested = false;
+  let opening: Promise<void> | null = null;
 
   const handleClose = (event: TrayCloseEvent): void => {
     if (isQuitting) {
@@ -57,13 +58,26 @@ export function createTrayController({
     target.on('close', handleClose);
   };
 
-  const open = async (): Promise<void> => {
-    if (currentWindow.isDestroyed()) {
-      currentWindow = await createWindow();
-      attachWindow(currentWindow);
+  const open = (): Promise<void> => {
+    if (!currentWindow.isDestroyed()) {
+      currentWindow.show();
+      currentWindow.focus();
+      return Promise.resolve();
     }
-    currentWindow.show();
-    currentWindow.focus();
+    if (opening) {
+      return opening;
+    }
+    opening = createWindow()
+      .then((newWindow) => {
+        currentWindow = newWindow;
+        attachWindow(currentWindow);
+        currentWindow.show();
+        currentWindow.focus();
+      })
+      .finally(() => {
+        opening = null;
+      });
+    return opening;
   };
 
   const handleBeforeQuit = (): void => {
