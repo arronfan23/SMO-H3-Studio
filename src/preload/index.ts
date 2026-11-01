@@ -60,6 +60,7 @@ const api: SmoApi = {
   works: {
     delete: (id) => ipcRenderer.invoke('works:delete', { id }),
     list: () => ipcRenderer.invoke('works:list', {}),
+    rename: (input) => ipcRenderer.invoke('works:rename', input),
   },
   window: {
     minimize: () => ipcRenderer.invoke('window:minimize', {}),

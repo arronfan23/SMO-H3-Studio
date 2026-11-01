@@ -587,6 +587,7 @@ describe('GenerationHandler execution state metadata', () => {
 
     expect(work.error).toMatch(/timed out/i);
     expect(work.promptId).toBe('prompt-1');
+    expect(work.completedAt).toBeNull();
     expect(harness.comfy.cancelRequests).toEqual(['prompt-1']);
   });
 });
@@ -625,10 +626,16 @@ describe('GenerationHandler workflows', () => {
       mode: 'text',
       status: 'done',
       outputPath: join(harness.outputDirectory, 'SMO-H3', 'result.mp4'),
+      title: null,
       promptId: 'prompt-1',
       error: null,
       metadata: { request, workflowVersion: 'text-ref2va.json' },
     });
+    expect(work.completedAt).not.toBeNull();
+    expect(new Date(work.completedAt!).toISOString()).toBe(work.completedAt);
+    expect(Date.parse(work.completedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(work.createdAt),
+    );
     expect(harness.events.map(({ id, status }) => ({ id, status }))).toEqual([
       { id: result.id, status: 'pending' },
       { id: result.id, status: 'running' },

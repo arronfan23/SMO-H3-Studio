@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react';
+import { ExternalLink, FolderOpen, Pencil, Play, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react';
 import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { WorkProgressBar } from './WorkProgressBar';
 import { useMediaUrl } from './useMediaUrl';
-import { errorMessage, fileName, parentPath, readWorkExecution, readWorkProgress } from './ui';
+import { errorMessage, fileName, formatElapsedDuration, parentPath, readWorkExecution, readWorkProgress } from './ui';
 
 const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -28,6 +28,27 @@ function WorkVideo({ work }: { work: Work }) {
   return <video aria-label={`作品视频 ${work.id}`} controls preload="metadata" src={url} />;
 }
 
+/**
+ * Completion timestamp shown for done works: the recorded completedAt, with a
+ * fallback to the last persisted execution update for records written before
+ * completedAt existed. Returns null when neither is available.
+ */
+function readWorkCompletion(work: Work): { completedAt: string; duration: string } | null {
+  if (work.status !== 'done') {
+    return null;
+  }
+  const completedAt = work.completedAt ?? readWorkExecution(work)?.updatedAt ?? null;
+  if (completedAt === null) {
+    return null;
+  }
+  const completedMs = Date.parse(completedAt);
+  const createdMs = Date.parse(work.createdAt);
+  if (Number.isNaN(completedMs) || Number.isNaN(createdMs)) {
+    return null;
+  }
+  return { completedAt, duration: formatElapsedDuration(completedMs - createdMs) };
+}
+
 export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,8 +59,13 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [deleteTarget, setDeleteTarget] = useState<Work | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Work | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -97,6 +123,11 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const avatarName = (id: string): string =>
     avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
 
+  const workTitle = (work: Work): string =>
+    work.title !== null && work.title.trim().length > 0
+      ? work.title
+      : avatarName(work.avatarId);
+
   const retry = async (work: Work): Promise<void> => {
     setRetrying((current) => new Set(current).add(work.id));
     setRetryError((current) => ({ ...current, [work.id]: '' }));
@@ -153,6 +184,78 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
       pageRef.current?.focus();
     }
   }, [deleteTarget]);
+
+  const renameDialogWasOpen = useRef(false);
+
+  useEffect(() => {
+    if (renameTarget !== null) {
+      renameDialogWasOpen.current = true;
+      return;
+    }
+    if (!renameDialogWasOpen.current) {
+      return;
+    }
+    renameDialogWasOpen.current = false;
+    const trigger = renameTriggerRef.current;
+    renameTriggerRef.current = null;
+    if (trigger !== null && trigger.isConnected) {
+      trigger.focus();
+    } else {
+      pageRef.current?.focus();
+    }
+  }, [renameTarget]);
+
+  const openRenameDialog = (work: Work, trigger: HTMLButtonElement): void => {
+    renameTriggerRef.current = trigger;
+    setRenameTarget(work);
+    setRenameValue(work.title ?? '');
+    setRenameError(null);
+  };
+
+  const closeRenameDialog = (): void => {
+    setRenameTarget(null);
+    setRenameError(null);
+  };
+
+  const confirmRename = async (): Promise<void> => {
+    if (renameTarget === null || renaming) {
+      return;
+    }
+    if (renameValue.trim().length === 0) {
+      setRenameError('作品标题不能为空');
+      return;
+    }
+    setRenaming(true);
+    setRenameError(null);
+    try {
+      await window.smo.works.rename({ id: renameTarget.id, title: renameValue });
+      if (!mountedRef.current) {
+        return;
+      }
+      await refresh();
+      if (mountedRef.current) {
+        closeRenameDialog();
+      }
+    } catch (renameFailure) {
+      if (mountedRef.current) {
+        setRenameError(errorMessage(renameFailure));
+      }
+    } finally {
+      if (mountedRef.current) {
+        setRenaming(false);
+      }
+    }
+  };
+
+  const handleRenameDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!renaming) {
+        closeRenameDialog();
+      }
+    }
+  };
 
   const openDeleteDialog = (work: Work, trigger: HTMLButtonElement): void => {
     deleteTriggerRef.current = trigger;
@@ -256,12 +359,18 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
         <div className="empty-state"><h3>还没有作品</h3><p>提交生成任务后，可在这里查看真实进度和输出。</p></div>
       ) : (
         <div className="works-list">
-          {filteredWorks.map((work) => (
+          {filteredWorks.map((work) => {
+            const completion = readWorkCompletion(work);
+            return (
             <article className="work-item" key={work.id}>
               <header className="work-header">
                 <div>
-                  <h3>{avatarName(work.avatarId)}</h3>
-                  <p>{work.mode === 'text' ? '文字生视频' : '音频数字人'} · {new Date(work.createdAt).toLocaleString('zh-CN')}</p>
+                  <h3>{workTitle(work)}</h3>
+                  <p>
+                    {work.mode === 'text' ? '文字生视频' : '音频数字人'} · {new Date(work.createdAt).toLocaleString('zh-CN')}
+                    {completion !== null &&
+                      ` · 完成于 ${new Date(completion.completedAt).toLocaleString('zh-CN')} · 耗时 ${completion.duration}`}
+                  </p>
                 </div>
                 <StatusBadge status={work.status} />
               </header>
@@ -279,6 +388,15 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
               {retryError[work.id] && <p className="form-error" role="alert">{retryError[work.id]}</p>}
               {work.status === 'done' && work.outputPath && <WorkVideo work={work} />}
               <div className="work-actions">
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  aria-label={`重命名作品 ${work.id}`}
+                  onClick={(event) => openRenameDialog(work, event.currentTarget)}
+                >
+                  <Pencil size={16} aria-hidden="true" />
+                  重命名
+                </button>
                 {work.status === 'failed' && (
                   <button
                     className="button button-secondary"
@@ -323,7 +441,8 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 )}
               </div>
             </article>
-          ))}
+            );
+          })}
         </div>
       )}
       {deleteTarget !== null && (
@@ -363,6 +482,48 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 onClick={() => void confirmDelete()}
               >
                 {deleting ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {renameTarget !== null && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="重命名作品"
+          onKeyDown={handleRenameDialogKeyDown}
+        >
+          <div className="modal-card">
+            <h3>重命名作品</h3>
+            <div className="field">
+              <label htmlFor="work-rename-title">作品标题</label>
+              <input
+                id="work-rename-title"
+                value={renameValue}
+                maxLength={120}
+                autoFocus
+                onChange={(event) => setRenameValue(event.target.value)}
+              />
+            </div>
+            {renameError && <p className="form-error" role="alert">{renameError}</p>}
+            <div className="modal-actions">
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={renaming}
+                onClick={closeRenameDialog}
+              >
+                <X size={16} aria-hidden="true" /> 取消
+              </button>
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={renaming}
+                onClick={() => void confirmRename()}
+              >
+                {renaming ? '正在保存…' : '保存标题'}
               </button>
             </div>
           </div>

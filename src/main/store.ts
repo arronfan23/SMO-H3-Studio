@@ -9,8 +9,17 @@ import type {
   WorkUpdate,
 } from '../shared/types';
 
-const WORK_COLUMNS = 'id, avatarId, mode, outputPath, status, createdAt, promptId, metadata, error';
-const WORK_UPDATE_FIELDS = new Set(['status', 'outputPath', 'promptId', 'error', 'metadata']);
+const WORK_COLUMNS =
+  'id, avatarId, mode, outputPath, status, createdAt, title, completedAt, promptId, metadata, error';
+const WORK_UPDATE_FIELDS = new Set([
+  'status',
+  'outputPath',
+  'title',
+  'completedAt',
+  'promptId',
+  'error',
+  'metadata',
+]);
 
 function serializeMetadata(metadata: Work['metadata']): string | null {
   if (metadata === null) {
@@ -31,6 +40,8 @@ function toWork(row: Record<string, unknown>): Work {
     outputPath: row.outputPath as string | null,
     status: row.status as WorkStatus,
     createdAt: row.createdAt as string,
+    title: row.title as string | null,
+    completedAt: row.completedAt as string | null,
     promptId: row.promptId as string | null,
     metadata:
       row.metadata === null
@@ -64,6 +75,8 @@ export class Store {
           outputPath TEXT,
           status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
           createdAt TEXT NOT NULL,
+          title TEXT,
+          completedAt TEXT,
           promptId TEXT,
           metadata TEXT,
           error TEXT,
@@ -77,7 +90,7 @@ export class Store {
           .all()
           .map((row) => row.name as string),
       );
-      for (const column of ['promptId', 'metadata', 'error']) {
+      for (const column of ['title', 'completedAt', 'promptId', 'metadata', 'error']) {
         if (!workColumns.has(column)) {
           db.exec(`ALTER TABLE works ADD COLUMN ${column} TEXT`);
         }
@@ -167,6 +180,8 @@ export class Store {
 
     const work: Work = {
       ...input,
+      title: input.title ?? null,
+      completedAt: input.completedAt ?? null,
       promptId: input.promptId ?? null,
       metadata: input.metadata ?? null,
       error: input.error ?? null,
@@ -174,8 +189,8 @@ export class Store {
     };
     this.db
       .prepare(
-        `INSERT INTO works (id, avatarId, mode, outputPath, status, createdAt, promptId, metadata, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO works (id, avatarId, mode, outputPath, status, createdAt, title, completedAt, promptId, metadata, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         work.id,
@@ -184,6 +199,8 @@ export class Store {
         work.outputPath,
         work.status,
         work.createdAt,
+        work.title,
+        work.completedAt,
         work.promptId,
         serializeMetadata(work.metadata),
         work.error,
@@ -241,6 +258,15 @@ export class Store {
       .run(...values, id);
 
     return this.getWork(id)!;
+  }
+
+  /** Renames a work in the database only; the output file is never touched. */
+  renameWork(id: string, title: string): Work {
+    const trimmed = title.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Work title must not be empty');
+    }
+    return this.updateWork(id, { title: trimmed });
   }
 
   deleteWork(id: string): Work {

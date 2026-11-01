@@ -555,6 +555,7 @@ export function createGenerationHandler(
         store.updateWork(workId, {
           status: 'done',
           outputPath,
+          completedAt: nowIso(),
           error: null,
         });
       } catch (error) {

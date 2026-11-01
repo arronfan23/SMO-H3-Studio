@@ -27,6 +27,8 @@ function createWork(overrides: Partial<Work>): Work {
     outputPath: null,
     status: 'pending',
     createdAt: '2026-10-26T08:01:00.000Z',
+    title: null,
+    completedAt: null,
     promptId: null,
     metadata: null,
     error: null,
@@ -62,7 +64,7 @@ function createSmoMock() {
       validate: vi.fn(),
     },
     hardware: { detect: vi.fn(), recommend: vi.fn(), apply: vi.fn() },
-    works: { list: vi.fn(), delete: vi.fn() },
+    works: { list: vi.fn(), delete: vi.fn(), rename: vi.fn() },
   };
 }
 
@@ -89,6 +91,7 @@ beforeEach(() => {
     async (file: { name: string }) => `G:\\dropped\\${file.name}`,
   );
   smo.works.list.mockResolvedValue([]);
+  smo.works.rename.mockRejectedValue(new Error('Unexpected work rename'));
   smo.jobs.start.mockResolvedValue({ id: 'job-1' });
   smo.jobs.retry.mockRejectedValue(new Error('Unexpected retry'));
   smo.jobs.cancel.mockResolvedValue(undefined);
@@ -2523,5 +2526,239 @@ describe('works deletion', () => {
     });
 
     expect(smo.works.list.mock.calls.length).toBe(listCallsBeforeDelete);
+  });
+});
+
+describe('works title and completion time', () => {
+  const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
+
+  async function openWorksPage() {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByRole('heading', { name: '我的作品' });
+  }
+
+  test('shows the custom title and falls back to the avatar name without one', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'titled-work', status: 'done', outputPath, title: '新品发布会' }),
+      createWork({ id: 'untitled-work', status: 'done', outputPath, title: null }),
+    ]);
+
+    await openWorksPage();
+
+    expect(await screen.findByRole('heading', { name: '新品发布会' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '薄荷主播' })).toBeInTheDocument();
+  });
+
+  test('shows the completion time and elapsed duration for a done work', async () => {
+    const completedAt = '2026-10-26T08:03:05.000Z';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'done-work',
+        status: 'done',
+        outputPath,
+        createdAt: '2026-10-26T08:00:00.000Z',
+        completedAt,
+      }),
+    ]);
+
+    await openWorksPage();
+
+    const header = await screen.findByText(/耗时/);
+    expect(header).toHaveTextContent(
+      `完成于 ${new Date(completedAt).toLocaleString('zh-CN')}`,
+    );
+    expect(header).toHaveTextContent('耗时 3 分 5 秒');
+  });
+
+  test('shows a seconds-only duration for quick generations', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'done-work',
+        status: 'done',
+        outputPath,
+        createdAt: '2026-10-26T08:00:00.000Z',
+        completedAt: '2026-10-26T08:00:30.000Z',
+      }),
+    ]);
+
+    await openWorksPage();
+
+    expect(await screen.findByText(/耗时 30 秒/)).toBeInTheDocument();
+  });
+
+  test('falls back to the last execution update for legacy done works', async () => {
+    const updatedAt = '2026-10-26T08:00:45.000Z';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'legacy-done',
+        status: 'done',
+        outputPath,
+        createdAt: '2026-10-26T08:00:00.000Z',
+        completedAt: null,
+        metadata: {
+          execution: { stage: 'finalizing', updatedAt, lastProgressAt: updatedAt },
+        },
+      }),
+    ]);
+
+    await openWorksPage();
+
+    const header = await screen.findByText(/耗时/);
+    expect(header).toHaveTextContent(
+      `完成于 ${new Date(updatedAt).toLocaleString('zh-CN')}`,
+    );
+    expect(header).toHaveTextContent('耗时 45 秒');
+  });
+
+  test('hides the completion time for legacy works without any timestamp', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'timeless-done',
+        status: 'done',
+        outputPath,
+        completedAt: null,
+        metadata: null,
+      }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    expect(screen.queryByText(/完成于/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/耗时/)).not.toBeInTheDocument();
+  });
+
+  test('never shows a completion duration for failed works', async () => {
+    const updatedAt = '2026-10-26T08:00:45.000Z';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'failed-work',
+        status: 'failed',
+        error: 'ComfyUI offline',
+        completedAt: null,
+        metadata: {
+          execution: { stage: 'executing', updatedAt, lastProgressAt: updatedAt },
+        },
+      }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByText('ComfyUI offline');
+
+    expect(screen.queryByText(/完成于/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/耗时/)).not.toBeInTheDocument();
+  });
+});
+
+describe('works rename', () => {
+  const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
+
+  async function openWorksPage() {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByRole('heading', { name: '我的作品' });
+  }
+
+  test('renames a work through the modal and refreshes the list', async () => {
+    smo.works.list
+      .mockResolvedValueOnce([
+        createWork({ id: 'done-work', status: 'done', outputPath }),
+      ])
+      .mockResolvedValue([
+        createWork({ id: 'done-work', status: 'done', outputPath, title: '新品发布会' }),
+      ]);
+    smo.works.rename.mockResolvedValue(
+      createWork({ id: 'done-work', status: 'done', outputPath, title: '新品发布会' }),
+    );
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    const input = within(dialog).getByLabelText('作品标题');
+    expect(input).toHaveValue('');
+    fireEvent.change(input, { target: { value: '  新品发布会  ' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    await waitFor(() =>
+      expect(smo.works.rename).toHaveBeenCalledWith({
+        id: 'done-work',
+        title: '  新品发布会  ',
+      }),
+    );
+    expect(await screen.findByRole('heading', { name: '新品发布会' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  test('prefills the current title in the rename modal', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath, title: '旧标题' }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '旧标题' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+
+    expect(screen.getByLabelText('作品标题')).toHaveValue('旧标题');
+  });
+
+  test('rejects an empty title locally without calling the API', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    fireEvent.change(within(dialog).getByLabelText('作品标题'), {
+      target: { value: '   ' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/不能为空/);
+    expect(smo.works.rename).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: '重命名作品' })).toBeInTheDocument();
+  });
+
+  test('shows the rename error and keeps the modal open', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+    smo.works.rename.mockRejectedValue(new Error('数据库繁忙'));
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    fireEvent.change(within(dialog).getByLabelText('作品标题'), {
+      target: { value: '新标题' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('数据库繁忙');
+    expect(screen.getByRole('dialog', { name: '重命名作品' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '薄荷主播' })).toBeInTheDocument();
+  });
+
+  test('closes the rename modal without saving on cancel', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(smo.works.rename).not.toHaveBeenCalled();
   });
 });

@@ -461,6 +461,15 @@ describe('IPC input schema', () => {
     expect(
       schema.parse({ channel: 'works:delete', payload: { id: 'work-1' } }),
     ).toEqual({ channel: 'works:delete', payload: { id: 'work-1' } });
+    expect(
+      schema.parse({
+        channel: 'works:rename',
+        payload: { id: 'work-1', title: '新标题' },
+      }),
+    ).toEqual({
+      channel: 'works:rename',
+      payload: { id: 'work-1', title: '新标题' },
+    });
 
     const hardware = schema.parse({
       channel: 'hardware:apply',
@@ -555,6 +564,11 @@ describe('IPC input schema', () => {
     { channel: 'avatars:delete', payload: { id: 'avatar-1', force: true } },
     { channel: 'works:delete', payload: { id: '' } },
     { channel: 'works:delete', payload: { id: 'work-1', force: true } },
+    { channel: 'works:rename', payload: { id: '', title: '新标题' } },
+    { channel: 'works:rename', payload: { id: 'work-1' } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '' } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '   ' } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '新标题', outputPath: 'x' } },
   ])('rejects invalid avatar mutation input: %j', (request) => {
     expect(() => createIpcSchema().parse(request)).toThrow();
   });
@@ -955,6 +969,41 @@ describe('main-process IPC handlers', () => {
       harness.invoke('works:delete', { id: 'work-1' }),
     ).resolves.toBeUndefined();
     expect(deleted).toEqual(['work-1']);
+  });
+
+  test('renames a work through the real Store without touching the output path', async () => {
+    const harness = await createHarness();
+    const avatar = harness.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    const work = harness.store.addWork({
+      id: 'work-1',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: 'output/work-1.mp4',
+      status: 'done',
+    });
+
+    const renamed = (await harness.invoke('works:rename', {
+      id: work.id,
+      title: '  发布会成片  ',
+    })) as Work;
+
+    expect(renamed).toMatchObject({
+      id: work.id,
+      title: '发布会成片',
+      outputPath: 'output/work-1.mp4',
+    });
+    expect(harness.store.getWork(work.id)).toMatchObject({
+      title: '发布会成片',
+      outputPath: 'output/work-1.mp4',
+    });
+
+    await expect(
+      harness.invoke('works:rename', { id: work.id, title: '   ' }),
+    ).rejects.toThrow();
+    expect(harness.store.getWork(work.id)?.title).toBe('发布会成片');
   });
 
   test('uses saved main-process credentials for all LLM services', async () => {
@@ -1490,7 +1539,7 @@ describe('preload API', () => {
       'validate',
     ]);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
-    expect(Object.keys(api.works)).toEqual(['delete', 'list']);
+    expect(Object.keys(api.works)).toEqual(['delete', 'list', 'rename']);
     expect(Object.keys(api.files).sort()).toEqual([
       'authorizeDroppedImage',
       'mediaUrl',
@@ -1718,6 +1767,11 @@ describe('preload API', () => {
       channel: 'works:delete',
       payload: { id: 'work-1' },
       call: (smo: SmoApi) => smo.works.delete('work-1'),
+    },
+    {
+      channel: 'works:rename',
+      payload: { id: 'work-1', title: '新标题' },
+      call: (smo: SmoApi) => smo.works.rename({ id: 'work-1', title: '新标题' }),
     },
     {
       channel: 'window:minimize',

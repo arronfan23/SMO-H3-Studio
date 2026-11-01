@@ -61,6 +61,7 @@ export const IPC_CHANNELS = [
   'avatars:delete',
   'works:list',
   'works:delete',
+  'works:rename',
   'comfy:health',
   'comfy:start',
   'comfy:open',
@@ -295,6 +296,10 @@ export function createIpcSchema() {
       'works:delete',
       z.object({ id: nonEmptyString }).strict(),
     ),
+    requestSchema(
+      'works:rename',
+      z.object({ id: nonEmptyString, title: nonEmptyString }).strict(),
+    ),
     requestSchema('comfy:health', emptyPayload),
     requestSchema('comfy:start', emptyPayload),
     requestSchema('comfy:open', emptyPayload),
@@ -390,6 +395,7 @@ export interface SmoApi {
   readonly works: {
     list(): Promise<Work[]>;
     delete(id: string): Promise<void>;
+    rename(input: IpcPayload<'works:rename'>): Promise<Work>;
   };
   readonly window: {
     minimize(): Promise<void>;

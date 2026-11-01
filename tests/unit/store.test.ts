@@ -271,6 +271,33 @@ describe('work library', () => {
       expect(store.listWorks()).toEqual([work]);
     });
   });
+
+  test('defaults the title and completion time to null', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork(makeWork(avatar.id));
+
+      expect(work.title).toBeNull();
+      expect(work.completedAt).toBeNull();
+      expect(store.listWorks()).toEqual([work]);
+    });
+  });
+
+  test('stores an explicit title and completion time', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const completedAt = '2026-10-26T09:30:00.000Z';
+      const work = store.addWork({
+        ...makeWork(avatar.id),
+        title: '开场白视频',
+        completedAt,
+      });
+
+      expect(work).toMatchObject({ title: '开场白视频', completedAt });
+      expect(store.getWork(work.id)).toEqual(work);
+      expect(store.listWorks()).toEqual([work]);
+    });
+  });
 });
 
 describe('work updates', () => {
@@ -318,12 +345,16 @@ describe('work updates', () => {
       const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
       const work = store.addWork({
         ...makeWork(avatar.id),
+        title: '旧标题',
+        completedAt: '2026-10-26T09:30:00.000Z',
         promptId: 'prompt-1',
         error: 'Previous error',
         metadata: { workflowVersion: 'text-ref2va.json' },
       });
 
       const updated = store.updateWork(work.id, {
+        title: null,
+        completedAt: null,
         outputPath: null,
         promptId: null,
         error: null,
@@ -332,11 +363,41 @@ describe('work updates', () => {
 
       expect(updated).toEqual({
         ...work,
+        title: null,
+        completedAt: null,
         outputPath: null,
         promptId: null,
         error: null,
         metadata: null,
       });
+    });
+  });
+
+  test('updates the title and completion time through the whitelist', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork({
+        ...makeWork(avatar.id),
+        outputPath: null,
+        status: 'pending',
+      });
+      const completedAt = '2026-10-26T10:00:00.000Z';
+
+      const updated = store.updateWork(work.id, {
+        status: 'done',
+        outputPath: 'works/final.mp4',
+        title: '新标题',
+        completedAt,
+      });
+
+      expect(updated).toMatchObject({
+        id: work.id,
+        status: 'done',
+        outputPath: 'works/final.mp4',
+        title: '新标题',
+        completedAt,
+      });
+      expect(store.listWorks()).toEqual([updated]);
     });
   });
 
@@ -363,6 +424,39 @@ describe('work updates', () => {
       expect(() => store.updateWork('missing', { status: 'failed' })).toThrow(
         /work not found/i,
       );
+    });
+  });
+});
+
+describe('work rename', () => {
+  test('renames a work, trimming the title and keeping every other field', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork(makeWork(avatar.id));
+
+      const renamed = store.renameWork(work.id, '  产品发布会  ');
+
+      expect(renamed).toEqual({ ...work, title: '产品发布会' });
+      expect(store.getWork(work.id)).toEqual(renamed);
+      expect(store.listWorks()).toEqual([renamed]);
+    });
+  });
+
+  test.each(['', '   '])('rejects an empty work rename %j', (title) => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork(makeWork(avatar.id));
+
+      expect(() => store.renameWork(work.id, title)).toThrow(
+        /work title must not be empty/i,
+      );
+      expect(store.getWork(work.id)).toEqual(work);
+    });
+  });
+
+  test('rejects renaming an unknown work', () => {
+    withStore((store) => {
+      expect(() => store.renameWork('missing', '标题')).toThrow(/work not found/i);
     });
   });
 });
@@ -413,16 +507,20 @@ describe('schema initialization', () => {
           outputPath: 'works/old.mp4',
           status: 'done',
           createdAt,
+          title: null,
+          completedAt: null,
           promptId: null,
           metadata: null,
           error: null,
         },
       ]);
 
-      store.updateWork('work-old', {
+      const updated = store.updateWork('work-old', {
+        title: '旧作品新标题',
         promptId: 'prompt-old',
         metadata: { workflowVersion: 'audio-digital-human.json' },
       });
+      expect(updated.title).toBe('旧作品新标题');
     }, databasePath);
 
     const migrated = new DatabaseSync(databasePath);
@@ -430,6 +528,9 @@ describe('schema initialization', () => {
       expect(migrated.prepare('SELECT COUNT(*) AS count FROM works').get()?.count).toBe(1);
       expect(migrated.prepare('SELECT promptId FROM works WHERE id = ?').get('work-old')).toEqual({
         promptId: 'prompt-old',
+      });
+      expect(migrated.prepare('SELECT title FROM works WHERE id = ?').get('work-old')).toEqual({
+        title: '旧作品新标题',
       });
     } finally {
       migrated.close();

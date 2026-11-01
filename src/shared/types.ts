@@ -71,16 +71,26 @@ export interface Work {
   outputPath: string | null;
   status: WorkStatus;
   createdAt: string;
+  /** Optional user-given title; the UI falls back to the avatar name when null. */
+  title: string | null;
+  /** ISO timestamp recorded when the generation finished; null for older records. */
+  completedAt: string | null;
   promptId: string | null;
   metadata: WorkMetadata | null;
   error: string | null;
 }
 
-export type NewWork = Omit<Work, 'createdAt' | 'promptId' | 'metadata' | 'error'> &
-  Partial<Pick<Work, 'promptId' | 'metadata' | 'error'>>;
+export type NewWork = Omit<
+  Work,
+  'createdAt' | 'title' | 'completedAt' | 'promptId' | 'metadata' | 'error'
+> &
+  Partial<Pick<Work, 'title' | 'completedAt' | 'promptId' | 'metadata' | 'error'>>;
 
 export type WorkUpdate = Partial<
-  Pick<Work, 'status' | 'outputPath' | 'promptId' | 'error' | 'metadata'>
+  Pick<
+    Work,
+    'status' | 'outputPath' | 'title' | 'completedAt' | 'promptId' | 'error' | 'metadata'
+  >
 >;
 
 export interface LlmProfile {

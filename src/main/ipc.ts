@@ -44,7 +44,7 @@ export interface IpcServices {
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
-  store: Pick<Store, 'listAvatars' | 'listWorks'>;
+  store: Pick<Store, 'listAvatars' | 'listWorks' | 'renameWork'>;
   avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
   files: Pick<
     FileService,
@@ -139,6 +139,8 @@ async function dispatch(
     case 'works:delete':
       await services.deleteWork(request.payload.id);
       return undefined;
+    case 'works:rename':
+      return services.store.renameWork(request.payload.id, request.payload.title);
     case 'comfy:health':
       return services.comfy.health();
     case 'comfy:start':
