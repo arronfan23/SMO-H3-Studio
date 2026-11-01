@@ -696,7 +696,13 @@ export class EnvironmentSetupService {
     };
     try {
       const hardware = await this.options.detectHardware(normalizedRoot);
-      this.state = { ...this.state, hardware, active: false, error: restoredError };
+      this.state = {
+        ...this.state,
+        hardware,
+        stage: 'select',
+        active: false,
+        error: restoredError,
+      };
       return this.getState();
     } catch (error) {
       this.state = { ...this.state, active: false, healthy: false, error: errorMessage(error) };

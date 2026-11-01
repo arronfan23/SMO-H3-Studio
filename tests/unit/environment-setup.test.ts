@@ -595,6 +595,20 @@ describe('EnvironmentSetupService installation', () => {
 });
 
 describe('EnvironmentSetupService operation coordination', () => {
+  test('successful detection moves to profile selection without starting a download', async () => {
+    const harness = await createHarness();
+
+    const state = await harness.service.detect(harness.installRoot);
+
+    expect(state).toMatchObject({
+      stage: 'select',
+      active: false,
+      progress: { downloadedBytes: 0, totalBytes: 0 },
+    });
+    expect(harness.downloads.parts).not.toHaveBeenCalled();
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+  });
+
   test('start rejects while a detect operation is in flight', async () => {
     const detectStarted = createDeferred();
     const finishDetect = createDeferred();

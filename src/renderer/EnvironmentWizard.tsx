@@ -64,6 +64,14 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
   const currentStage = STAGES[stageIndex] ?? STAGES[0];
   const progress = state?.progress ?? { downloadedBytes: 0, totalBytes: 0 };
   const hasTotal = progress.totalBytes > 0;
+  const waitingForProgress = state?.active === true && !hasTotal;
+  const emptyProgressMessage = state?.active
+    ? state.stage === 'detect'
+      ? '正在检测硬件，暂未开始下载'
+      : '正在获取下载信息…'
+    : state?.stage === 'select'
+      ? '检测完成，点击“开始安装”后开始下载'
+      : '尚未开始安装';
   const percentage = hasTotal
     ? Math.min(100, Math.floor((progress.downloadedBytes / progress.totalBytes) * 100))
     : 0;
@@ -232,14 +240,14 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
                       <strong>{percentage}%</strong>
                     </>
                   ) : (
-                    <span>等待可计算的下载进度</span>
+                    <span>{emptyProgressMessage}</span>
                   )}
                 </div>
                 <progress
-                  className={hasTotal ? 'environment-progress' : 'environment-progress environment-progress-indeterminate'}
+                  className={waitingForProgress ? 'environment-progress environment-progress-indeterminate' : 'environment-progress'}
                   aria-label="安装进度"
                   max={hasTotal ? progress.totalBytes : 1}
-                  value={hasTotal ? progress.downloadedBytes : undefined}
+                  value={hasTotal ? progress.downloadedBytes : waitingForProgress ? undefined : 0}
                 />
                 <p className="environment-current-file">
                   {progress.currentFile ? `当前文件：${fileName(progress.currentFile)}` : '当前文件：—'}

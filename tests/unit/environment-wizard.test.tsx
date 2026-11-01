@@ -393,6 +393,22 @@ describe('first-launch environment wizard', () => {
     const progress = await screen.findByRole('progressbar', { name: '安装进度' });
     expect(progress).not.toHaveAttribute('value');
     expect(progress).toHaveClass('environment-progress-indeterminate');
+    expect(screen.getByText('正在检测硬件，暂未开始下载')).toBeInTheDocument();
+  });
+
+  test('shows an idle selection prompt instead of a download wait before start', async () => {
+    smo.environment.getState.mockResolvedValue(environmentState({
+      active: false,
+      stage: 'select',
+      progress: { downloadedBytes: 0, totalBytes: 0 },
+    }));
+    render(<App />);
+
+    const progress = await screen.findByRole('progressbar', { name: '安装进度' });
+    expect(screen.getByText('检测完成，点击“开始安装”后开始下载')).toBeInTheDocument();
+    expect(screen.queryByText('等待可计算的下载进度')).not.toBeInTheDocument();
+    expect(progress).toHaveAttribute('value', '0');
+    expect(progress).not.toHaveClass('environment-progress-indeterminate');
   });
 
   test('polls active state every 750 ms and stops when installation becomes inactive', async () => {
