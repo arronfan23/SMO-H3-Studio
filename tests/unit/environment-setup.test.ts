@@ -741,9 +741,38 @@ describe('EnvironmentSetupService existing environment import', () => {
     expect(harness.backend).not.toHaveBeenCalled();
   });
 
-  test('accepts only the injected fingerprint for the legacy LoRA variant', async () => {
+  test('accepts the official LoRA when a legacy variant is injected', async () => {
+    const officialContent = Buffer.from('official-lora');
+    const legacyContent = Buffer.from('legacy-variant-a');
+    const manifest = makeSingleModelManifest(officialContent, LEGACY_LORA);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => officialContent,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: {
+            size: legacyContent.length,
+            sha256: sha256(legacyContent),
+          },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => officialContent });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true });
+  });
+
+  test('accepts the injected fingerprint for the legacy LoRA variant', async () => {
     const content = Buffer.from('legacy-variant-a');
-    const manifest = makeSingleModelManifest(content, LEGACY_LORA);
+    const manifest = makeSingleModelManifest(
+      Buffer.from('official-lora'),
+      LEGACY_LORA,
+    );
     const harness = await createHarness({
       manifest,
       modelContent: () => content,
@@ -763,23 +792,52 @@ describe('EnvironmentSetupService existing environment import', () => {
     ).resolves.toMatchObject({ stage: 'ready', healthy: true });
   });
 
-  test('does not fall back to the official hash when a legacy variant mismatches', async () => {
-    const content = Buffer.from('legacy-variant-a');
-    const wrongContent = Buffer.from('legacy-variant-b');
-    const manifest = makeSingleModelManifest(content, LEGACY_LORA);
+  test('rejects a LoRA whose size matches neither official nor legacy fingerprints', async () => {
+    const officialContent = Buffer.from('official-lora');
+    const legacyContent = Buffer.from('legacy-variant-a');
+    const unknownContent = Buffer.alloc(37, 1);
+    const manifest = makeSingleModelManifest(officialContent, LEGACY_LORA);
     const harness = await createHarness({
       manifest,
-      modelContent: () => content,
+      modelContent: () => officialContent,
       service: {
         existingModelVariants: {
           [LEGACY_LORA]: {
-            size: content.length,
-            sha256: sha256(wrongContent),
+            size: legacyContent.length,
+            sha256: sha256(legacyContent),
           },
         },
       },
     });
-    await seedExistingEnvironment(harness, { content: () => content });
+    await seedExistingEnvironment(harness, { content: () => unknownContent });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/size mismatch/i);
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('rejects a LoRA whose hash matches neither official nor legacy fingerprints', async () => {
+    const officialContent = Buffer.from('official-lora');
+    const legacyContent = Buffer.from('legacy-variant-a');
+    const unknownContent = Buffer.from('legacy-variant-b');
+    const manifest = makeSingleModelManifest(officialContent, LEGACY_LORA);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => officialContent,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: {
+            size: legacyContent.length,
+            sha256: sha256(legacyContent),
+          },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => unknownContent });
 
     await expect(
       harness.service.importExisting({

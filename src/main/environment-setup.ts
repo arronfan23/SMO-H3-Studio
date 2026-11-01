@@ -480,6 +480,35 @@ async function verifyModelFiles(
   }
 }
 
+async function selectExistingModelFingerprint(
+  modelRoot: string,
+  model: EnvironmentModelFile,
+  variant: ExistingModelVariant | undefined,
+): Promise<EnvironmentModelFile> {
+  if (variant === undefined) return model;
+
+  const path = win32.join(modelRoot, ...model.path.split('/'));
+  let stats;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    if (isMissing(error)) throw new Error(`Model ${model.path} is missing: ${path}`);
+    throw error;
+  }
+  if (!stats.isFile()) {
+    throw new Error(`Model ${model.path} is not a regular file: ${path}`);
+  }
+
+  const fingerprint = [
+    { size: model.size, sha256: model.sha256 },
+    variant,
+  ].find((candidate) => candidate.size === stats.size);
+  if (fingerprint === undefined) {
+    throw new Error(`Model ${model.path} size mismatch: ${path}`);
+  }
+  return { ...model, ...fingerprint };
+}
+
 async function writeExtraModelPaths(
   runtimeRoot: string,
   modelRoot: string,
@@ -1006,10 +1035,17 @@ export class EnvironmentSetupService {
       await verifyRuntimeFiles(runtimeRoot, signal);
       const variants =
         this.options.existingModelVariants ?? DEFAULT_EXISTING_MODEL_VARIANTS;
-      const modelFiles = selection.modelFiles.map((model) => ({
-        ...model,
-        ...variants[model.path],
-      }));
+      const modelFiles: EnvironmentModelFile[] = [];
+      for (const model of selection.modelFiles) {
+        signal.throwIfAborted();
+        modelFiles.push(
+          await selectExistingModelFingerprint(
+            modelRoot,
+            model,
+            variants[model.path],
+          ),
+        );
+      }
       const totalBytes = modelFiles.reduce(
         (total, model) => total + model.size,
         0,
