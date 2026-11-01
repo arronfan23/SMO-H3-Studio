@@ -43,9 +43,7 @@ async function renderSettings(): Promise<void> {
 async function renderRecommendation(): Promise<void> {
   await renderSettings();
   fireEvent.click(screen.getByRole("button", { name: "检测硬件" }));
-  await screen.findByText(hardwareInfo.gpu);
-  fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
-  await screen.findByText(hardwareProfile.preset);
+  await screen.findByText("均衡模式");
 }
 
 beforeEach(() => {
@@ -84,6 +82,40 @@ describe("SettingsPage hardware controls", () => {
     expect(smo.hardware.detect).toHaveBeenCalledTimes(1);
   });
 
+  test("automatically recommends a Chinese profile after detection", async () => {
+    await renderSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "检测硬件" }));
+
+    expect(await screen.findByText("均衡模式")).toBeInTheDocument();
+    expect(smo.hardware.recommend).toHaveBeenCalledTimes(1);
+    expect(smo.hardware.recommend).toHaveBeenCalledWith({
+      gpu: hardwareInfo.gpu,
+      vramGiB: hardwareInfo.vramGiB,
+      ramGiB: hardwareInfo.ramGiB,
+    });
+    expect(screen.getByText("模型策略")).toBeInTheDocument();
+    expect(screen.getByText(/使用 INT8 模型/)).toBeInTheDocument();
+    expect(screen.getByText("显存策略")).toBeInTheDocument();
+    expect(screen.getByText(/节省显存模式/)).toBeInTheDocument();
+    expect(screen.getByText("分辨率")).toBeInTheDocument();
+    expect(screen.getByText(/0\.7 MP.*兼顾清晰度与显存/)).toBeInTheDocument();
+    expect(screen.getByText("平铺方式")).toBeInTheDocument();
+    expect(screen.getByText(/自动分块/)).toBeInTheDocument();
+    expect(screen.getByText(/适用场景/)).toBeInTheDocument();
+    expect(screen.getByText(/下一次生成时生效/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/不影响正在运行的任务和已有作品/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("模型目录")).toHaveValue(
+      "G:\\H3Selflift整合包\\模型部分\\diffusion_models",
+    );
+    expect(screen.queryByText(hardwareProfile.preset)).not.toBeInTheDocument();
+    expect(screen.queryByText(hardwareProfile.modelPolicy)).not.toBeInTheDocument();
+    expect(screen.queryByText("lowvram")).not.toBeInTheDocument();
+    expect(screen.queryByText("tiling")).not.toBeInTheDocument();
+  });
+
   test("shows the real detection error", async () => {
     smo.hardware.detect.mockRejectedValue(new Error("nvidia-smi is unavailable"));
     await renderSettings();
@@ -105,16 +137,12 @@ describe("SettingsPage hardware controls", () => {
     smo.hardware.recommend.mockResolvedValue(highProfile);
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "检测硬件" }));
-    await screen.findByText(hardwareInfo.gpu);
 
-    fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
-
-    expect(await screen.findByText(highProfile.preset)).toBeInTheDocument();
-    expect(screen.getByText(highProfile.modelPolicy)).toBeInTheDocument();
-    expect(screen.getByText("1")).toBeInTheDocument();
-    expect(screen.getByText("关闭")).toBeInTheDocument();
-    expect(screen.getByText("auto")).toBeInTheDocument();
-    expect(screen.getByText("需要确认")).toBeInTheDocument();
+    expect(await screen.findByText("高显存候选模式")).toBeInTheDocument();
+    expect(screen.getByText(/优先使用 BF16 模型/)).toBeInTheDocument();
+    expect(screen.getByText(/标准显存模式/)).toBeInTheDocument();
+    expect(screen.getByText(/1\.0 MP/)).toBeInTheDocument();
+    expect(screen.getByText(/自动分块/)).toBeInTheDocument();
     expect(screen.getByText(/候选.*未实测/)).toBeInTheDocument();
     expect(smo.hardware.recommend).toHaveBeenCalledWith({
       gpu: hardwareInfo.gpu,
@@ -126,8 +154,6 @@ describe("SettingsPage hardware controls", () => {
   test("applies a confirmed audio profile with the default model directory", async () => {
     await renderRecommendation();
     fireEvent.change(screen.getByLabelText("应用模式"), { target: { value: "audio" } });
-    fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
-    await screen.findByText(hardwareProfile.preset);
 
     fireEvent.click(screen.getByRole("button", { name: "应用推荐" }));
 
@@ -167,17 +193,17 @@ describe("SettingsPage hardware controls", () => {
     expect(screen.queryByText(/已应用/)).not.toBeInTheDocument();
   });
 
-  test("clears the old recommendation and applied path when the mode changes", async () => {
+  test("keeps the recommendation but clears the applied path when the mode changes", async () => {
     await renderRecommendation();
     fireEvent.click(screen.getByRole("button", { name: "应用推荐" }));
     expect(await screen.findByText(/已应用工作流副本/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("应用模式"), { target: { value: "audio" } });
 
-    expect(screen.queryByText(hardwareProfile.preset)).not.toBeInTheDocument();
+    expect(screen.getByText("均衡模式")).toBeInTheDocument();
     expect(screen.queryByText(/已应用工作流副本/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("应用模式")).toHaveValue("audio");
-    expect(screen.queryByRole("button", { name: "应用推荐" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "应用推荐" })).toBeInTheDocument();
   });
 
   test("does not reset when confirmation is cancelled", async () => {

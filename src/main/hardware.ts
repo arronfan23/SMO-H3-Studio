@@ -22,6 +22,7 @@ const NVIDIA_SMI_ARGS = [
 const POWERSHELL_HARDWARE_SCRIPT = [
   "& {",
   "param([string]$TargetDirectoryJson)",
+  "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);",
   "$os = Get-CimInstance Win32_OperatingSystem;",
   "$computer = Get-CimInstance Win32_ComputerSystem;",
   "$targetDirectory = $TargetDirectoryJson | ConvertFrom-Json;",
