@@ -1,6 +1,21 @@
-import { lstat, realpath, rm } from 'node:fs/promises';
-import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { lstat, readdir, realpath, rm } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Store } from './store';
+
+const ASSET_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.mp4',
+  '.webm',
+  '.gif',
+  '.wav',
+  '.mp3',
+  '.flac',
+  '.ogg',
+  '.m4a',
+]);
 
 export interface WorkServiceOptions {
   outputDirectory: string;
@@ -40,31 +55,65 @@ export class WorkService {
       throw new Error('Only completed or failed works can be deleted');
     }
     if (work.outputPath !== null && work.outputPath.trim().length > 0) {
-      await this.removeOutput(work.outputPath);
+      await this.removeOutput(work.id, work.outputPath);
     }
     this.store.deleteWork(id);
   }
 
-  private async removeOutput(filePath: string): Promise<void> {
+  private async removeOutput(workId: string, filePath: string): Promise<void> {
     const root = resolve(this.outputDirectory);
     const candidate = resolve(filePath);
     assertInside(root, candidate);
     if (!['.mp4', '.webm'].includes(extname(candidate).toLowerCase())) {
       throw new Error('Work output must be an MP4 or WebM video');
     }
-    const stats = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+
+    const directory = dirname(candidate);
+    const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') {
-        return null;
+        return [];
       }
       throw error;
     });
-    if (stats === null) {
-      return;
+    const candidates = new Map<string, boolean>([[candidate, true]]);
+    for (const name of names) {
+      const belongsToWork =
+        name === workId || name.startsWith(`${workId}.`) || name.startsWith(`${workId}_`);
+      if (!belongsToWork || !ASSET_EXTENSIONS.has(extname(name).toLowerCase())) {
+        continue;
+      }
+      const assetPath = resolve(directory, name);
+      if (!candidates.has(assetPath)) {
+        candidates.set(assetPath, false);
+      }
     }
-    if (!stats.isFile() || stats.isSymbolicLink()) {
-      throw new Error('Work output must be a regular video file');
+
+    let realRoot: string | undefined;
+    const validated: string[] = [];
+    for (const [assetPath, isOutput] of candidates) {
+      const stats = await lstat(assetPath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') {
+          return null;
+        }
+        throw error;
+      });
+      if (stats === null) {
+        continue;
+      }
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error(
+          isOutput
+            ? 'Work output must be a regular video file'
+            : 'Work output asset must be a regular file, not a symbolic link or directory',
+        );
+      }
+      realRoot ??= await realpath(root);
+      assertInside(realRoot, await realpath(assetPath));
+      validated.push(assetPath);
     }
-    assertInside(await realpath(root), await realpath(candidate));
-    await this.remove(candidate, { force: true });
+
+    for (const assetPath of validated) {
+      await this.remove(assetPath, { force: true });
+    }
   }
 }

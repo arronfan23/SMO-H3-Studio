@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -48,16 +48,42 @@ afterEach(async () => {
 });
 
 describe('WorkService.deleteWork', () => {
-  test('deletes a done work record and its video, keeping the source photo and sibling videos', async () => {
+  test('deletes a done work record and all associated assets, keeping unrelated files', async () => {
     const { directory, outputDirectory, store, service, avatarId } = await createHarness();
-    const videoPath = join(outputDirectory, 'done.mp4');
+    const workId = 'done-work';
+    const videoPath = join(outputDirectory, `${workId}.mp4`);
     const siblingVideo = join(outputDirectory, 'sibling.mp4');
     const sourcePhoto = join(directory, 'photo.png');
+    const uploadedAsset = join(outputDirectory, 'upload.png');
+    const otherWorkImage = join(outputDirectory, 'other-work.png');
+    const otherWorkAudio = join(outputDirectory, 'other-work_asset.mp3');
+    const similarlyNamedFile = join(outputDirectory, `${workId}-notes.png`);
+    const nonAssetFile = join(outputDirectory, `${workId}_notes.txt`);
+    const nestedDirectory = join(outputDirectory, `${workId}_nested`);
+    const nestedAsset = join(nestedDirectory, `${workId}.png`);
+    const associatedAssets = [
+      join(outputDirectory, `${workId}.png`),
+      ...['jpg', 'jpeg', 'webp', 'mp4', 'webm', 'gif', 'wav', 'mp3', 'flac', 'ogg', 'm4a'].map(
+        (extension) => join(outputDirectory, `${workId}_asset.${extension}`),
+      ),
+    ];
     await writeFile(videoPath, 'video');
-    await writeFile(siblingVideo, 'video');
-    await writeFile(sourcePhoto, 'photo');
+    await mkdir(nestedDirectory);
+    await Promise.all(
+      [
+        siblingVideo,
+        sourcePhoto,
+        uploadedAsset,
+        otherWorkImage,
+        otherWorkAudio,
+        similarlyNamedFile,
+        nonAssetFile,
+        nestedAsset,
+        ...associatedAssets,
+      ].map(async (filePath) => writeFile(filePath, 'asset')),
+    );
     const done = store.addWork({
-      id: 'done-work',
+      id: workId,
       avatarId,
       mode: 'text',
       outputPath: videoPath,
@@ -67,8 +93,17 @@ describe('WorkService.deleteWork', () => {
     await service.deleteWork(done.id);
 
     expect(existsSync(videoPath)).toBe(false);
+    for (const assetPath of associatedAssets) {
+      expect(existsSync(assetPath)).toBe(false);
+    }
     expect(existsSync(sourcePhoto)).toBe(true);
     expect(existsSync(siblingVideo)).toBe(true);
+    expect(existsSync(uploadedAsset)).toBe(true);
+    expect(existsSync(otherWorkImage)).toBe(true);
+    expect(existsSync(otherWorkAudio)).toBe(true);
+    expect(existsSync(similarlyNamedFile)).toBe(true);
+    expect(existsSync(nonAssetFile)).toBe(true);
+    expect(existsSync(nestedAsset)).toBe(true);
     expect(store.getWork(done.id)).toBeNull();
   });
 
@@ -89,17 +124,90 @@ describe('WorkService.deleteWork', () => {
 
   test('deletes the record when the output file no longer exists', async () => {
     const { outputDirectory, store, service, avatarId } = await createHarness();
+    const workId = 'missing-output';
+    const associatedImage = join(outputDirectory, `${workId}.png`);
+    await writeFile(associatedImage, 'image');
     const done = store.addWork({
-      id: 'missing-output',
+      id: workId,
       avatarId,
       mode: 'text',
-      outputPath: join(outputDirectory, 'gone.mp4'),
+      outputPath: join(outputDirectory, `${workId}.mp4`),
       status: 'done',
     });
 
     await service.deleteWork(done.id);
 
+    expect(existsSync(associatedImage)).toBe(false);
     expect(store.getWork(done.id)).toBeNull();
+  });
+
+  test('deletes the record when the output directory no longer exists', async () => {
+    const { outputDirectory, store, service, avatarId } = await createHarness();
+    const done = store.addWork({
+      id: 'missing-directory',
+      avatarId,
+      mode: 'text',
+      outputPath: join(outputDirectory, 'missing-directory.mp4'),
+      status: 'done',
+    });
+    await rm(outputDirectory, { recursive: true, force: true });
+
+    await service.deleteWork(done.id);
+
+    expect(store.getWork(done.id)).toBeNull();
+  });
+
+  test('validates all associated assets before deleting any files', async () => {
+    const { outputDirectory, store, service, avatarId } = await createHarness();
+    const workId = 'invalid-asset';
+    const videoPath = join(outputDirectory, `${workId}.mp4`);
+    const associatedImage = join(outputDirectory, `${workId}.png`);
+    const invalidAsset = join(outputDirectory, `${workId}_asset.png`);
+    await writeFile(videoPath, 'video');
+    await writeFile(associatedImage, 'image');
+    await mkdir(invalidAsset);
+    const done = store.addWork({
+      id: workId,
+      avatarId,
+      mode: 'text',
+      outputPath: videoPath,
+      status: 'done',
+    });
+
+    await expect(service.deleteWork(done.id)).rejects.toThrow(/regular file/i);
+    expect(existsSync(videoPath)).toBe(true);
+    expect(existsSync(associatedImage)).toBe(true);
+    expect(existsSync(invalidAsset)).toBe(true);
+    expect(store.getWork(done.id)).not.toBeNull();
+  });
+
+  test('refuses an associated symbolic link without deleting the work or other assets', async () => {
+    const { directory, outputDirectory, store, service, avatarId } = await createHarness();
+    const workId = 'linked-asset';
+    const videoPath = join(outputDirectory, `${workId}.mp4`);
+    const associatedImage = join(outputDirectory, `${workId}.png`);
+    const outsideDirectory = join(directory, 'outside');
+    const outsideAsset = join(outsideDirectory, 'source.png');
+    const linkedAsset = join(outputDirectory, `${workId}_asset.png`);
+    await writeFile(videoPath, 'video');
+    await writeFile(associatedImage, 'image');
+    await mkdir(outsideDirectory);
+    await writeFile(outsideAsset, 'source');
+    await symlink(outsideDirectory, linkedAsset, process.platform === 'win32' ? 'junction' : 'dir');
+    const done = store.addWork({
+      id: workId,
+      avatarId,
+      mode: 'text',
+      outputPath: videoPath,
+      status: 'done',
+    });
+
+    await expect(service.deleteWork(done.id)).rejects.toThrow(/symbolic link|regular file/i);
+    expect(existsSync(videoPath)).toBe(true);
+    expect(existsSync(associatedImage)).toBe(true);
+    expect(existsSync(linkedAsset)).toBe(true);
+    expect(existsSync(outsideAsset)).toBe(true);
+    expect(store.getWork(done.id)).not.toBeNull();
   });
 
   test.each(['pending', 'running'] as const)(
