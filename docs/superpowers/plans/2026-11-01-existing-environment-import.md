@@ -31,7 +31,7 @@
 
 ### 任务 1：共享 IPC 与目录选择
 
-- [ ] **步骤 1：编写失败的 IPC 测试**
+- [x] **步骤 1：编写失败的 IPC 测试**
 
 在 `tests/unit/ipc.test.ts` 增加目录选择通道的注册和转发断言：
 
@@ -42,13 +42,13 @@ test('returns a cancelled existing-root directory selection', async () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/ipc.test.ts`
 
 预期：FAIL，`environment:selectExistingRoot` 尚未注册。
 
-- [ ] **步骤 3：实现共享类型、IPC、preload 与目录选择**
+- [x] **步骤 3：实现共享类型、IPC、preload 与目录选择**
 
 新增类型：
 
@@ -79,13 +79,13 @@ selectExistingRoot: async () => {
 
 同时补充 `IpcServices`、目录选择 dispatch、preload 和 `SmoApi` 类型。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/app-services-env.test.ts && npm run typecheck`
 
 预期：PASS，目录选择器断言 `openDirectory`，取消返回 `null`。
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add src/shared/environment.ts src/shared/ipc.ts src/preload/index.ts src/main/ipc.ts src/main/app-services.ts tests/unit/ipc.test.ts tests/unit/app-services-env.test.ts
@@ -94,7 +94,7 @@ git commit -m "Add existing environment import IPC"
 
 ### 任务 2：硬件推荐与现有模型路径
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/environment-manifest.test.ts` 验证新函数在低磁盘空间时仍返回推荐，但显存或内存不足仍拒绝：
 
@@ -116,13 +116,13 @@ expect(() => selectEnvironmentRecommendation(
 await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(externalModelRoot);
 ```
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/environment-manifest.test.ts tests/unit/environment-setup.test.ts`
 
 预期：FAIL，推荐函数和导入方法尚不存在。
 
-- [ ] **步骤 3：实现推荐函数与 YAML 模型根解析**
+- [x] **步骤 3：实现推荐函数与 YAML 模型根解析**
 
 运行：`npm install yaml@^2.8.2 --save`
 
@@ -148,13 +148,13 @@ export function selectEnvironmentProfile(
 
 在 `environment-setup.ts` 导出 `resolveExistingModelRoot` 并使用 `parseYaml`，仅接受记录中的 `h3_selflift_models.base_path`；缺文件或缺该节时返回 `win32.join(runtimeRoot, 'ComfyUI', 'models')`。所有返回路径经过现有 `validateInstallRoot`。
 
-- [ ] **步骤 4：运行测试确认通过**
+- [x] **步骤 4：运行测试确认通过**
 
 运行：`npx vitest run tests/unit/environment-manifest.test.ts tests/unit/environment-setup.test.ts`
 
 预期：PASS，原安装空间校验测试保持通过。
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git add package.json package-lock.json src/main/environment-manifest.ts src/main/environment-setup.ts tests/unit/environment-manifest.test.ts tests/unit/environment-setup.test.ts
