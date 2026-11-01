@@ -8,10 +8,14 @@ import {
   downloadFile as defaultDownloadFile,
   downloadParts as defaultDownloadParts,
 } from './download';
-import { selectEnvironmentProfile } from './environment-manifest';
+import {
+  selectEnvironmentProfile,
+  selectEnvironmentRecommendation,
+} from './environment-manifest';
 import type { EnvironmentStore } from './environment-store';
 import type {
   EnvironmentConfig,
+  EnvironmentImportInput,
   EnvironmentManifest,
   EnvironmentModelFile,
   EnvironmentProfile,
@@ -53,6 +57,22 @@ const PROFILES = new Set<EnvironmentProfile>([
 const WINDOWS_DEVICE_NAME_PATTERN =
   /^(?:CONIN\$|CONOUT\$|CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])(?:[ .]|$)/i;
 const WINDOWS_ILLEGAL_SEGMENT_PATTERN = /[<>:"|?*\x00-\x1F\x7F]/;
+const VERIFICATION_PROGRESS_INTERVAL_BYTES = 64 * 1024 * 1024;
+
+export interface ExistingModelVariant {
+  size: number;
+  sha256: string;
+}
+
+export const DEFAULT_EXISTING_MODEL_VARIANTS: Readonly<
+  Record<string, ExistingModelVariant>
+> = {
+  'loras/dmad_minimax_h3_4step_full_critic_comfy.safetensors': {
+    size: 1956188032,
+    sha256:
+      'b77b7c00a9091c65282029828c9e178e2090a30ca90582bc01a900fc7c777b71',
+  },
+};
 
 export interface EnvironmentBackendInput {
   runtimeRoot: string;
@@ -125,6 +145,7 @@ export interface EnvironmentSetupServiceOptions {
   downloadFile?: typeof defaultDownloadFile;
   extract?: EnvironmentExtractor;
   extractor?: EnvironmentExtractor;
+  existingModelVariants?: Readonly<Record<string, ExistingModelVariant>>;
 }
 
 interface InstallationLayout {
@@ -357,6 +378,7 @@ async function verifyFileHash(
   expectedSize: number | undefined,
   signal: AbortSignal | undefined,
   label: string,
+  onProgress?: (verifiedBytes: number) => void,
 ): Promise<void> {
   let stats;
   try {
@@ -375,8 +397,21 @@ async function verifyFileHash(
   const stream = createReadStream(path);
   const abort = () => stream.destroy(new Error('Environment setup cancelled'));
   signal?.addEventListener('abort', abort, { once: true });
+  let verifiedBytes = 0;
+  let lastReportedBytes = 0;
   try {
-    for await (const chunk of stream) hash.update(chunk as Buffer);
+    for await (const chunk of stream) {
+      hash.update(chunk as Buffer);
+      verifiedBytes += (chunk as Buffer).length;
+      if (
+        onProgress &&
+        verifiedBytes - lastReportedBytes >=
+          VERIFICATION_PROGRESS_INTERVAL_BYTES
+      ) {
+        lastReportedBytes = verifiedBytes;
+        onProgress(verifiedBytes);
+      }
+    }
   } finally {
     signal?.removeEventListener('abort', abort);
   }
@@ -385,6 +420,7 @@ async function verifyFileHash(
   if (actual !== expectedSha256.toLowerCase()) {
     throw new Error(`${label} SHA256 mismatch: ${path}`);
   }
+  onProgress?.(verifiedBytes);
 }
 
 async function verifyRuntimeFiles(
@@ -425,15 +461,22 @@ async function verifyModelFiles(
   modelRoot: string,
   models: EnvironmentModelFile[],
   signal?: AbortSignal,
+  onProgress?: (currentFile: string, verifiedBytes: number) => void,
 ): Promise<void> {
+  let completedBytes = 0;
   for (const model of models) {
+    onProgress?.(model.path, completedBytes);
     await verifyFileHash(
       win32.join(modelRoot, ...model.path.split('/')),
       model.sha256,
       model.size,
       signal,
       `Model ${model.path}`,
+      onProgress
+        ? (verifiedBytes) => onProgress(model.path, completedBytes + verifiedBytes)
+        : undefined,
     );
+    completedBytes += model.size;
   }
 }
 
@@ -699,13 +742,30 @@ export class EnvironmentSetupService {
       return Promise.reject(new Error('Cannot start environment setup while detection is active'));
     }
     const inputKey = `${installRootKey(input.installRoot)}\0${input.profileId}`;
+    return this.trackOperation(inputKey, () => this.execute(input));
+  }
+
+  importExisting(input: EnvironmentImportInput): Promise<EnvironmentState> {
+    if (this.detectFlight) {
+      return Promise.reject(
+        new Error('Cannot import an environment while detection is active'),
+      );
+    }
+    const key = `import\0${installRootKey(input.runtimeRoot)}\0${input.profileId}`;
+    return this.trackOperation(key, () => this.executeImport(input));
+  }
+
+  private trackOperation(
+    key: string,
+    callback: () => Promise<EnvironmentState>,
+  ): Promise<EnvironmentState> {
     if (this.inFlight) {
-      if (this.inFlightInput === inputKey) return this.inFlight;
+      if (this.inFlightInput === key) return this.inFlight;
       return Promise.reject(
         new Error('A different environment setup input is already active'),
       );
     }
-    const operation = this.execute(input);
+    const operation = callback();
     const tracked = operation.finally(() => {
       if (this.inFlight === tracked) {
         this.inFlight = undefined;
@@ -713,7 +773,7 @@ export class EnvironmentSetupService {
       }
     });
     this.inFlight = tracked;
-    this.inFlightInput = inputKey;
+    this.inFlightInput = key;
     return tracked;
   }
 
@@ -860,6 +920,190 @@ export class EnvironmentSetupService {
         : undefined,
       recordedModelRootDirName(installRoot, previous),
     );
+  }
+
+  private async executeImport(
+    input: EnvironmentImportInput,
+  ): Promise<EnvironmentState> {
+    const controller = new AbortController();
+    this.controller = controller;
+    const { signal } = controller;
+    let candidate: EnvironmentConfig | undefined;
+    let previousConfig: EnvironmentConfig | null = null;
+    let readyCommitted: EnvironmentConfig | undefined;
+    let transaction: EnvironmentBackendTransaction | undefined;
+    let transactionActivated = false;
+
+    try {
+      await this.loaded;
+      const runtimeRoot = validateInstallRoot(input.runtimeRoot);
+      if (!PROFILES.has(input.profileId)) {
+        throw new Error(`Unknown environment profile: ${String(input.profileId)}`);
+      }
+      const installRoot = validateInstallRoot(this.options.defaultInstallRoot);
+      previousConfig = this.state.config;
+      signal.throwIfAborted();
+      this.state = {
+        ...this.state,
+        installRoot,
+        stage: 'detect',
+        progress: { downloadedBytes: 0, totalBytes: 0 },
+        selection: null,
+        error: null,
+        active: true,
+        healthy: false,
+      };
+
+      const hardware = await this.options.detectHardware(runtimeRoot);
+      signal.throwIfAborted();
+      this.state = { ...this.state, hardware };
+      this.setStage('select');
+      const recommended = selectEnvironmentRecommendation(
+        hardware,
+        this.options.manifest,
+      );
+      validateProfile(input.profileId, hardware);
+      const selection: EnvironmentProfileSelection = {
+        ...recommended,
+        profile: input.profileId,
+      };
+      this.state = { ...this.state, selection };
+
+      const modelRoot = await resolveExistingModelRoot(runtimeRoot);
+      signal.throwIfAborted();
+      const modelDirectory = win32.join(modelRoot, 'diffusion_models');
+      runtimeTopLevel(selection.runtime);
+      const resolveRuntimePath = (path: string) =>
+        win32.join(runtimeRoot, ...path.split('/').slice(1));
+      const pythonPath = resolveRuntimePath(selection.runtime.pythonPath);
+      const launchScript = resolveRuntimePath(selection.runtime.launchScript);
+      const ffprobePath = resolveRuntimePath(selection.runtime.ffprobePath);
+      const now = new Date().toISOString();
+      candidate = {
+        schemaVersion: 1,
+        runtimeId: selection.runtime.id,
+        runtimeRoot,
+        modelDirectory,
+        outputDirectory: this.options.outputDirectory,
+        installRoot,
+        profile: selection.profile,
+        hardwareFingerprint: {
+          gpu: hardware.gpu,
+          vramGiB: hardware.vramGiB,
+          ramGiB: hardware.ramGiB,
+          cudaComputeCapability: hardware.cudaComputeCapability,
+        },
+        manifestVersion: String(this.options.manifest.version),
+        status: 'installing',
+        createdAt:
+          previousConfig?.runtimeRoot === runtimeRoot
+            ? previousConfig.createdAt
+            : now,
+        updatedAt: now,
+      };
+
+      this.setStage('verify');
+      await verifyRuntimeFiles(runtimeRoot, signal);
+      const variants =
+        this.options.existingModelVariants ?? DEFAULT_EXISTING_MODEL_VARIANTS;
+      const modelFiles = selection.modelFiles.map((model) => ({
+        ...model,
+        ...variants[model.path],
+      }));
+      const totalBytes = modelFiles.reduce(
+        (total, model) => total + model.size,
+        0,
+      );
+      if (!Number.isSafeInteger(totalBytes)) {
+        throw new Error('Existing model byte total must be a safe integer');
+      }
+      this.setProgress(0, totalBytes);
+      await verifyModelFiles(
+        modelRoot,
+        modelFiles,
+        signal,
+        (currentFile, verifiedBytes) => {
+          this.setProgress(verifiedBytes, totalBytes, currentFile);
+        },
+      );
+
+      signal.throwIfAborted();
+      this.setStage('start');
+      const result = await this.options.startBackend({
+        runtimeRoot,
+        modelDirectory,
+        outputDirectory: this.options.outputDirectory,
+        profile: selection.profile,
+        runtime: selection.runtime,
+        pythonPath,
+        launchScript,
+        ffprobePath,
+        signal,
+      });
+      signal.throwIfAborted();
+      transaction = readBackendTransaction(result);
+      const objectInfo = readObjectInfo(result);
+      const missingNodes = REQUIRED_COMFY_NODES.filter(
+        (node) => !Object.hasOwn(objectInfo, node),
+      );
+      if (missingNodes.length > 0) {
+        throw new Error(`Backend is missing required nodes: ${missingNodes.join(', ')}`);
+      }
+
+      signal.throwIfAborted();
+      const ready = await this.options.store.commitReady(candidate);
+      readyCommitted = ready;
+      signal.throwIfAborted();
+      if (transaction !== undefined) {
+        await transaction.activate();
+        transactionActivated = true;
+      }
+      this.state = {
+        ...this.state,
+        config: ready,
+        stage: 'ready',
+        error: null,
+        active: false,
+        healthy: true,
+      };
+      return this.getState();
+    } catch (error) {
+      const originalMessage = errorMessage(error);
+      this.state = {
+        ...this.state,
+        error: originalMessage,
+        active: false,
+        healthy: false,
+      };
+      if (transaction !== undefined && !transactionActivated) {
+        await transaction.rollback().catch(() => undefined);
+      }
+      if (readyCommitted && candidate) {
+        try {
+          if (previousConfig?.status === 'ready') {
+            const restored = await this.options.store.commitReady(previousConfig);
+            this.state = { ...this.state, config: restored };
+          } else {
+            const failed: EnvironmentConfig = {
+              ...candidate,
+              status: 'failed',
+              updatedAt: new Date().toISOString(),
+            };
+            await this.options.store.save(failed);
+            this.state = { ...this.state, config: failed };
+          }
+        } catch (rollbackError) {
+          this.state = {
+            ...this.state,
+            config: readyCommitted,
+            error: `${originalMessage}; ready rollback failed: ${errorMessage(rollbackError)}`,
+          };
+        }
+      }
+      throw error;
+    } finally {
+      if (this.controller === controller) this.controller = undefined;
+    }
   }
 
   private async execute(input: EnvironmentStartInput): Promise<EnvironmentState> {

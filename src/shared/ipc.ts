@@ -68,6 +68,7 @@ export const IPC_CHANNELS = [
   'comfy:open',
   'environment:getState',
   'environment:selectExistingRoot',
+  'environment:import',
   'environment:detect',
   'environment:start',
   'environment:retry',
@@ -243,6 +244,13 @@ const environmentStartSchema = z
   })
   .strict() satisfies z.ZodType<EnvironmentStartInput>;
 
+const environmentImportSchema = z
+  .object({
+    runtimeRoot: nonEmptyString,
+    profileId: environmentProfileIdSchema,
+  })
+  .strict() satisfies z.ZodType<EnvironmentImportInput>;
+
 function requestSchema<T extends (typeof IPC_CHANNELS)[number], P extends z.ZodType>(
   channel: T,
   payload: P,
@@ -307,6 +315,7 @@ export function createIpcSchema() {
     requestSchema('comfy:open', emptyPayload),
     requestSchema('environment:getState', emptyPayload),
     requestSchema('environment:selectExistingRoot', emptyPayload),
+    requestSchema('environment:import', environmentImportSchema),
     requestSchema('environment:detect', environmentDetectSchema),
     requestSchema('environment:start', environmentStartSchema),
     requestSchema('environment:retry', environmentStartSchema),

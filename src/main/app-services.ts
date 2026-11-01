@@ -679,6 +679,7 @@ export async function createAppServices(
           });
           return result.canceled ? null : result.filePaths[0] ?? null;
         },
+        importExisting: (input) => setup.importExisting(input),
         detect: (installRoot?: string) => setup.detect(installRoot),
         start: (input) => setup.start(input),
         retry: (input) => setup.retry(input),

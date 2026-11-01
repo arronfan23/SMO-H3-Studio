@@ -203,6 +203,7 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
       getState: async () => ({ ...environmentState }),
       detect: async () => ({ ...environmentState }),
       selectExistingRoot: vi.fn(async () => null),
+      importExisting: vi.fn(async () => ({ ...environmentState })),
       start: async () => ({ ...environmentState }),
       retry: async () => ({ ...environmentState }),
       cancel: async () => ({ ...environmentState }),
@@ -384,6 +385,29 @@ describe('IPC input schema', () => {
       expect(createIpcSchema().parse(request)).toEqual(request);
     },
   );
+
+  test('validates environment import with a strict payload', () => {
+    const request = {
+      channel: 'environment:import',
+      payload: {
+        runtimeRoot: 'D:\\Existing\\Runtime',
+        profileId: 'balanced-16gb',
+      },
+    } as const;
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+    for (const payload of [
+      { ...request.payload, extra: true },
+      { ...request.payload, runtimeRoot: '' },
+      { ...request.payload, runtimeRoot: '   ' },
+      { ...request.payload, profileId: 'turbo' },
+      { runtimeRoot: request.payload.runtimeRoot },
+    ]) {
+      expect(() =>
+        createIpcSchema().parse({ channel: 'environment:import', payload }),
+      ).toThrow();
+    }
+  });
 
   test.each([
     { channel: 'environment:getState', payload: { verbose: true } },
@@ -1372,6 +1396,33 @@ describe('main-process IPC handlers', () => {
     expect(selectExistingRoot).toHaveBeenCalledTimes(2);
   });
 
+  test('dispatches environment import only after strict validation', async () => {
+    const harness = await createHarness();
+    const importExisting = vi.mocked(
+      harness.services.environment.importExisting,
+    );
+    const input = {
+      runtimeRoot: 'D:\\Existing\\Runtime',
+      profileId: 'conservative' as const,
+    };
+    const ready = {
+      ...environmentState,
+      stage: 'ready' as const,
+      healthy: true,
+    };
+    importExisting.mockResolvedValueOnce(ready);
+
+    await expect(
+      harness.invoke('environment:import', input),
+    ).resolves.toEqual(ready);
+    expect(importExisting).toHaveBeenCalledWith(input);
+
+    await expect(
+      harness.invoke('environment:import', { ...input, extra: true }),
+    ).rejects.toThrow();
+    expect(importExisting).toHaveBeenCalledTimes(1);
+  });
+
   test('dispatches environment validate with an empty payload', async () => {
     const validate = vi.fn(async () => ({
       ...environmentState,
@@ -1383,6 +1434,7 @@ describe('main-process IPC handlers', () => {
         getState: async () => ({ ...environmentState }),
         detect: async () => ({ ...environmentState }),
         selectExistingRoot: async () => null,
+        importExisting: async () => ({ ...environmentState }),
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel: async () => ({ ...environmentState }),
@@ -1412,6 +1464,7 @@ describe('main-process IPC handlers', () => {
         getState: async () => ({ ...environmentState }),
         detect,
         selectExistingRoot: async () => null,
+        importExisting: async () => ({ ...environmentState }),
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel: async () => ({ ...environmentState }),
@@ -1441,6 +1494,7 @@ describe('main-process IPC handlers', () => {
           getState: async () => ({ ...environmentState }),
           detect: async () => ({ ...environmentState }),
           selectExistingRoot: async () => null,
+          importExisting: async () => ({ ...environmentState }),
           start: run,
           retry: run,
           cancel: async () => ({ ...environmentState }),
@@ -1470,6 +1524,7 @@ describe('main-process IPC handlers', () => {
         getState: async () => ({ ...environmentState }),
         detect: async () => ({ ...environmentState }),
         selectExistingRoot: async () => null,
+        importExisting: async () => ({ ...environmentState }),
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel,

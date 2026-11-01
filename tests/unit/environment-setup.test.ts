@@ -20,8 +20,10 @@ import {
   REQUIRED_COMFY_NODES,
   extractZipArchive,
   resolveExistingModelRoot,
+  type EnvironmentExtractInput,
   type EnvironmentSetupServiceOptions,
 } from '../../src/main/environment-setup';
+import * as environmentSetupModule from '../../src/main/environment-setup';
 import { EnvironmentStore } from '../../src/main/environment-store';
 import type {
   DownloadFileOptions,
@@ -43,6 +45,9 @@ type DownloadPartsMock = ReturnType<
 >;
 type DownloadFileMock = ReturnType<
   typeof vi.fn<(options: DownloadFileOptions) => Promise<DownloadReceipt>>
+>;
+type ExtractMock = ReturnType<
+  typeof vi.fn<(input: EnvironmentExtractInput) => Promise<void>>
 >;
 type CommitReady = (config: EnvironmentConfig) => Promise<EnvironmentConfig>;
 type CommitCapableStore = EnvironmentStore & { commitReady: CommitReady };
@@ -177,6 +182,7 @@ interface Harness {
   runtimeRoot: string;
   backend: BackendMock;
   backendInputs: unknown[];
+  extract: ExtractMock;
   downloads: {
     parts: DownloadPartsMock;
     file: DownloadFileMock;
@@ -304,6 +310,12 @@ async function createHarness(
       sha256: options.expectedSha256,
     };
   });
+  const extract = vi.fn(async ({ stagingDirectory }: EnvironmentExtractInput) => {
+    await writeRuntimeFiles(join(stagingDirectory, TOP_LEVEL), {
+      corruptLaunch: corruptLaunch.value,
+      omitManifestEntry: omitManifestEntry.value,
+    });
+  });
 
   const options: EnvironmentSetupServiceOptions = {
     store,
@@ -313,12 +325,7 @@ async function createHarness(
     detectHardware: async () => overrides.hardware ?? makeHardware(),
     downloadParts: parts,
     downloadFile: file,
-    extract: async ({ stagingDirectory }) => {
-      await writeRuntimeFiles(join(stagingDirectory, TOP_LEVEL), {
-        corruptLaunch: corruptLaunch.value,
-        omitManifestEntry: omitManifestEntry.value,
-      });
-    },
+    extract,
     startBackend: backend,
     ...overrides.service,
   };
@@ -332,11 +339,73 @@ async function createHarness(
     runtimeRoot: join(installRoot, 'runtime', TOP_LEVEL),
     backend,
     backendInputs,
+    extract,
     downloads: { parts, file },
     networkDownloads,
     setDownloadProgressHandler(handler) {
       downloadProgress.current = handler;
     },
+  };
+}
+
+async function seedExistingEnvironment(
+  harness: Harness,
+  options: {
+    modelRoot?: string;
+    content?: (path: string) => Buffer;
+    omitPath?: string;
+    corruptPath?: string;
+    writeYaml?: boolean;
+  } = {},
+): Promise<{ modelRoot: string; yaml?: string }> {
+  await writeRuntimeFiles(harness.runtimeRoot);
+  const modelRoot =
+    options.modelRoot ?? join(harness.runtimeRoot, 'ComfyUI', 'models');
+  const content = options.content ?? modelContent;
+  for (const model of harness.manifest.modelFiles) {
+    if (model.path === options.omitPath) continue;
+    const destination = join(modelRoot, ...model.path.split('/'));
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(
+      destination,
+      model.path === options.corruptPath
+        ? Buffer.from('corrupt existing model')
+        : content(model.path),
+    );
+  }
+
+  if (!options.writeYaml) return { modelRoot };
+  const yaml = [
+    'h3_selflift_models:',
+    `  base_path: '${modelRoot.replaceAll("'", "''")}'`,
+    '  diffusion_models: diffusion_models',
+    '',
+  ].join('\n');
+  const configPath = join(
+    harness.runtimeRoot,
+    'ComfyUI',
+    'extra_model_paths.yaml',
+  );
+  await writeFile(configPath, yaml, 'utf8');
+  return { modelRoot, yaml };
+}
+
+function makeSingleModelManifest(
+  content: Buffer,
+  path: string = MODEL_PATHS[0],
+): EnvironmentManifest {
+  const manifest = makeManifest();
+  return {
+    ...manifest,
+    modelFiles: [
+      {
+        url: 'https://models.test/large.safetensors',
+        path,
+        size: content.length,
+        sha256: sha256(content),
+        source: 'unit-test',
+      },
+    ],
   };
 }
 
@@ -479,6 +548,606 @@ describe('resolveExistingModelRoot', () => {
     await expect(resolveExistingModelRoot(runtimeRoot)).rejects.toMatchObject({
       code: 'EISDIR',
     });
+  });
+});
+
+describe('EnvironmentSetupService existing environment import', () => {
+  const LEGACY_LORA =
+    'loras/dmad_minimax_h3_4step_full_critic_comfy.safetensors';
+  const MIB = 1024 * 1024;
+
+  function makeTransaction(activateError?: Error) {
+    const activate = vi.fn(async () => {
+      if (activateError) throw activateError;
+    });
+    const rollback = vi.fn(async () => undefined);
+    return {
+      activate,
+      rollback,
+      result: {
+        systemStats: { system: { os: 'test' }, devices: [] },
+        objectInfo: makeObjectInfo(),
+        activate,
+        rollback,
+      },
+    };
+  }
+
+  test('imports verified files without downloads, extraction, or path rewrites', async () => {
+    const harness = await createHarness({
+      hardware: makeHardware({ freeDiskGiB: 0 }),
+    });
+    const { modelRoot } = await seedExistingEnvironment(harness);
+    const stage = harness.service as unknown as {
+      setStage(value: string): void;
+    };
+    const originalSetStage = stage.setStage.bind(harness.service);
+    const stages: string[] = [];
+    vi.spyOn(stage, 'setStage').mockImplementation((value) => {
+      stages.push(value);
+      originalSetStage(value);
+    });
+
+    const state = await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    expect(state).toMatchObject({
+      installRoot: harness.installRoot,
+      stage: 'ready',
+      active: false,
+      healthy: true,
+      progress: {
+        downloadedBytes: harness.manifest.modelFiles.reduce(
+          (total, model) => total + model.size,
+          0,
+        ),
+        totalBytes: harness.manifest.modelFiles.reduce(
+          (total, model) => total + model.size,
+          0,
+        ),
+      },
+      config: {
+        installRoot: harness.installRoot,
+        runtimeRoot: harness.runtimeRoot,
+        modelDirectory: join(modelRoot, 'diffusion_models'),
+        outputDirectory: harness.outputDirectory,
+        status: 'ready',
+      },
+    });
+    expect(stages).toEqual(['select', 'verify', 'start']);
+    expect(harness.downloads.parts).not.toHaveBeenCalled();
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+    expect(harness.extract).not.toHaveBeenCalled();
+    expect(harness.networkDownloads).toHaveLength(0);
+    expect(harness.backend).toHaveBeenCalledTimes(1);
+    expect(harness.backendInputs[0]).toMatchObject({
+      runtimeRoot: harness.runtimeRoot,
+      modelDirectory: join(modelRoot, 'diffusion_models'),
+      outputDirectory: harness.outputDirectory,
+      profile: 'high-memory-candidate',
+      runtime: harness.manifest.runtimes.sm120,
+      pythonPath: join(harness.runtimeRoot, 'python_embeded', 'python.exe'),
+      launchScript: join(harness.runtimeRoot, 'tools', 'launch.py'),
+      ffprobePath: join(
+        harness.runtimeRoot,
+        'tools',
+        'ffmpeg',
+        'ffprobe.exe',
+      ),
+    });
+    expect(
+      existsSync(
+        join(harness.runtimeRoot, 'ComfyUI', 'extra_model_paths.yaml'),
+      ),
+    ).toBe(false);
+  });
+
+  test('uses an external YAML model root without modifying the YAML', async () => {
+    const harness = await createHarness();
+    const modelRoot = join(harness.installRoot, '外置模型');
+    const { yaml } = await seedExistingEnvironment(harness, {
+      modelRoot,
+      writeYaml: true,
+    });
+
+    const state = await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'balanced-16gb',
+    });
+
+    expect(state.config?.modelDirectory).toBe(
+      join(modelRoot, 'diffusion_models'),
+    );
+    expect(state.config?.outputDirectory).toBe(harness.outputDirectory);
+    expect(state.config?.installRoot).toBe(harness.installRoot);
+    expect(
+      await readFile(
+        join(harness.runtimeRoot, 'ComfyUI', 'extra_model_paths.yaml'),
+        'utf8',
+      ),
+    ).toBe(yaml);
+  });
+
+  test.each([
+    { scenario: 'missing', omitPath: MODEL_PATHS[0] },
+    { scenario: 'corrupt', corruptPath: MODEL_PATHS[0] },
+  ])('rejects a $scenario existing model without downloading it', async (fixture) => {
+    const harness = await createHarness();
+    await seedExistingEnvironment(harness, fixture);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/model|missing|sha256|hash/i);
+
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.service.getState()).toMatchObject({
+      stage: 'verify',
+      active: false,
+      healthy: false,
+      config: null,
+    });
+  });
+
+  test.each([
+    'C:\\',
+    'relative\\runtime',
+    'C:runtime',
+    'C:\\safe\\..\\escape',
+    '\\\\server\\share',
+    '\\\\?\\C:\\runtime',
+  ])('rejects unsafe runtimeRoot %s before hardware detection', async (runtimeRoot) => {
+    const harness = await createHarness();
+    const detectHardware = vi.fn(async () => makeHardware());
+    const service = new EnvironmentSetupService({
+      store: harness.store,
+      manifest: harness.manifest,
+      defaultInstallRoot: harness.installRoot,
+      outputDirectory: harness.outputDirectory,
+      detectHardware,
+      startBackend: harness.backend,
+    });
+
+    await expect(
+      service.importExisting({ runtimeRoot, profileId: 'conservative' }),
+    ).rejects.toThrow(/installRoot|path/i);
+    expect(detectHardware).not.toHaveBeenCalled();
+  });
+
+  test('rejects unknown and hardware-incompatible profiles', async () => {
+    const harness = await createHarness({
+      hardware: makeHardware({ vramGiB: 16 }),
+    });
+    await seedExistingEnvironment(harness);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'turbo' as never,
+      }),
+    ).rejects.toThrow(/unknown|profile/i);
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/20|high-memory/i);
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('accepts only the injected fingerprint for the legacy LoRA variant', async () => {
+    const content = Buffer.from('legacy-variant-a');
+    const manifest = makeSingleModelManifest(content, LEGACY_LORA);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: { size: content.length, sha256: sha256(content) },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true });
+  });
+
+  test('does not fall back to the official hash when a legacy variant mismatches', async () => {
+    const content = Buffer.from('legacy-variant-a');
+    const wrongContent = Buffer.from('legacy-variant-b');
+    const manifest = makeSingleModelManifest(content, LEGACY_LORA);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: {
+            size: content.length,
+            sha256: sha256(wrongContent),
+          },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/sha256|hash/i);
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('pins the production legacy variant to the verified full-size fingerprint', () => {
+    const variants = (
+      environmentSetupModule as unknown as Record<string, unknown>
+    ).DEFAULT_EXISTING_MODEL_VARIANTS;
+
+    expect(variants).toEqual({
+      [LEGACY_LORA]: {
+        size: 1956188032,
+        sha256:
+          'b77b7c00a9091c65282029828c9e178e2090a30ca90582bc01a900fc7c777b71',
+      },
+    });
+  });
+
+  test('does not apply existing-model variants to installation verification', async () => {
+    const content = Buffer.from('legacy-variant-a');
+    const official = makeSingleModelManifest(content, LEGACY_LORA);
+    official.modelFiles[0].sha256 = sha256('legacy-variant-b');
+    const harness = await createHarness({
+      manifest: official,
+      modelContent: () => content,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: { size: content.length, sha256: sha256(content) },
+        },
+      },
+    });
+    await writeRuntimeFiles(harness.runtimeRoot);
+    const destination = join(
+      harness.installRoot,
+      'models',
+      ...LEGACY_LORA.split('/'),
+    );
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, content);
+    await seedReadyConfig(harness);
+    const restarted = new EnvironmentSetupService({
+      store: harness.store,
+      manifest: official,
+      defaultInstallRoot: harness.installRoot,
+      outputDirectory: harness.outputDirectory,
+      detectHardware: async () => makeHardware(),
+      downloadParts: harness.downloads.parts,
+      downloadFile: harness.downloads.file,
+      startBackend: harness.backend,
+      existingModelVariants: {
+        [LEGACY_LORA]: { size: content.length, sha256: sha256(content) },
+      },
+    });
+
+    await expect(
+      restarted.start({
+        installRoot: harness.installRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/sha256|hash/i);
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+  });
+
+  test('cancel aborts model hashing and never publishes ready', async () => {
+    const content = Buffer.alloc(80 * MIB, 3);
+    const manifest = makeSingleModelManifest(content);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+    const progress = harness.service as unknown as {
+      setProgress(bytes: number, total: number, currentFile?: string): void;
+    };
+    const original = progress.setProgress.bind(harness.service);
+    let cancelling: Promise<unknown> | undefined;
+    vi.spyOn(progress, 'setProgress').mockImplementation(
+      (bytes, total, currentFile) => {
+        original(bytes, total, currentFile);
+        if (bytes > 0 && cancelling === undefined) {
+          cancelling = harness.service.cancel();
+        }
+      },
+    );
+
+    const pending = harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    await cancelling;
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: null,
+    });
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('cancel aborts a waiting import backend and clears active state', async () => {
+    const backendStarted = createDeferred();
+    const finishBackend = createDeferred();
+    let observedSignal: AbortSignal | undefined;
+    const harness = await createHarness({
+      service: {
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          backendStarted.resolve();
+          await finishBackend.promise;
+          input.signal.throwIfAborted();
+          return { systemStats: {}, objectInfo: makeObjectInfo() };
+        },
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    const pending = harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    await backendStarted.promise;
+    const cancelling = harness.service.cancel();
+    expect(observedSignal?.aborted).toBe(true);
+    finishBackend.resolve();
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    await cancelling;
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: null,
+    });
+  });
+
+  test('rejects a backend with missing nodes before committing ready', async () => {
+    const harness = await createHarness({
+      service: {
+        startBackend: async () => ({ systemStats: {}, objectInfo: {} }),
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/missing required nodes/i);
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: null,
+    });
+  });
+
+  test('a failed import ready commit rolls back the candidate and preserves old ready', async () => {
+    const old = await createHarness();
+    const oldReady = await seedReadyConfig(old);
+    const transaction = makeTransaction();
+    const harness = await createHarness({
+      outputDirectory: old.outputDirectory,
+      service: {
+        store: old.store,
+        startBackend: async () => transaction.result,
+      },
+    });
+    await seedExistingEnvironment(harness);
+    controlReadyCommit(
+      harness,
+      async () => {
+        throw new Error('import commit exploded');
+      },
+      join(old.installRoot, 'environment.json'),
+    );
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/import commit exploded/i);
+    expect(transaction.activate).not.toHaveBeenCalled();
+    expect(transaction.rollback).toHaveBeenCalledTimes(1);
+    expect(await old.store.load()).toEqual(oldReady);
+    expect(harness.service.getState().config).toEqual(oldReady);
+  });
+
+  test.each([{ previousReady: false }, { previousReady: true }])(
+    'activation failure rolls back import ready with previousReady=$previousReady',
+    async ({ previousReady }) => {
+      const old = previousReady ? await createHarness() : undefined;
+      const oldReady = old ? await seedReadyConfig(old) : undefined;
+      const transaction = makeTransaction(new Error('import activate exploded'));
+      const harness = await createHarness({
+        outputDirectory: old?.outputDirectory,
+        service: {
+          ...(old ? { store: old.store } : {}),
+          startBackend: async () => transaction.result,
+        },
+      });
+      await seedExistingEnvironment(harness);
+
+      await expect(
+        harness.service.importExisting({
+          runtimeRoot: harness.runtimeRoot,
+          profileId: 'high-memory-candidate',
+        }),
+      ).rejects.toThrow(/import activate exploded/i);
+
+      expect(transaction.rollback).toHaveBeenCalledTimes(1);
+      const persisted = await harness.store.load();
+      if (old && oldReady) {
+        expect(persisted).toEqual(oldReady);
+        expect(harness.service.getState().config).toEqual(oldReady);
+      } else {
+        expect(persisted?.status).toBe('failed');
+        expect(harness.service.getState().config?.status).toBe('failed');
+      }
+      expect(harness.service.getState()).toMatchObject({
+        active: false,
+        healthy: false,
+      });
+    },
+  );
+
+  test('reports throttled cumulative model verification progress', async () => {
+    const content = Buffer.alloc(64 * MIB + 128 * 1024, 7);
+    const manifest = makeSingleModelManifest(content);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+    const progress = harness.service as unknown as {
+      setProgress(bytes: number, total: number, currentFile?: string): void;
+    };
+    const original = progress.setProgress.bind(harness.service);
+    const updates: Array<{ bytes: number; total: number; file?: string }> = [];
+    vi.spyOn(progress, 'setProgress').mockImplementation(
+      (bytes, total, currentFile) => {
+        updates.push({ bytes, total, file: currentFile });
+        original(bytes, total, currentFile);
+      },
+    );
+
+    const state = await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    const modelUpdates = updates.filter(
+      (update) => update.file === manifest.modelFiles[0].path,
+    );
+    expect(modelUpdates.map((update) => update.bytes)).toEqual([
+      0,
+      64 * MIB,
+      content.length,
+    ]);
+    expect(modelUpdates.every((update) => update.total === content.length)).toBe(
+      true,
+    );
+    expect(state.progress).toMatchObject({
+      currentFile: manifest.modelFiles[0].path,
+      downloadedBytes: content.length,
+      totalBytes: content.length,
+    });
+  });
+});
+
+describe('EnvironmentSetupService import coordination', () => {
+  test('identical imports share a promise and different imports are rejected', async () => {
+    const backendStarted = createDeferred();
+    const finishBackend = createDeferred();
+    const backend = vi.fn(async () => {
+      backendStarted.resolve();
+      await finishBackend.promise;
+      return { systemStats: {}, objectInfo: makeObjectInfo() };
+    });
+    const harness = await createHarness({
+      service: { startBackend: backend },
+    });
+    await seedExistingEnvironment(harness);
+    const input = {
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate' as const,
+    };
+
+    const first = harness.service.importExisting(input);
+    await backendStarted.promise;
+    const same = harness.service.importExisting({
+      ...input,
+      runtimeRoot: input.runtimeRoot.replaceAll('\\', '/'),
+    });
+    const differentProfile = harness.service.importExisting({
+      ...input,
+      profileId: 'balanced-16gb',
+    });
+    const differentRoot = harness.service.importExisting({
+      ...input,
+      runtimeRoot: join(harness.installRoot, 'other-runtime'),
+    });
+    expect(same).toBe(first);
+    finishBackend.resolve();
+
+    await expect(differentProfile).rejects.toThrow(/input|busy|active/i);
+    await expect(differentRoot).rejects.toThrow(/input|busy|active/i);
+    await first;
+    expect(backend).toHaveBeenCalledTimes(1);
+  });
+
+  test('import rejects during detection and installation', async () => {
+    const detectStarted = createDeferred();
+    const finishDetect = createDeferred();
+    const detectingHarness = await createHarness({
+      service: {
+        detectHardware: async () => {
+          detectStarted.resolve();
+          await finishDetect.promise;
+          return makeHardware();
+        },
+      },
+    });
+    const detecting = detectingHarness.service.detect();
+    await detectStarted.promise;
+    const duringDetect = detectingHarness.service.importExisting({
+      runtimeRoot: detectingHarness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    finishDetect.resolve();
+    await expect(duringDetect).rejects.toThrow(/detect|busy|active/i);
+    await detecting;
+
+    const downloadStarted = createDeferred();
+    const finishDownload = createDeferred();
+    const installingHarness = await createHarness({
+      service: {
+        downloadParts: async (options) => {
+          downloadStarted.resolve();
+          await finishDownload.promise;
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+    const installing = installingHarness.service.start({
+      installRoot: installingHarness.installRoot,
+      profileId: 'high-memory-candidate',
+    });
+    await downloadStarted.promise;
+    const duringInstall = installingHarness.service.importExisting({
+      runtimeRoot: installingHarness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    finishDownload.resolve();
+    await expect(duringInstall).rejects.toThrow(/input|busy|active/i);
+    await installing;
   });
 });
 

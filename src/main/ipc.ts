@@ -16,6 +16,7 @@ import {
 } from '../shared/ipc';
 import type { GenerationHandler } from './generation';
 import type {
+  EnvironmentImportInput,
   EnvironmentStartInput,
   EnvironmentState,
 } from '../shared/environment';
@@ -56,6 +57,7 @@ export interface IpcServices {
   environment: {
     getState: () => Promise<EnvironmentState>;
     selectExistingRoot: () => Promise<string | null>;
+    importExisting: (input: EnvironmentImportInput) => Promise<EnvironmentState>;
     detect: (installRoot?: string) => Promise<EnvironmentState>;
     start: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
     retry: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
@@ -153,6 +155,8 @@ async function dispatch(
       return services.environment.getState();
     case 'environment:selectExistingRoot':
       return services.environment.selectExistingRoot();
+    case 'environment:import':
+      return services.environment.importExisting(request.payload);
     case 'environment:detect':
       return services.environment.detect(request.payload.installRoot);
     case 'environment:start':

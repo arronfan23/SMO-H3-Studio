@@ -21,7 +21,10 @@ import {
 } from '../../src/main/app-services';
 import { ComfyClient } from '../../src/main/comfy';
 import { ComfyProcessManager } from '../../src/main/comfy-process';
-import { REQUIRED_COMFY_NODES } from '../../src/main/environment-setup';
+import {
+  EnvironmentSetupService,
+  REQUIRED_COMFY_NODES,
+} from '../../src/main/environment-setup';
 import { detectHardware } from '../../src/main/hardware';
 import type { EnvironmentBackendInput } from '../../src/main/environment-setup';
 import type { EnvironmentPaths } from '../../src/shared/environment';
@@ -219,6 +222,36 @@ describe('createAppServices environment integration', () => {
       title: '选择已有 ComfyUI 运行目录',
       properties: ['openDirectory'],
     });
+  });
+
+  test('forwards existing environment imports to the setup service', async () => {
+    const dataDirectory = await useDataDirectory();
+    const importExisting = vi
+      .spyOn(EnvironmentSetupService.prototype, 'importExisting')
+      .mockResolvedValue({
+        config: null,
+        hardware: null,
+        selection: null,
+        installRoot: dataDirectory,
+        stage: 'ready',
+        progress: { downloadedBytes: 10, totalBytes: 10 },
+        error: null,
+        active: false,
+        healthy: true,
+      });
+    cleanups.push(() => importExisting.mockRestore());
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+    const input = {
+      runtimeRoot: 'D:\\Existing\\Runtime',
+      profileId: 'balanced-16gb' as const,
+    };
+
+    await expect(services.environment.importExisting(input)).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+    });
+    expect(importExisting).toHaveBeenCalledWith(input);
   });
 
   test.each([
