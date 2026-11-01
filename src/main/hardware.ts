@@ -21,11 +21,12 @@ const NVIDIA_SMI_ARGS = [
 ] as const;
 const POWERSHELL_HARDWARE_SCRIPT = [
   "& {",
-  "param([string]$TargetDirectoryJson)",
+  "param([string]$TargetDirectoryBase64)",
+  "$ErrorActionPreference = 'Stop';",
   "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);",
   "$os = Get-CimInstance Win32_OperatingSystem;",
   "$computer = Get-CimInstance Win32_ComputerSystem;",
-  "$targetDirectory = $TargetDirectoryJson | ConvertFrom-Json;",
+  "$targetDirectory = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($TargetDirectoryBase64)) | ConvertFrom-Json;",
   "$driveName = (Split-Path -Path $targetDirectory -Qualifier).TrimEnd(\":\");",
   "$drive = Get-PSDrive -Name $driveName;",
   "[pscustomobject]@{",
@@ -330,7 +331,7 @@ export async function detectHardware(
       '-NonInteractive',
       '-Command',
       POWERSHELL_HARDWARE_SCRIPT,
-      JSON.stringify(targetDirectory),
+      Buffer.from(JSON.stringify(targetDirectory), 'utf8').toString('base64'),
     ],
     runner,
   );
