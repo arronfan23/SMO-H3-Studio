@@ -19,6 +19,7 @@ import {
   EnvironmentSetupService,
   REQUIRED_COMFY_NODES,
   extractZipArchive,
+  resolveExistingModelRoot,
   type EnvironmentSetupServiceOptions,
 } from '../../src/main/environment-setup';
 import { EnvironmentStore } from '../../src/main/environment-store';
@@ -369,6 +370,116 @@ async function seedReadyConfig(
 
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+async function createExistingModelFixture(): Promise<{
+  directory: string;
+  runtimeRoot: string;
+  configPath: string;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), 'smo-existing-models-'));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const runtimeRoot = join(directory, 'runtime');
+  const comfyDirectory = join(runtimeRoot, 'ComfyUI');
+  await mkdir(comfyDirectory, { recursive: true });
+  return {
+    directory,
+    runtimeRoot,
+    configPath: join(comfyDirectory, 'extra_model_paths.yaml'),
+  };
+}
+
+describe('resolveExistingModelRoot', () => {
+  test('reads a Chinese external base_path from h3_selflift_models', async () => {
+    const { directory, runtimeRoot, configPath } = await createExistingModelFixture();
+    const modelRoot = join(directory, '外置模型', '模型部分');
+    const yaml = `h3_selflift_models:\n  base_path: '${modelRoot}'\n  diffusion_models: diffusion_models\n`;
+    await writeFile(configPath, yaml, 'utf8');
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      win32.normalize(modelRoot),
+    );
+    expect(await readFile(configPath, 'utf8')).toBe(yaml);
+  });
+
+  test('falls back to ComfyUI/models when the config does not exist', async () => {
+    const { runtimeRoot } = await createExistingModelFixture();
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      join(runtimeRoot, 'ComfyUI', 'models'),
+    );
+  });
+
+  test('falls back to ComfyUI/models when h3_selflift_models is absent', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(configPath, "other_models:\n  base_path: 'D:\\models'\n", 'utf8');
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      join(runtimeRoot, 'ComfyUI', 'models'),
+    );
+  });
+
+  test('falls back to ComfyUI/models when base_path is absent', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(
+      configPath,
+      'h3_selflift_models:\n  diffusion_models: diffusion_models\n',
+      'utf8',
+    );
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      join(runtimeRoot, 'ComfyUI', 'models'),
+    );
+  });
+
+  test.each([
+    {
+      scenario: 'a non-string',
+      yamlValue: '42',
+      error: /base_path.*string/i,
+    },
+    {
+      scenario: 'a non-absolute path',
+      yamlValue: 'models',
+      error: /absolute/i,
+    },
+    {
+      scenario: 'an unsafe Windows path',
+      yamlValue: "'C:\\models\\CON'",
+      error: /unsafe/i,
+    },
+  ])('rejects $scenario base_path', async ({ yamlValue, error }) => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(
+      configPath,
+      `h3_selflift_models:\n  base_path: ${yamlValue}\n`,
+      'utf8',
+    );
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).rejects.toThrow(error);
+  });
+
+  test('reports malformed YAML instead of silently falling back', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(
+      configPath,
+      'h3_selflift_models:\n  base_path: [unterminated\n',
+      'utf8',
+    );
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).rejects.toThrow(
+      /failed to parse .*extra_model_paths\.yaml/i,
+    );
+  });
+
+  test('propagates non-ENOENT read failures', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await mkdir(configPath);
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).rejects.toMatchObject({
+      code: 'EISDIR',
+    });
+  });
 });
 
 describe('EnvironmentSetupService installation', () => {

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { win32 } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import {
   downloadFile as defaultDownloadFile,
   downloadParts as defaultDownloadParts,
@@ -225,6 +226,40 @@ function validateInstallRoot(value: string): string {
     }
   }
   return win32.normalize(value);
+}
+
+export async function resolveExistingModelRoot(runtimeRoot: string): Promise<string> {
+  const comfyDirectory = win32.join(runtimeRoot, 'ComfyUI');
+  const configPath = win32.join(comfyDirectory, 'extra_model_paths.yaml');
+  const defaultModelRoot = () => validateInstallRoot(win32.join(comfyDirectory, 'models'));
+  let source: string;
+  try {
+    source = await readFile(configPath, 'utf8');
+  } catch (error) {
+    if (isMissing(error)) return defaultModelRoot();
+    throw error;
+  }
+
+  let document: unknown;
+  try {
+    document = parseYaml(source);
+  } catch (error) {
+    throw new Error(`Failed to parse ${configPath}: ${errorMessage(error)}`);
+  }
+
+  const section = isRecord(document) ? document.h3_selflift_models : undefined;
+  if (!isRecord(section) || !Object.hasOwn(section, 'base_path')) {
+    return defaultModelRoot();
+  }
+  const basePath = section.base_path;
+  if (typeof basePath !== 'string') {
+    throw new Error('h3_selflift_models.base_path must be a string');
+  }
+  try {
+    return validateInstallRoot(basePath);
+  } catch (error) {
+    throw new Error(`Invalid h3_selflift_models.base_path: ${errorMessage(error)}`);
+  }
 }
 
 function installRootKey(value: string): string {

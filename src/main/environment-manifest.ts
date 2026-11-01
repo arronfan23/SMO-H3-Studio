@@ -176,7 +176,7 @@ function selectRuntimeId(hardware: HardwareInfo): EnvironmentRuntimeId {
   throw new Error(`unsupported CUDA architecture (compute capability ${capability})`);
 }
 
-export function selectEnvironmentProfile(
+export function selectEnvironmentRecommendation(
   hardware: HardwareInfo,
   manifestInput: unknown,
 ): EnvironmentProfileSelection {
@@ -206,6 +206,21 @@ export function selectEnvironmentProfile(
     throw new Error('requiredBytes must be a safe integer');
   }
 
+  return {
+    runtime,
+    profile: recommendation.preset,
+    modelFiles: manifest.modelFiles,
+    requiredBytes,
+  };
+}
+
+export function selectEnvironmentProfile(
+  hardware: HardwareInfo,
+  manifestInput: unknown,
+): EnvironmentProfileSelection {
+  const recommendation = selectEnvironmentRecommendation(hardware, manifestInput);
+  const { requiredBytes } = recommendation;
+
   if (
     !Number.isFinite(hardware.freeDiskGiB) ||
     hardware.freeDiskGiB < 0 ||
@@ -218,10 +233,5 @@ export function selectEnvironmentProfile(
     );
   }
 
-  return {
-    runtime,
-    profile: recommendation.preset,
-    modelFiles: manifest.modelFiles,
-    requiredBytes,
-  };
+  return recommendation;
 }
