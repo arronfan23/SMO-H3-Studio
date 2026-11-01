@@ -200,6 +200,45 @@ describe('createAppServices environment integration', () => {
     });
   });
 
+  test('selects an existing runtime root with a native directory dialog', async () => {
+    const dataDirectory = await useDataDirectory();
+    const showOpenDialog = vi.fn(async () => ({
+      canceled: false,
+      filePaths: ['D:\\Existing\\ComfyUI'],
+    }));
+    const services = await createAppServices({
+      dataDirectory,
+      fileDialog: { showOpenDialog },
+    });
+    cleanups.push(() => services.close());
+
+    await expect(services.environment.selectExistingRoot()).resolves.toBe(
+      'D:\\Existing\\ComfyUI',
+    );
+    expect(showOpenDialog).toHaveBeenCalledWith({
+      title: '选择已有 ComfyUI 运行目录',
+      properties: ['openDirectory'],
+    });
+  });
+
+  test.each([
+    { canceled: true, filePaths: [] },
+    { canceled: false, filePaths: [] },
+  ])(
+    'returns null when the existing-root dialog has no selected path: %j',
+    async (dialogResult) => {
+      const dataDirectory = await useDataDirectory();
+      const showOpenDialog = vi.fn(async () => dialogResult);
+      const services = await createAppServices({
+        dataDirectory,
+        fileDialog: { showOpenDialog },
+      });
+      cleanups.push(() => services.close());
+
+      await expect(services.environment.selectExistingRoot()).resolves.toBeNull();
+    },
+  );
+
   test('detects hardware against the requested install root', async () => {
     const dataDirectory = await useDataDirectory();
     mockHardware('Detect GPU');

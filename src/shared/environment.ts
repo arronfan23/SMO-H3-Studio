@@ -84,6 +84,11 @@ export interface EnvironmentStartInput {
   installRoot: string;
 }
 
+export interface EnvironmentImportInput {
+  runtimeRoot: string;
+  profileId: EnvironmentProfile;
+}
+
 export interface EnvironmentProgress {
   downloadedBytes: number;
   totalBytes: number;

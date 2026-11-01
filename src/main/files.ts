@@ -8,8 +8,8 @@ const AUDIO_EXTENSIONS = ['wav', 'mp3', 'flac', 'ogg', 'm4a'];
 export interface FileDialog {
   showOpenDialog(options: {
     title: string;
-    properties: ['openFile'];
-    filters: { name: string; extensions: string[] }[];
+    properties: ['openFile'] | ['openDirectory'];
+    filters?: { name: string; extensions: string[] }[];
   }): Promise<{ canceled: boolean; filePaths: string[] }>;
 }
 

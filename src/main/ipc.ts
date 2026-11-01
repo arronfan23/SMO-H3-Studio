@@ -55,6 +55,7 @@ export interface IpcServices {
   openComfy: () => Promise<void>;
   environment: {
     getState: () => Promise<EnvironmentState>;
+    selectExistingRoot: () => Promise<string | null>;
     detect: (installRoot?: string) => Promise<EnvironmentState>;
     start: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
     retry: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
@@ -150,6 +151,8 @@ async function dispatch(
       return undefined;
     case 'environment:getState':
       return services.environment.getState();
+    case 'environment:selectExistingRoot':
+      return services.environment.selectExistingRoot();
     case 'environment:detect':
       return services.environment.detect(request.payload.installRoot);
     case 'environment:start':

@@ -202,6 +202,7 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     environment: {
       getState: async () => ({ ...environmentState }),
       detect: async () => ({ ...environmentState }),
+      selectExistingRoot: vi.fn(async () => null),
       start: async () => ({ ...environmentState }),
       retry: async () => ({ ...environmentState }),
       cancel: async () => ({ ...environmentState }),
@@ -338,7 +339,12 @@ describe('IPC input schema', () => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
 
-  test.each(['environment:getState', 'environment:cancel', 'environment:validate'])(
+  test.each([
+    'environment:getState',
+    'environment:selectExistingRoot',
+    'environment:cancel',
+    'environment:validate',
+  ])(
     'accepts %s with an empty payload',
     (channel) => {
       const request = { channel, payload: {} };
@@ -381,6 +387,7 @@ describe('IPC input schema', () => {
 
   test.each([
     { channel: 'environment:getState', payload: { verbose: true } },
+    { channel: 'environment:selectExistingRoot', payload: { verbose: true } },
     { channel: 'environment:cancel', payload: { force: true } },
     { channel: 'environment:validate', payload: { verbose: true } },
     { channel: 'environment:detect', payload: { installRoot: '' } },
@@ -1342,6 +1349,29 @@ describe('main-process IPC handlers', () => {
     );
   });
 
+  test('dispatches existing-root selection and returns cancellation', async () => {
+    const harness = await createHarness();
+    const selectExistingRoot = vi.mocked(
+      harness.services.environment.selectExistingRoot,
+    );
+    selectExistingRoot.mockResolvedValueOnce('D:\\Existing\\ComfyUI');
+
+    await expect(
+      harness.invoke('environment:selectExistingRoot'),
+    ).resolves.toBe('D:\\Existing\\ComfyUI');
+
+    selectExistingRoot.mockResolvedValueOnce(null);
+    await expect(
+      harness.invoke('environment:selectExistingRoot'),
+    ).resolves.toBeNull();
+    expect(selectExistingRoot).toHaveBeenCalledTimes(2);
+
+    await expect(
+      harness.invoke('environment:selectExistingRoot', { verbose: true }),
+    ).rejects.toThrow();
+    expect(selectExistingRoot).toHaveBeenCalledTimes(2);
+  });
+
   test('dispatches environment validate with an empty payload', async () => {
     const validate = vi.fn(async () => ({
       ...environmentState,
@@ -1352,6 +1382,7 @@ describe('main-process IPC handlers', () => {
       environment: {
         getState: async () => ({ ...environmentState }),
         detect: async () => ({ ...environmentState }),
+        selectExistingRoot: async () => null,
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel: async () => ({ ...environmentState }),
@@ -1380,6 +1411,7 @@ describe('main-process IPC handlers', () => {
       environment: {
         getState: async () => ({ ...environmentState }),
         detect,
+        selectExistingRoot: async () => null,
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel: async () => ({ ...environmentState }),
@@ -1408,6 +1440,7 @@ describe('main-process IPC handlers', () => {
         environment: {
           getState: async () => ({ ...environmentState }),
           detect: async () => ({ ...environmentState }),
+          selectExistingRoot: async () => null,
           start: run,
           retry: run,
           cancel: async () => ({ ...environmentState }),
@@ -1436,6 +1469,7 @@ describe('main-process IPC handlers', () => {
       environment: {
         getState: async () => ({ ...environmentState }),
         detect: async () => ({ ...environmentState }),
+        selectExistingRoot: async () => null,
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel,
@@ -1547,7 +1581,9 @@ describe('preload API', () => {
       'cancel',
       'detect',
       'getState',
+      'importExisting',
       'retry',
+      'selectExistingRoot',
       'start',
       'validate',
     ]);
@@ -1737,6 +1773,20 @@ describe('preload API', () => {
       channel: 'environment:getState',
       payload: {},
       call: (smo: SmoApi) => smo.environment.getState(),
+    },
+    {
+      channel: 'environment:selectExistingRoot',
+      payload: {},
+      call: (smo: SmoApi) => smo.environment.selectExistingRoot(),
+    },
+    {
+      channel: 'environment:import',
+      payload: { runtimeRoot: 'D:\\Existing\\ComfyUI', profileId: 'balanced-16gb' },
+      call: (smo: SmoApi) =>
+        smo.environment.importExisting({
+          runtimeRoot: 'D:\\Existing\\ComfyUI',
+          profileId: 'balanced-16gb',
+        }),
     },
     {
       channel: 'environment:detect',

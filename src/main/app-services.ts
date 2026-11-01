@@ -521,9 +521,10 @@ export async function createAppServices(
       store,
       mediaRegistry,
     });
+    const fileDialog = options.fileDialog ?? createTestFileDialog() ?? dialog;
     const files = new FileService({
       mediaRegistry,
-      dialog: options.fileDialog ?? createTestFileDialog() ?? dialog,
+      dialog: fileDialog,
       outputDirectory,
       dataDirectory,
     });
@@ -671,6 +672,13 @@ export async function createAppServices(
       startComfy: () => activeComfyProcess!.ensureReady(),
       environment: {
         getState: () => Promise.resolve(setup.getState()),
+        selectExistingRoot: async () => {
+          const result = await fileDialog.showOpenDialog({
+            title: '选择已有 ComfyUI 运行目录',
+            properties: ['openDirectory'],
+          });
+          return result.canceled ? null : result.filePaths[0] ?? null;
+        },
         detect: (installRoot?: string) => setup.detect(installRoot),
         start: (input) => setup.start(input),
         retry: (input) => setup.retry(input),

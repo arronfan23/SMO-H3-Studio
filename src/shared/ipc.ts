@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type {
+  EnvironmentImportInput,
   EnvironmentStartInput,
   EnvironmentState,
 } from './environment';
@@ -66,6 +67,7 @@ export const IPC_CHANNELS = [
   'comfy:start',
   'comfy:open',
   'environment:getState',
+  'environment:selectExistingRoot',
   'environment:detect',
   'environment:start',
   'environment:retry',
@@ -304,6 +306,7 @@ export function createIpcSchema() {
     requestSchema('comfy:start', emptyPayload),
     requestSchema('comfy:open', emptyPayload),
     requestSchema('environment:getState', emptyPayload),
+    requestSchema('environment:selectExistingRoot', emptyPayload),
     requestSchema('environment:detect', environmentDetectSchema),
     requestSchema('environment:start', environmentStartSchema),
     requestSchema('environment:retry', environmentStartSchema),
@@ -380,6 +383,8 @@ export interface SmoApi {
   };
   readonly environment: {
     getState(): Promise<EnvironmentState>;
+    selectExistingRoot(): Promise<string | null>;
+    importExisting(input: EnvironmentImportInput): Promise<EnvironmentState>;
     detect(installRoot?: string): Promise<EnvironmentState>;
     start(input: EnvironmentStartInput): Promise<EnvironmentState>;
     retry(input: EnvironmentStartInput): Promise<EnvironmentState>;

@@ -41,6 +41,9 @@ const api: SmoApi = {
   },
   environment: {
     getState: () => ipcRenderer.invoke('environment:getState', {}),
+    selectExistingRoot: () =>
+      ipcRenderer.invoke('environment:selectExistingRoot', {}),
+    importExisting: (input) => ipcRenderer.invoke('environment:import', input),
     detect: (installRoot) =>
       ipcRenderer.invoke(
         'environment:detect',
