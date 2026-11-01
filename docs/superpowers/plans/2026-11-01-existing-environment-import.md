@@ -192,6 +192,8 @@ expect(harness.backend).toHaveBeenCalledTimes(1);
 
 覆盖：模型缺失、哈希错误、非法 `runtimeRoot`、低配置档位、取消读取、后端缺节点、与安装互斥，以及 `transaction.activate()` 失败后不残留未验证 ready 配置。进度测试断言当前文件和累计字节数单调增加。
 
+增加旧整合包兼容测试：当且仅当 `loras/dmad_minimax_h3_4step_full_critic_comfy.safetensors` 的大小为 `1956188032` 且 SHA256 为 `b77b7c00a9091c65282029828c9e178e2090a30ca90582bc01a900fc7c777b71` 时导入成功；任意其他大小或哈希仍失败。官方安装清单保持不变。
+
 在 `tests/unit/ipc.test.ts` 增加 `environment:import` 的严格负载和转发断言：
 
 ```ts
@@ -224,6 +226,8 @@ importExisting(input: EnvironmentImportInput): Promise<EnvironmentState> {
 ```
 
 `executeImport` 依次执行：硬件检测、无磁盘空间要求的推荐、所选档位校验、运行文件校验、模型哈希进度、后端验证、ready 提交和事务激活。失败时回滚候选事务和 ready 提交，下载函数不参与。
+
+为导入校验增加上述旧整合包 LoRA 的精确兼容指纹，使用独立映射路径、大小和 SHA256，不全局跳过错误，不修改 `resources/environment/selflift-spark.json`。
 
 注册主进程 `environment:import` 的严格 schema、服务接口和 dispatch，并接入 `setup.importExisting`：
 
