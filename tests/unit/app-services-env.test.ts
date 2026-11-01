@@ -254,6 +254,32 @@ describe('createAppServices environment integration', () => {
     expect(importExisting).toHaveBeenCalledWith(input);
   });
 
+  test('forwards environment validation to the setup service', async () => {
+    const dataDirectory = await useDataDirectory();
+    const validate = vi
+      .spyOn(EnvironmentSetupService.prototype, 'validate')
+      .mockResolvedValue({
+        config: null,
+        hardware: null,
+        selection: null,
+        installRoot: dataDirectory,
+        stage: 'ready',
+        progress: { downloadedBytes: 0, totalBytes: 0 },
+        error: null,
+        active: false,
+        healthy: true,
+      });
+    cleanups.push(() => validate.mockRestore());
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+
+    await expect(services.environment.validate()).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+    });
+    expect(validate).toHaveBeenCalledWith();
+  });
+
   test.each([
     { canceled: true, filePaths: [] },
     { canceled: false, filePaths: [] },

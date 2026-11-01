@@ -980,6 +980,58 @@ describe('EnvironmentSetupService existing environment import', () => {
     });
   });
 
+  test('cancel waits for atomic import activation without aborting it', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const harness = await createHarness({
+      service: {
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          return transaction.result;
+        },
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    const pending = harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    await activationStarted.promise;
+    let cancelSettled = false;
+    const cancelling = harness.service.cancel().then((state) => {
+      cancelSettled = true;
+      return state;
+    });
+
+    expect(observedSignal?.aborted).toBe(false);
+    expect(cancelSettled).toBe(false);
+    expect(harness.service.getState()).toMatchObject({
+      active: true,
+      healthy: false,
+      error: null,
+    });
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    await expect(cancelling).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
   test('rejects a backend with missing nodes before committing ready', async () => {
     const harness = await createHarness({
       service: {
@@ -1072,6 +1124,41 @@ describe('EnvironmentSetupService existing environment import', () => {
     },
   );
 
+  test('surfaces an import backend rollback failure while restoring old ready', async () => {
+    const previous = await createHarness();
+    const oldReady = await seedReadyConfig(previous);
+    const transaction = makeTransaction(new Error('import activate exploded'));
+    transaction.rollback.mockRejectedValue(
+      new Error('import backend rollback exploded'),
+    );
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: {
+        store: previous.store,
+        startBackend: async () => transaction.result,
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(
+      /import activate exploded[\s\S]*import backend rollback exploded/i,
+    );
+    expect(await previous.store.load()).toEqual(oldReady);
+    expect(harness.service.getState()).toMatchObject({
+      config: oldReady,
+      active: false,
+      healthy: false,
+    });
+    expect(harness.service.getState().error).toMatch(
+      /import activate exploded[\s\S]*import backend rollback exploded/i,
+    );
+  });
+
   test('reports throttled cumulative model verification progress', async () => {
     const content = Buffer.alloc(64 * MIB + 128 * 1024, 7);
     const manifest = makeSingleModelManifest(content);
@@ -1113,6 +1200,37 @@ describe('EnvironmentSetupService existing environment import', () => {
       downloadedBytes: content.length,
       totalBytes: content.length,
     });
+  });
+
+  test('does not repeat final progress at an exact 64 MiB boundary', async () => {
+    const content = Buffer.alloc(64 * MIB, 11);
+    const manifest = makeSingleModelManifest(content);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+    const progress = harness.service as unknown as {
+      setProgress(bytes: number, total: number, currentFile?: string): void;
+    };
+    const original = progress.setProgress.bind(harness.service);
+    const updates: Array<{ bytes: number; file?: string }> = [];
+    vi.spyOn(progress, 'setProgress').mockImplementation(
+      (bytes, _total, currentFile) => {
+        updates.push({ bytes, file: currentFile });
+        original(bytes, _total, currentFile);
+      },
+    );
+
+    await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    const modelUpdates = updates.filter(
+      (update) => update.file === manifest.modelFiles[0].path,
+    );
+    expect(modelUpdates.map((update) => update.bytes)).toEqual([0, 64 * MIB]);
   });
 });
 
@@ -2303,6 +2421,215 @@ describe('EnvironmentSetupService backend transactions', () => {
       active: false,
       healthy: false,
     });
+  });
+
+  test('surfaces an install backend rollback failure and still saves failed config', async () => {
+    const transaction = makeTransaction(new Error('install activate exploded'));
+    transaction.rollback.mockRejectedValue(
+      new Error('install backend rollback exploded'),
+    );
+    const harness = await createHarness({
+      service: { startBackend: async () => transaction.result },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(
+      /install activate exploded[\s\S]*install backend rollback exploded/i,
+    );
+    expect((await harness.store.load())?.status).toBe('failed');
+    expect(harness.service.getState()).toMatchObject({
+      config: { status: 'failed' },
+      active: false,
+      healthy: false,
+    });
+    expect(harness.service.getState().error).toMatch(
+      /install activate exploded[\s\S]*install backend rollback exploded/i,
+    );
+  });
+
+  test('cancel waits for atomic install activation without aborting it', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const harness = await createHarness({
+      service: {
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          return transaction.result;
+        },
+      },
+    });
+
+    const pending = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await activationStarted.promise;
+    let cancelSettled = false;
+    const cancelling = harness.service.cancel().then((state) => {
+      cancelSettled = true;
+      return state;
+    });
+
+    expect(observedSignal?.aborted).toBe(false);
+    expect(cancelSettled).toBe(false);
+    expect(harness.service.getState()).toMatchObject({
+      active: true,
+      healthy: false,
+      error: null,
+    });
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    await expect(cancelling).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('validation shares its operation and excludes imports until activation finishes', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    const startBackend = vi.fn(async () => transaction.result);
+    const previous = await createHarness();
+    const ready = await seedReadyConfig(previous);
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: { store: previous.store, startBackend },
+    });
+
+    const pending = harness.service.validate();
+    await activationStarted.promise;
+    const same = harness.service.validate();
+    expect(same).toBe(pending);
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/active|busy|input/i);
+    expect(startBackend).toHaveBeenCalledTimes(1);
+    expect(startBackend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeRoot: ready.runtimeRoot,
+        modelDirectory: ready.modelDirectory,
+        outputDirectory: ready.outputDirectory,
+        profile: ready.profile,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      config: ready,
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(await harness.store.load()).toEqual(ready);
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('cancel waits for atomic validation activation without aborting it', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const previous = await createHarness();
+    await seedReadyConfig(previous);
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: {
+        store: previous.store,
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          return transaction.result;
+        },
+      },
+    });
+
+    const pending = harness.service.validate();
+    await activationStarted.promise;
+    let cancelSettled = false;
+    const cancelling = harness.service.cancel().then((state) => {
+      cancelSettled = true;
+      return state;
+    });
+
+    expect(observedSignal?.aborted).toBe(false);
+    expect(cancelSettled).toBe(false);
+    expect(harness.service.getState()).toMatchObject({
+      active: true,
+      healthy: false,
+      error: null,
+    });
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    await expect(cancelling).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('surfaces a validation backend rollback failure', async () => {
+    const transaction = makeTransaction();
+    transaction.result.objectInfo = {};
+    transaction.rollback.mockRejectedValue(
+      new Error('validation backend rollback exploded'),
+    );
+    const previous = await createHarness();
+    const ready = await seedReadyConfig(previous);
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: {
+        store: previous.store,
+        startBackend: async () => transaction.result,
+      },
+    });
+
+    await expect(harness.service.validate()).rejects.toThrow(
+      /missing required nodes[\s\S]*validation backend rollback exploded/i,
+    );
+    expect(await previous.store.load()).toEqual(ready);
+    expect(harness.service.getState()).toMatchObject({
+      config: ready,
+      active: false,
+      healthy: false,
+    });
+    expect(harness.service.getState().error).toMatch(
+      /missing required nodes[\s\S]*validation backend rollback exploded/i,
+    );
   });
 });
 

@@ -420,7 +420,10 @@ async function verifyFileHash(
   if (actual !== expectedSha256.toLowerCase()) {
     throw new Error(`${label} SHA256 mismatch: ${path}`);
   }
-  onProgress?.(verifiedBytes);
+  if (onProgress && verifiedBytes > lastReportedBytes) {
+    lastReportedBytes = verifiedBytes;
+    onProgress(verifiedBytes);
+  }
 }
 
 async function verifyRuntimeFiles(
@@ -676,6 +679,7 @@ export class EnvironmentSetupService {
     | { installRoot: string; promise: Promise<EnvironmentState> }
     | undefined;
   private controller: AbortController | undefined;
+  private activating = false;
 
   constructor(private readonly options: EnvironmentSetupServiceOptions) {
     this.state = {
@@ -754,13 +758,15 @@ export class EnvironmentSetupService {
   async cancel(): Promise<EnvironmentState> {
     const pending = this.inFlight;
     if (pending && this.controller) {
-      this.controller.abort(new Error('Environment setup cancelled'));
-      this.state = {
-        ...this.state,
-        active: false,
-        healthy: false,
-        error: 'Environment setup cancellation requested',
-      };
+      if (!this.activating) {
+        this.controller.abort(new Error('Environment setup cancelled'));
+        this.state = {
+          ...this.state,
+          active: false,
+          healthy: false,
+          error: 'Environment setup cancellation requested',
+        };
+      }
       await pending.catch(() => undefined);
     }
     return this.getState();
@@ -784,6 +790,15 @@ export class EnvironmentSetupService {
     return this.trackOperation(key, () => this.executeImport(input));
   }
 
+  validate(): Promise<EnvironmentState> {
+    if (this.detectFlight) {
+      return Promise.reject(
+        new Error('Cannot validate an environment while detection is active'),
+      );
+    }
+    return this.trackOperation('validate', () => this.executeValidation());
+  }
+
   private trackOperation(
     key: string,
     callback: () => Promise<EnvironmentState>,
@@ -799,11 +814,32 @@ export class EnvironmentSetupService {
       if (this.inFlight === tracked) {
         this.inFlight = undefined;
         this.inFlightInput = undefined;
+        this.activating = false;
       }
     });
     this.inFlight = tracked;
     this.inFlightInput = key;
     return tracked;
+  }
+
+  private async activateBackend(
+    transaction: EnvironmentBackendTransaction,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    this.activating = true;
+    await transaction.activate();
+  }
+
+  private async rollbackBackend(
+    transaction: EnvironmentBackendTransaction,
+  ): Promise<unknown> {
+    try {
+      await transaction.rollback();
+      return undefined;
+    } catch (error) {
+      return error;
+    }
   }
 
   private async executeDetect(installRoot: string): Promise<EnvironmentState> {
@@ -951,6 +987,89 @@ export class EnvironmentSetupService {
     );
   }
 
+  private async executeValidation(): Promise<EnvironmentState> {
+    const controller = new AbortController();
+    this.controller = controller;
+    const { signal } = controller;
+    let transaction: EnvironmentBackendTransaction | undefined;
+    let transactionActivated = false;
+
+    try {
+      await this.loaded;
+      if (this.state.active) {
+        throw new Error('Cannot validate the environment while setup is active');
+      }
+      const config = this.state.config;
+      if (config === null || config.status !== 'ready') {
+        throw new Error('Environment validation requires a ready configuration');
+      }
+      const runtime: EnvironmentRuntime | undefined =
+        this.options.manifest.runtimes[config.runtimeId];
+      if (runtime === undefined) {
+        throw new Error(
+          `The environment manifest has no runtime ${config.runtimeId}`,
+        );
+      }
+      signal.throwIfAborted();
+      this.state = {
+        ...this.state,
+        stage: 'start',
+        active: true,
+        healthy: false,
+        error: null,
+      };
+      const resolveRuntimePath = (path: string) =>
+        win32.join(config.runtimeRoot, ...path.split('/').slice(1));
+      const result = await this.options.startBackend({
+        runtimeRoot: config.runtimeRoot,
+        modelDirectory: config.modelDirectory,
+        outputDirectory: config.outputDirectory,
+        profile: config.profile,
+        runtime,
+        pythonPath: resolveRuntimePath(runtime.pythonPath),
+        launchScript: resolveRuntimePath(runtime.launchScript),
+        ffprobePath: resolveRuntimePath(runtime.ffprobePath),
+        signal,
+      });
+      signal.throwIfAborted();
+      transaction = readBackendTransaction(result);
+      const objectInfo = readObjectInfo(result);
+      const missingNodes = REQUIRED_COMFY_NODES.filter(
+        (node) => !Object.hasOwn(objectInfo, node),
+      );
+      if (missingNodes.length > 0) {
+        throw new Error(`Backend is missing required nodes: ${missingNodes.join(', ')}`);
+      }
+      if (transaction === undefined) {
+        throw new Error('Backend validation did not return a backend transaction');
+      }
+
+      await this.activateBackend(transaction, signal);
+      transactionActivated = true;
+      return this.confirmBackendValidation();
+    } catch (error) {
+      let message = errorMessage(error);
+      if (transaction !== undefined && !transactionActivated) {
+        const rollbackError = await this.rollbackBackend(transaction);
+        if (rollbackError !== undefined) {
+          message += `; backend rollback failed: ${errorMessage(rollbackError)}`;
+        }
+      }
+      this.state = {
+        ...this.state,
+        error: message,
+        active: false,
+        healthy: false,
+      };
+      if (message !== errorMessage(error)) {
+        throw new Error(message, { cause: error });
+      }
+      throw error;
+    } finally {
+      if (this.controller === controller) this.controller = undefined;
+    }
+  }
+
   private async executeImport(
     input: EnvironmentImportInput,
   ): Promise<EnvironmentState> {
@@ -1089,10 +1208,11 @@ export class EnvironmentSetupService {
       signal.throwIfAborted();
       const ready = await this.options.store.commitReady(candidate);
       readyCommitted = ready;
-      signal.throwIfAborted();
       if (transaction !== undefined) {
-        await transaction.activate();
+        await this.activateBackend(transaction, signal);
         transactionActivated = true;
+      } else {
+        signal.throwIfAborted();
       }
       this.state = {
         ...this.state,
@@ -1105,6 +1225,7 @@ export class EnvironmentSetupService {
       return this.getState();
     } catch (error) {
       const originalMessage = errorMessage(error);
+      let message = originalMessage;
       this.state = {
         ...this.state,
         error: originalMessage,
@@ -1112,7 +1233,10 @@ export class EnvironmentSetupService {
         healthy: false,
       };
       if (transaction !== undefined && !transactionActivated) {
-        await transaction.rollback().catch(() => undefined);
+        const rollbackError = await this.rollbackBackend(transaction);
+        if (rollbackError !== undefined) {
+          message += `; backend rollback failed: ${errorMessage(rollbackError)}`;
+        }
       }
       if (readyCommitted && candidate) {
         try {
@@ -1132,9 +1256,13 @@ export class EnvironmentSetupService {
           this.state = {
             ...this.state,
             config: readyCommitted,
-            error: `${originalMessage}; ready rollback failed: ${errorMessage(rollbackError)}`,
           };
+          message += `; ready rollback failed: ${errorMessage(rollbackError)}`;
         }
+      }
+      this.state = { ...this.state, error: message };
+      if (message !== originalMessage) {
+        throw new Error(message, { cause: error });
       }
       throw error;
     } finally {
@@ -1356,12 +1484,13 @@ export class EnvironmentSetupService {
       signal.throwIfAborted();
       const ready = await this.options.store.commitReady(candidate);
       readyCommitted = ready;
-      signal.throwIfAborted();
       if (transaction !== undefined) {
         // The candidate only replaces the active backend once the ready
         // state is durably committed and no cancellation arrived in between.
-        await transaction.activate();
+        await this.activateBackend(transaction, signal);
         transactionActivated = true;
+      } else {
+        signal.throwIfAborted();
       }
       this.state = {
         ...this.state,
@@ -1374,6 +1503,7 @@ export class EnvironmentSetupService {
       return this.getState();
     } catch (error) {
       const originalMessage = errorMessage(error);
+      let message = originalMessage;
       this.state = {
         ...this.state,
         error: originalMessage,
@@ -1381,7 +1511,10 @@ export class EnvironmentSetupService {
         healthy: false,
       };
       if (transaction !== undefined && !transactionActivated) {
-        await transaction.rollback().catch(() => undefined);
+        const rollbackError = await this.rollbackBackend(transaction);
+        if (rollbackError !== undefined) {
+          message += `; backend rollback failed: ${errorMessage(rollbackError)}`;
+        }
       }
       if (layout) await this.removeStaging(layout).catch(() => undefined);
       if (readyCommitted && candidate) {
@@ -1402,8 +1535,8 @@ export class EnvironmentSetupService {
           this.state = {
             ...this.state,
             config: readyCommitted,
-            error: `${originalMessage}; ready rollback failed: ${errorMessage(rollbackError)}`,
           };
+          message += `; ready rollback failed: ${errorMessage(rollbackError)}`;
         }
       } else if (candidate && candidateSaved && !preserveReady) {
         const failed: EnvironmentConfig = {
@@ -1417,9 +1550,13 @@ export class EnvironmentSetupService {
         } catch (saveError) {
           this.state = {
             ...this.state,
-            error: `${originalMessage}; unable to save failed state: ${errorMessage(saveError)}`,
           };
+          message += `; unable to save failed state: ${errorMessage(saveError)}`;
         }
+      }
+      this.state = { ...this.state, error: message };
+      if (message !== originalMessage) {
+        throw new Error(message, { cause: error });
       }
       throw error;
     } finally {
