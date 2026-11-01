@@ -33,18 +33,9 @@
 
 - [ ] **步骤 1：编写失败的 IPC 测试**
 
-在 `tests/unit/ipc.test.ts` 增加两条通道的注册、严格负载和转发断言：
+在 `tests/unit/ipc.test.ts` 增加目录选择通道的注册和转发断言：
 
 ```ts
-test('imports an existing environment with a strict payload', async () => {
-  const input = { runtimeRoot: 'D:\\H3\\Runtime', profileId: 'conservative' as const };
-  services.environment.importExisting.mockResolvedValue(environmentState);
-  await handlers.get('environment:import')?.(input);
-  expect(services.environment.importExisting).toHaveBeenCalledWith(input);
-  await expect(handlers.get('environment:import')?.({ ...input, extra: true }))
-    .rejects.toThrow();
-});
-
 test('returns a cancelled existing-root directory selection', async () => {
   services.environment.selectExistingRoot.mockResolvedValue(null);
   await expect(handlers.get('environment:selectExistingRoot')?.({})).resolves.toBeNull();
@@ -55,7 +46,7 @@ test('returns a cancelled existing-root directory selection', async () => {
 
 运行：`npx vitest run tests/unit/ipc.test.ts`
 
-预期：FAIL，`environment:import` 和 `environment:selectExistingRoot` 尚未注册。
+预期：FAIL，`environment:selectExistingRoot` 尚未注册。
 
 - [ ] **步骤 3：实现共享类型、IPC、preload 与目录选择**
 
@@ -68,13 +59,10 @@ export interface EnvironmentImportInput {
 }
 ```
 
-注册 `environment:selectExistingRoot` 的空负载和 `environment:import` 的严格 schema：
+注册 `environment:selectExistingRoot` 的空负载。`EnvironmentImportInput`、preload 的 `importExisting` 和 `SmoApi` 类型可以在本任务加入，但主进程 `environment:import` 通道留到任务 3 与真实服务一起注册：
 
 ```ts
-const environmentImportSchema = z.object({
-  runtimeRoot: nonEmptyString,
-  profileId: z.enum(['conservative', 'balanced-16gb', 'high-memory-candidate']),
-}).strict();
+const environmentSelectExistingRootSchema = emptyPayload;
 ```
 
 在 `app-services.ts` 复用注入的 `FileDialog`：
@@ -89,7 +77,7 @@ selectExistingRoot: async () => {
 },
 ```
 
-同时补充 `IpcServices`、dispatch、preload 和 `SmoApi` 类型。
+同时补充 `IpcServices`、目录选择 dispatch、preload 和 `SmoApi` 类型。
 
 - [ ] **步骤 4：运行测试和类型检查**
 
@@ -204,6 +192,17 @@ expect(harness.backend).toHaveBeenCalledTimes(1);
 
 覆盖：模型缺失、哈希错误、非法 `runtimeRoot`、低配置档位、取消读取、后端缺节点、与安装互斥，以及 `transaction.activate()` 失败后不残留未验证 ready 配置。进度测试断言当前文件和累计字节数单调增加。
 
+在 `tests/unit/ipc.test.ts` 增加 `environment:import` 的严格负载和转发断言：
+
+```ts
+const input = { runtimeRoot: 'D:\\H3\\Runtime', profileId: 'conservative' as const };
+services.environment.importExisting.mockResolvedValue(environmentState);
+await handlers.get('environment:import')?.(input);
+expect(services.environment.importExisting).toHaveBeenCalledWith(input);
+await expect(handlers.get('environment:import')?.({ ...input, extra: true }))
+  .rejects.toThrow();
+```
+
 - [ ] **步骤 3：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/environment-setup.test.ts`
@@ -226,6 +225,15 @@ importExisting(input: EnvironmentImportInput): Promise<EnvironmentState> {
 
 `executeImport` 依次执行：硬件检测、无磁盘空间要求的推荐、所选档位校验、运行文件校验、模型哈希进度、后端验证、ready 提交和事务激活。失败时回滚候选事务和 ready 提交，下载函数不参与。
 
+注册主进程 `environment:import` 的严格 schema、服务接口和 dispatch，并接入 `setup.importExisting`：
+
+```ts
+const environmentImportSchema = z.object({
+  runtimeRoot: nonEmptyString,
+  profileId: z.enum(['conservative', 'balanced-16gb', 'high-memory-candidate']),
+}).strict();
+```
+
 为 `verifyFileHash` 与 `verifyModelFiles` 增加可选字节回调；原安装调用不传回调，行为不变。
 
 - [ ] **步骤 5：运行测试确认通过**
@@ -237,7 +245,7 @@ importExisting(input: EnvironmentImportInput): Promise<EnvironmentState> {
 - [ ] **步骤 6：Commit**
 
 ```bash
-git add src/main/environment-setup.ts tests/unit/environment-setup.test.ts tests/unit/app-services-env.test.ts
+git add src/shared/ipc.ts src/main/ipc.ts src/main/app-services.ts src/main/environment-setup.ts tests/unit/ipc.test.ts tests/unit/environment-setup.test.ts tests/unit/app-services-env.test.ts
 git commit -m "Import verified existing ComfyUI environments"
 ```
 
