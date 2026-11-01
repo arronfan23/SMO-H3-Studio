@@ -24,16 +24,21 @@ const ASSET_EXTENSIONS = new Set([
 // Deletes files through an open handle so the bytes removed are exactly the
 // file that passed validation, closing the check-to-delete TOCTOU window.
 // Paths travel through the environment and never appear on the command line.
-// The handle is opened with the DELETE access right and delete sharing so the
-// disposition can be set on it; FileDispositionInfo is class 4 of
+// The handle is opened with the DELETE access right, delete sharing, and
+// FILE_FLAG_OPEN_REPARSE_POINT so a swapped-in final-component link is opened
+// rather than followed. Before the disposition is set, the handle's own final
+// path is read back with GetFinalPathNameByHandle and must stay inside the
+// validated real root, which also catches parent directories swapped for
+// junctions after validation. FileDispositionInfo is class 4 of
 // FILE_INFO_BY_HANDLE_CLASS and FILE_DISPOSITION_INFO is a single byte.
-const POWERSHELL_DELETE_BY_HANDLE_SCRIPT = `
+const POWERSHELL_DELETE_BY_HANDLE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 public static class SmoWorkHandleDelete
@@ -43,6 +48,7 @@ public static class SmoWorkHandleDelete
     private const uint SynchronizeAccess = 0x00100000;
     private const uint ShareReadWriteDelete = 0x00000007;
     private const uint OpenExisting = 3;
+    private const uint OpenReparsePointFlag = 0x00200000;
     private const int FileDispositionInfoClass = 4;
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -55,6 +61,13 @@ public static class SmoWorkHandleDelete
         uint flagsAndAttributes,
         IntPtr templateFile);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern uint GetFinalPathNameByHandle(
+        SafeFileHandle file,
+        StringBuilder path,
+        uint pathLength,
+        uint flags);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetFileInformationByHandle(
         SafeFileHandle file,
@@ -62,7 +75,40 @@ public static class SmoWorkHandleDelete
         IntPtr fileInformation,
         int bufferLength);
 
-    public static void Delete(string path)
+    public static string NormalizePath(string path)
+    {
+        string normalized = path;
+        if (normalized.StartsWith("\\\\?\\UNC\\", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = "\\\\" + normalized.Substring(8);
+        }
+        else if (normalized.StartsWith("\\\\?\\", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized.Substring(4);
+        }
+        return normalized.TrimEnd('\\');
+    }
+
+    private static string FinalPath(SafeFileHandle handle)
+    {
+        int capacity = 512;
+        while (true)
+        {
+            StringBuilder builder = new StringBuilder(capacity);
+            uint length = GetFinalPathNameByHandle(handle, builder, (uint)builder.Capacity, 0);
+            if (length == 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if (length < (uint)builder.Capacity)
+            {
+                return builder.ToString();
+            }
+            capacity = (int)length + 1;
+        }
+    }
+
+    public static void Delete(string path, string root)
     {
         using (SafeFileHandle handle = CreateFile(
             path,
@@ -70,12 +116,18 @@ public static class SmoWorkHandleDelete
             ShareReadWriteDelete,
             IntPtr.Zero,
             OpenExisting,
-            0,
+            OpenReparsePointFlag,
             IntPtr.Zero))
         {
             if (handle.IsInvalid)
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            string finalPath = NormalizePath(FinalPath(handle));
+            if (!finalPath.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Resolved handle path escapes the output directory: " + finalPath);
             }
             IntPtr info = Marshal.AllocHGlobal(1);
             try
@@ -95,13 +147,14 @@ public static class SmoWorkHandleDelete
 }
 '@
 
+$root = [SmoWorkHandleDelete]::NormalizePath($env:SMO_WORK_DELETE_ROOT)
 $paths = $env:SMO_WORK_DELETE_PATHS | ConvertFrom-Json
 foreach ($path in $paths) {
-    [SmoWorkHandleDelete]::Delete([string]$path)
+    [SmoWorkHandleDelete]::Delete([string]$path, $root)
 }
 `;
 
-async function deleteFilesByHandle(paths: string[]): Promise<void> {
+async function deleteFilesByHandle(paths: string[], root: string): Promise<void> {
   if (paths.length === 0) {
     return;
   }
@@ -113,6 +166,7 @@ async function deleteFilesByHandle(paths: string[]): Promise<void> {
       maxBuffer: 1024 * 1024,
       env: {
         ...process.env,
+        SMO_WORK_DELETE_ROOT: root,
         SMO_WORK_DELETE_PATHS: JSON.stringify(paths),
       },
     },
@@ -223,12 +277,10 @@ export class WorkService {
       }
       return;
     }
-    if (process.platform === 'win32') {
-      await deleteFilesByHandle(validated);
-      return;
+    if (process.platform !== 'win32') {
+      throw new Error(`Work output deletion is not supported on ${process.platform}`);
     }
-    for (const assetPath of validated) {
-      await rm(assetPath, { force: true });
-    }
+    const deleteRoot = realRoot ?? (await realpath(root));
+    await deleteFilesByHandle(validated, deleteRoot);
   }
 }

@@ -2,7 +2,7 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -460,10 +460,61 @@ describe('WorkService.deleteWork', () => {
       expect(args).toContain('-NoProfile');
       const script = args[args.indexOf('-Command') + 1];
       expect(script).toMatch(/SetFileInformationByHandle/);
+      expect(script).toMatch(/GetFinalPathNameByHandle/);
       // Paths must travel through the environment, never inside the command.
       expect(script).not.toContain(videoPath);
+      expect(script).not.toContain(options.env?.SMO_WORK_DELETE_ROOT ?? '');
       expect(parseDeletePaths(options).sort()).toEqual([videoPath, assetPath].sort());
+      expect(typeof options.env?.SMO_WORK_DELETE_ROOT).toBe('string');
       expect(store.getWork(done.id)).toBeNull();
+    },
+  );
+
+  test.skipIf(process.platform !== 'win32')(
+    'refuses to delete when the parent directory is swapped for an outside junction after validation',
+    async () => {
+      const actual = await vi.importActual<typeof import('node:child_process')>(
+        'node:child_process',
+      );
+      const realExecFile = actual.execFile as unknown as (
+        file: string,
+        args: string[],
+        options: ExecFileOptions,
+        callback: ExecFileCallback,
+      ) => unknown;
+      const { directory, outputDirectory, store, service, avatarId } = await createHarness();
+      const workId = 'swap-work';
+      const subDirectory = join(outputDirectory, 'sub');
+      await mkdir(subDirectory);
+      const videoPath = join(subDirectory, `${workId}.mp4`);
+      await writeFile(videoPath, 'video');
+      const outsideDirectory = join(directory, 'outside-swap');
+      await mkdir(outsideDirectory);
+      const outsideVideo = join(outsideDirectory, `${workId}.mp4`);
+      await writeFile(outsideVideo, 'must survive');
+      const done = store.addWork({
+        id: workId,
+        avatarId,
+        mode: 'text',
+        outputPath: videoPath,
+        status: 'done',
+      });
+      execFileMock.mockImplementation(
+        ((file: string, args: string[], options: ExecFileOptions, callback: ExecFileCallback) => {
+          void (async () => {
+            // Validation has already passed at this point; swap the parent for
+            // a junction moments before the real process opens the file.
+            await rename(subDirectory, `${subDirectory}-real`);
+            await symlink(outsideDirectory, subDirectory, 'junction');
+            realExecFile(file, args, options, callback);
+          })().catch((error: unknown) => callback(error as Error, '', ''));
+          return undefined;
+        }) as unknown as typeof execFile,
+      );
+
+      await expect(service.deleteWork(done.id)).rejects.toThrow(/escapes|outside|root/i);
+      expect(existsSync(outsideVideo)).toBe(true);
+      expect(store.getWork(done.id)).not.toBeNull();
     },
   );
 
