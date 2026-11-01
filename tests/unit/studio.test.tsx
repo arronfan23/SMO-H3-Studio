@@ -2755,10 +2755,98 @@ describe('works rename', () => {
     await openWorksPage();
     await screen.findByRole('heading', { name: '薄荷主播' });
 
-    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    const trigger = screen.getByRole('button', { name: '重命名作品 done-work' });
+    fireEvent.click(trigger);
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(smo.works.rename).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  test('focuses the title input on open and wraps Tab between input and buttons', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    const input = within(dialog).getByLabelText('作品标题');
+    const cancel = within(dialog).getByRole('button', { name: '取消' });
+    const save = within(dialog).getByRole('button', { name: '保存标题' });
+    expect(input).toHaveFocus();
+
+    // Shift+Tab on the first control wraps to the last button.
+    expect(fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })).toBe(false);
+    expect(save).toHaveFocus();
+    // Tab on the last button wraps back to the input.
+    expect(fireEvent.keyDown(dialog, { key: 'Tab' })).toBe(false);
+    expect(input).toHaveFocus();
+    // Tab in the middle of the order is left to the browser default.
+    cancel.focus();
+    expect(fireEvent.keyDown(dialog, { key: 'Tab' })).toBe(true);
+    expect(fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })).toBe(true);
+  });
+
+  test('closes the rename modal with Escape when idle and restores focus', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    const trigger = screen.getByRole('button', { name: '重命名作品 done-work' });
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(smo.works.rename).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  test('blocks Tab and Escape while a rename is saving', async () => {
+    let resolveRename: ((work: Work) => void) | undefined;
+    smo.works.rename.mockImplementation(
+      () =>
+        new Promise<Work>((resolve) => {
+          resolveRename = resolve;
+        }),
+    );
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    const input = within(dialog).getByLabelText('作品标题');
+    fireEvent.change(input, { target: { value: '新标题' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: '正在保存…' })).toBeDisabled(),
+    );
+    expect(input).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: '取消' })).toBeDisabled();
+
+    // Every control is disabled, so Tab must not escape into the background.
+    expect(fireEvent.keyDown(dialog, { key: 'Tab' })).toBe(false);
+    expect(fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })).toBe(false);
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: '重命名作品' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRename?.(createWork({ id: 'done-work', status: 'done', outputPath, title: '新标题' }));
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 });

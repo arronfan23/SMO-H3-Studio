@@ -298,7 +298,7 @@ export function createIpcSchema() {
     ),
     requestSchema(
       'works:rename',
-      z.object({ id: nonEmptyString, title: nonEmptyString }).strict(),
+      z.object({ id: nonEmptyString, title: nonEmptyString.max(120) }).strict(),
     ),
     requestSchema('comfy:health', emptyPayload),
     requestSchema('comfy:start', emptyPayload),

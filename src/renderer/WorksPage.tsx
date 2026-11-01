@@ -49,6 +49,39 @@ function readWorkCompletion(work: Work): { completedAt: string; duration: string
   return { completedAt, duration: formatElapsedDuration(completedMs - createdMs) };
 }
 
+/**
+ * Keeps Tab cycling inside a dialog's focusable controls, wrapping at both
+ * ends. When every control is disabled (e.g. while saving), Tab is swallowed
+ * so focus can never escape into the page behind the modal.
+ */
+function trapDialogTabKeyDown(
+  event: KeyboardEvent<HTMLDivElement>,
+  focusableSelector: string,
+): void {
+  const focusable = Array.from(
+    event.currentTarget.querySelectorAll<HTMLInputElement | HTMLButtonElement>(
+      focusableSelector,
+    ),
+  ).filter((element) => !element.disabled);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const active = document.activeElement;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (active === null || !focusable.includes(active as HTMLInputElement | HTMLButtonElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
@@ -254,7 +287,12 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
       if (!renaming) {
         closeRenameDialog();
       }
+      return;
     }
+    if (event.key !== 'Tab') {
+      return;
+    }
+    trapDialogTabKeyDown(event, 'input, .modal-actions button');
   };
 
   const openDeleteDialog = (work: Work, trigger: HTMLButtonElement): void => {
@@ -306,26 +344,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     if (event.key !== 'Tab') {
       return;
     }
-    const buttons = Array.from(
-      event.currentTarget.querySelectorAll<HTMLButtonElement>('.modal-actions button'),
-    ).filter((button) => !button.disabled);
-    if (buttons.length === 0) {
-      event.preventDefault();
-      return;
-    }
-    const active = document.activeElement;
-    const first = buttons[0];
-    const last = buttons[buttons.length - 1];
-    if (!buttons.includes(active as HTMLButtonElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && active === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    trapDialogTabKeyDown(event, '.modal-actions button');
   };
 
   return (
@@ -504,6 +523,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 value={renameValue}
                 maxLength={120}
                 autoFocus
+                disabled={renaming}
                 onChange={(event) => setRenameValue(event.target.value)}
               />
             </div>

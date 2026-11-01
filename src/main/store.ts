@@ -266,6 +266,9 @@ export class Store {
     if (trimmed.length === 0) {
       throw new Error('Work title must not be empty');
     }
+    if (trimmed.length > 120) {
+      throw new Error('Work title must not exceed 120 characters');
+    }
     return this.updateWork(id, { title: trimmed });
   }
 

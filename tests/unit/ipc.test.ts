@@ -470,6 +470,15 @@ describe('IPC input schema', () => {
       channel: 'works:rename',
       payload: { id: 'work-1', title: '新标题' },
     });
+    expect(
+      schema.parse({
+        channel: 'works:rename',
+        payload: { id: 'work-1', title: '题'.repeat(120) },
+      }),
+    ).toEqual({
+      channel: 'works:rename',
+      payload: { id: 'work-1', title: '题'.repeat(120) },
+    });
 
     const hardware = schema.parse({
       channel: 'hardware:apply',
@@ -568,6 +577,7 @@ describe('IPC input schema', () => {
     { channel: 'works:rename', payload: { id: 'work-1' } },
     { channel: 'works:rename', payload: { id: 'work-1', title: '' } },
     { channel: 'works:rename', payload: { id: 'work-1', title: '   ' } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '题'.repeat(121) } },
     { channel: 'works:rename', payload: { id: 'work-1', title: '新标题', outputPath: 'x' } },
   ])('rejects invalid avatar mutation input: %j', (request) => {
     expect(() => createIpcSchema().parse(request)).toThrow();
@@ -1002,6 +1012,9 @@ describe('main-process IPC handlers', () => {
 
     await expect(
       harness.invoke('works:rename', { id: work.id, title: '   ' }),
+    ).rejects.toThrow();
+    await expect(
+      harness.invoke('works:rename', { id: work.id, title: '题'.repeat(121) }),
     ).rejects.toThrow();
     expect(harness.store.getWork(work.id)?.title).toBe('发布会成片');
   });

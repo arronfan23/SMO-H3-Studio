@@ -454,6 +454,32 @@ describe('work rename', () => {
     });
   });
 
+  test('accepts a 120-character work title', () => {
+    withStore((store) => {
+      const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+      const work = store.addWork(makeWork(avatar.id));
+      const title = '题'.repeat(120);
+
+      expect(store.renameWork(work.id, title).title).toBe(title);
+      expect(store.getWork(work.id)?.title).toBe(title);
+    });
+  });
+
+  test.each(['题'.repeat(121), `  ${'题'.repeat(121)}  `])(
+    'rejects a work title longer than 120 characters after trimming',
+    (title) => {
+      withStore((store) => {
+        const avatar = store.createAvatar({ name: 'Lin', photoPath: 'avatars/lin.jpg' });
+        const work = store.addWork(makeWork(avatar.id));
+
+        expect(() => store.renameWork(work.id, title)).toThrow(
+          /must not exceed 120 characters/i,
+        );
+        expect(store.getWork(work.id)).toEqual(work);
+      });
+    },
+  );
+
   test('rejects renaming an unknown work', () => {
     withStore((store) => {
       expect(() => store.renameWork('missing', '标题')).toThrow(/work not found/i);
