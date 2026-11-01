@@ -19,7 +19,7 @@ const HARDWARE_PRESET_TEXT = {
   },
   "balanced-16gb": {
     label: "均衡模式",
-    scenario: "适用场景：显存 12 至 20 GiB 且内存至少 32 GiB；兼顾画质与稳定性。",
+    scenario: "适用场景：显存至少 12 GiB 且不足 20 GiB，内存至少 32 GiB；兼顾画质与稳定性。",
   },
   "high-memory-candidate": {
     label: "高显存候选模式",
@@ -75,7 +75,7 @@ export function SettingsPage({
   const [recommendation, setRecommendation] = useState<HardwareProfile | null>(null);
   const [hardwareMode, setHardwareMode] = useState<VideoMode>("text");
   const [hardwareAction, setHardwareAction] = useState<
-    "detect" | "recommend" | "apply" | "reset" | null
+    "detect" | "apply" | "reset" | null
   >(null);
   const [hardwareError, setHardwareError] = useState<string | null>(null);
   const [hardwareResult, setHardwareResult] = useState<{
@@ -258,28 +258,6 @@ export function SettingsPage({
     }
   };
 
-  const recommendHardware = async (): Promise<void> => {
-    const info = hardwareInfo;
-    if (!mountedRef.current || info === null || hardwareAction !== null) return;
-    setHardwareAction("recommend");
-    setHardwareError(null);
-    setHardwareResult(null);
-    try {
-      const profile = await window.smo.hardware.recommend({
-        gpu: info.gpu,
-        vramGiB: info.vramGiB,
-        ramGiB: info.ramGiB,
-      });
-      if (mountedRef.current) setRecommendation(profile);
-    } catch (error) {
-      if (!mountedRef.current) return;
-      setRecommendation(null);
-      setHardwareError(errorMessage(error));
-    } finally {
-      if (mountedRef.current) setHardwareAction(null);
-    }
-  };
-
   const applyHardwareRecommendation = async (): Promise<void> => {
     const profile = recommendation;
     const directory = modelDirectory.trim();
@@ -376,15 +354,6 @@ export function SettingsPage({
               >
                 <Cpu size={16} aria-hidden="true" />
                 {hardwareAction === "detect" ? "正在检测…" : "检测硬件"}
-              </button>
-              <button
-                className="button button-secondary"
-                type="button"
-                disabled={hardwareInfo === null || hardwareAction !== null}
-                onClick={() => void recommendHardware()}
-              >
-                <Search size={16} aria-hidden="true" />
-                {hardwareAction === "recommend" ? "正在推荐…" : "获取推荐"}
               </button>
               <button
                 className="button button-secondary"

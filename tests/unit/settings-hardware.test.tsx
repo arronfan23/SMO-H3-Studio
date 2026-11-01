@@ -88,6 +88,7 @@ describe("SettingsPage hardware controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "检测硬件" }));
 
     expect(await screen.findByText("均衡模式")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "获取推荐" })).not.toBeInTheDocument();
     expect(smo.hardware.recommend).toHaveBeenCalledTimes(1);
     expect(smo.hardware.recommend).toHaveBeenCalledWith({
       gpu: hardwareInfo.gpu,
@@ -114,6 +115,15 @@ describe("SettingsPage hardware controls", () => {
     expect(screen.queryByText(hardwareProfile.modelPolicy)).not.toBeInTheDocument();
     expect(screen.queryByText("lowvram")).not.toBeInTheDocument();
     expect(screen.queryByText("tiling")).not.toBeInTheDocument();
+  });
+
+  test("describes the balanced VRAM range without including 20 GiB", async () => {
+    await renderRecommendation();
+
+    expect(
+      screen.getByText(/适用场景：显存至少 12 GiB 且不足 20 GiB/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/显存 12 至 20 GiB/)).not.toBeInTheDocument();
   });
 
   test("shows the real detection error", async () => {

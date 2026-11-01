@@ -1781,7 +1781,7 @@ describe('generation options and hardware apply', () => {
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(await screen.findByRole('button', { name: '检测硬件' }));
     expect(await screen.findByText('NVIDIA GeForce RTX 5080')).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: '获取推荐' }));
+    expect(await screen.findByText('均衡模式')).toBeInTheDocument();
     const directoryInput = await screen.findByLabelText('模型目录');
     fireEvent.change(directoryInput, { target: { value: 'D:\\自定义模型目录' } });
 

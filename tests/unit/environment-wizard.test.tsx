@@ -499,7 +499,7 @@ describe('ready environment entry', () => {
       requiresConfirmation: true,
     });
     fireEvent.click(await screen.findByRole('button', { name: '检测硬件' }));
-    fireEvent.click(await screen.findByRole('button', { name: '获取推荐' }));
+    expect(await screen.findByText('均衡模式')).toBeInTheDocument();
     expect(await screen.findByLabelText('模型目录')).toHaveValue(readyConfig.modelDirectory);
   });
 
