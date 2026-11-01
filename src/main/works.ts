@@ -1,6 +1,10 @@
+import { execFile } from 'node:child_process';
 import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { promisify } from 'node:util';
 import type { Store } from './store';
+
+const execFileAsync = promisify(execFile);
 
 const ASSET_EXTENSIONS = new Set([
   '.png',
@@ -16,6 +20,104 @@ const ASSET_EXTENSIONS = new Set([
   '.ogg',
   '.m4a',
 ]);
+
+// Deletes files through an open handle so the bytes removed are exactly the
+// file that passed validation, closing the check-to-delete TOCTOU window.
+// Paths travel through the environment and never appear on the command line.
+// The handle is opened with the DELETE access right and delete sharing so the
+// disposition can be set on it; FileDispositionInfo is class 4 of
+// FILE_INFO_BY_HANDLE_CLASS and FILE_DISPOSITION_INFO is a single byte.
+const POWERSHELL_DELETE_BY_HANDLE_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class SmoWorkHandleDelete
+{
+    private const uint DeleteAccess = 0x00010000;
+    private const uint FileReadAttributesAccess = 0x00000080;
+    private const uint SynchronizeAccess = 0x00100000;
+    private const uint ShareReadWriteDelete = 0x00000007;
+    private const uint OpenExisting = 3;
+    private const int FileDispositionInfoClass = 4;
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle file,
+        int fileInformationClass,
+        IntPtr fileInformation,
+        int bufferLength);
+
+    public static void Delete(string path)
+    {
+        using (SafeFileHandle handle = CreateFile(
+            path,
+            DeleteAccess | FileReadAttributesAccess | SynchronizeAccess,
+            ShareReadWriteDelete,
+            IntPtr.Zero,
+            OpenExisting,
+            0,
+            IntPtr.Zero))
+        {
+            if (handle.IsInvalid)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            IntPtr info = Marshal.AllocHGlobal(1);
+            try
+            {
+                Marshal.WriteByte(info, 1);
+                if (!SetFileInformationByHandle(handle, FileDispositionInfoClass, info, 1))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(info);
+            }
+        }
+    }
+}
+'@
+
+$paths = $env:SMO_WORK_DELETE_PATHS | ConvertFrom-Json
+foreach ($path in $paths) {
+    [SmoWorkHandleDelete]::Delete([string]$path)
+}
+`;
+
+async function deleteFilesByHandle(paths: string[]): Promise<void> {
+  if (paths.length === 0) {
+    return;
+  }
+  await execFileAsync(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_DELETE_BY_HANDLE_SCRIPT],
+    {
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+      env: {
+        ...process.env,
+        SMO_WORK_DELETE_PATHS: JSON.stringify(paths),
+      },
+    },
+  );
+}
 
 export interface WorkServiceOptions {
   outputDirectory: string;
@@ -38,12 +140,12 @@ function assertInside(root: string, candidate: string): void {
 export class WorkService {
   private readonly outputDirectory: string;
   private readonly store: Pick<Store, 'getWork' | 'deleteWork'>;
-  private readonly remove: typeof rm;
+  private readonly removeFile?: typeof rm;
 
   constructor(options: WorkServiceOptions) {
     this.outputDirectory = options.outputDirectory;
     this.store = options.store;
-    this.remove = options.removeFile ?? rm;
+    this.removeFile = options.removeFile;
   }
 
   async deleteWork(id: string): Promise<void> {
@@ -112,8 +214,21 @@ export class WorkService {
       validated.push(assetPath);
     }
 
+    if (validated.length === 0) {
+      return;
+    }
+    if (this.removeFile !== undefined) {
+      for (const assetPath of validated) {
+        await this.removeFile(assetPath, { force: true });
+      }
+      return;
+    }
+    if (process.platform === 'win32') {
+      await deleteFilesByHandle(validated);
+      return;
+    }
     for (const assetPath of validated) {
-      await this.remove(assetPath, { force: true });
+      await rm(assetPath, { force: true });
     }
   }
 }

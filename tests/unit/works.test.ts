@@ -1,12 +1,55 @@
 // @vitest-environment node
 
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { Store } from '../../src/main/store';
 import { WorkService, type WorkServiceOptions } from '../../src/main/works';
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, execFile: vi.fn(actual.execFile) };
+});
+
+const execFileMock = vi.mocked(execFile);
+
+interface ExecFileOptions {
+  env?: NodeJS.ProcessEnv;
+}
+
+type ExecFileCallback = (error: Error | null, stdout: string, stderr: string) => void;
+
+function mockExecFile(
+  handler: (file: string, args: string[], options: ExecFileOptions) => void | Promise<void>,
+): void {
+  execFileMock.mockImplementation(
+    ((file: string, args: string[], options: ExecFileOptions, callback: ExecFileCallback) => {
+      Promise.resolve()
+        .then(() => handler(file, args, options))
+        .then(
+          () => callback(null, '', ''),
+          (error: unknown) => callback(error as Error, '', ''),
+        );
+      return undefined;
+    }) as unknown as typeof execFile,
+  );
+}
+
+function parseDeletePaths(options: ExecFileOptions): string[] {
+  return JSON.parse(options.env?.SMO_WORK_DELETE_PATHS ?? '[]') as string[];
+}
+
+beforeEach(() => {
+  execFileMock.mockReset();
+  // Keep the suite off real PowerShell processes; the handle-deletion sample
+  // test opts back into the real implementation explicitly.
+  mockExecFile(async (_file, _args, options) => {
+    await Promise.all(parseDeletePaths(options).map((filePath) => rm(filePath, { force: true })));
+  });
+});
 
 interface Harness {
   directory: string;
@@ -317,6 +360,166 @@ describe('WorkService.deleteWork', () => {
     expect(existsSync(videoPath)).toBe(true);
     expect(store.getWork(done.id)).not.toBeNull();
   });
+
+  test('keeps the record and remaining assets when a subsidiary removal fails, then retry finishes cleanup', async () => {
+    const failure = new Error('asset still locked');
+    let removalCalls = 0;
+    let failOnCall: number | null = 2;
+    const removeFile: NonNullable<WorkServiceOptions['removeFile']> = async (
+      filePath,
+      options,
+    ) => {
+      removalCalls += 1;
+      if (failOnCall !== null && removalCalls === failOnCall) {
+        throw failure;
+      }
+      await rm(filePath, options);
+    };
+    const { outputDirectory, store, service, avatarId } = await createHarness(removeFile);
+    const workId = 'partial-cleanup';
+    const videoPath = join(outputDirectory, `${workId}.mp4`);
+    const imageAsset = join(outputDirectory, `${workId}.png`);
+    const audioAsset = join(outputDirectory, `${workId}_voice.mp3`);
+    await writeFile(videoPath, 'video');
+    await writeFile(imageAsset, 'image');
+    await writeFile(audioAsset, 'audio');
+    const done = store.addWork({
+      id: workId,
+      avatarId,
+      mode: 'text',
+      outputPath: videoPath,
+      status: 'done',
+    });
+
+    await expect(service.deleteWork(done.id)).rejects.toBe(failure);
+    // The main video was already removed; the failed subsidiary and everything
+    // after it must stay untouched, and the record must survive.
+    expect(existsSync(videoPath)).toBe(false);
+    expect(existsSync(imageAsset) || existsSync(audioAsset)).toBe(true);
+    expect(store.getWork(done.id)).not.toBeNull();
+
+    failOnCall = null;
+    await service.deleteWork(done.id);
+
+    expect(existsSync(imageAsset)).toBe(false);
+    expect(existsSync(audioAsset)).toBe(false);
+    expect(store.getWork(done.id)).toBeNull();
+  });
+
+  test('refuses an output whose parent directory is a junction escaping the output directory', async () => {
+    const { directory, outputDirectory, store, service, avatarId } = await createHarness();
+    const outsideDirectory = join(directory, 'outside-target');
+    await mkdir(outsideDirectory);
+    const outsideVideo = join(outsideDirectory, 'junction-work.mp4');
+    await writeFile(outsideVideo, 'video');
+    const junctionDirectory = join(outputDirectory, 'via-junction');
+    await symlink(
+      outsideDirectory,
+      junctionDirectory,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const work = store.addWork({
+      id: 'junction-work',
+      avatarId,
+      mode: 'text',
+      outputPath: join(junctionDirectory, 'junction-work.mp4'),
+      status: 'done',
+    });
+
+    await expect(service.deleteWork(work.id)).rejects.toThrow(/output directory/i);
+    expect(existsSync(outsideVideo)).toBe(true);
+    expect(store.getWork(work.id)).not.toBeNull();
+  });
+
+  test.skipIf(process.platform !== 'win32')(
+    'passes every validated asset to a single PowerShell handle-delete process via the environment',
+    async () => {
+      const { outputDirectory, store, service, avatarId } = await createHarness();
+      const workId = 'handle-wire';
+      const videoPath = join(outputDirectory, `${workId}.mp4`);
+      const assetPath = join(outputDirectory, `${workId}_cover.png`);
+      await writeFile(videoPath, 'video');
+      await writeFile(assetPath, 'image');
+      const done = store.addWork({
+        id: workId,
+        avatarId,
+        mode: 'text',
+        outputPath: videoPath,
+        status: 'done',
+      });
+      const invocations: Array<{ file: string; args: string[]; options: ExecFileOptions }> = [];
+      mockExecFile((file, args, options) => {
+        invocations.push({ file, args, options });
+      });
+
+      await service.deleteWork(done.id);
+
+      expect(invocations).toHaveLength(1);
+      const [{ file, args, options }] = invocations;
+      expect(file).toBe('powershell.exe');
+      expect(args).toContain('-NoProfile');
+      const script = args[args.indexOf('-Command') + 1];
+      expect(script).toMatch(/SetFileInformationByHandle/);
+      // Paths must travel through the environment, never inside the command.
+      expect(script).not.toContain(videoPath);
+      expect(parseDeletePaths(options).sort()).toEqual([videoPath, assetPath].sort());
+      expect(store.getWork(done.id)).toBeNull();
+    },
+  );
+
+  test.skipIf(process.platform !== 'win32')(
+    'keeps the work record and files when handle deletion fails',
+    async () => {
+      const { outputDirectory, store, service, avatarId } = await createHarness();
+      const videoPath = join(outputDirectory, 'handle-failure.mp4');
+      await writeFile(videoPath, 'video');
+      const done = store.addWork({
+        id: 'handle-failure',
+        avatarId,
+        mode: 'text',
+        outputPath: videoPath,
+        status: 'done',
+      });
+      mockExecFile(() => {
+        throw new Error('SetFileInformationByHandle denied');
+      });
+
+      await expect(service.deleteWork(done.id)).rejects.toThrow(/denied/i);
+      expect(existsSync(videoPath)).toBe(true);
+      expect(store.getWork(done.id)).not.toBeNull();
+    },
+  );
+
+  test.skipIf(process.platform !== 'win32')(
+    'deletes files through open handles, including paths with spaces and CJK characters',
+    async () => {
+      const actual = await vi.importActual<typeof import('node:child_process')>(
+        'node:child_process',
+      );
+      execFileMock.mockImplementation(actual.execFile);
+      const { outputDirectory, store, service, avatarId } = await createHarness();
+      const workId = 'handle-sample';
+      const nested = join(outputDirectory, '子 目录 素材');
+      await mkdir(nested);
+      const videoPath = join(nested, `${workId}.mp4`);
+      const assetPath = join(nested, `${workId}_封面 图.png`);
+      await writeFile(videoPath, 'video');
+      await writeFile(assetPath, 'image');
+      const done = store.addWork({
+        id: workId,
+        avatarId,
+        mode: 'text',
+        outputPath: videoPath,
+        status: 'done',
+      });
+
+      await service.deleteWork(done.id);
+
+      expect(existsSync(videoPath)).toBe(false);
+      expect(existsSync(assetPath)).toBe(false);
+      expect(store.getWork(done.id)).toBeNull();
+    },
+  );
 
   test('rejects deleting an unknown work', async () => {
     const { service } = await createHarness();
