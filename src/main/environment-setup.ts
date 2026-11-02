@@ -149,6 +149,7 @@ export interface EnvironmentSetupServiceOptions {
   startBackend: EnvironmentStartBackend;
   downloadParts?: typeof defaultDownloadParts;
   downloadFile?: typeof defaultDownloadFile;
+  downloadRetryDelay?: (attempt: number) => Promise<void>;
   extract?: EnvironmentExtractor;
   extractor?: EnvironmentExtractor;
   existingModelVariants?: Readonly<Record<string, ExistingModelVariant>>;
@@ -172,6 +173,29 @@ interface InstallationLayout {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export const MODEL_DOWNLOAD_ATTEMPTS = 3;
+
+async function wait(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) signal.throwIfAborted();
+  let timer: NodeJS.Timeout | undefined;
+  const onAbort = () => {
+    clearTimeout(timer);
+  };
+  try {
+    await new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, milliseconds);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    clearTimeout(timer);
+  }
+  signal?.throwIfAborted();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1547,26 +1571,40 @@ export class EnvironmentSetupService {
           const destination = win32.join(layout.modelRoot, ...model.path.split('/'));
           this.setProgress(completedBytes, totalModelBytes, model.path);
           const sources = modelDownloadUrls(model);
+          let downloaded = false;
           for (const [sourceIndex, url] of sources.entries()) {
-            try {
-              await (this.options.downloadFile ?? defaultDownloadFile)({
-                url,
-                destination,
-                expectedSize: model.size,
-                expectedSha256: model.sha256,
-                signal,
-                onProgress: (progress) => {
-                  this.setProgress(
-                    completedBytes + progress.downloadedBytes,
-                    totalModelBytes,
-                    model.path,
-                  );
-                },
-              });
+            for (let attempt = 1; attempt <= MODEL_DOWNLOAD_ATTEMPTS; attempt += 1) {
+              try {
+                await (this.options.downloadFile ?? defaultDownloadFile)({
+                  url,
+                  destination,
+                  expectedSize: model.size,
+                  expectedSha256: model.sha256,
+                  signal,
+                  onProgress: (progress) => {
+                    this.setProgress(
+                      completedBytes + progress.downloadedBytes,
+                      totalModelBytes,
+                      model.path,
+                    );
+                  },
+                });
+                downloaded = true;
+                break;
+              } catch (error) {
+                if (signal.aborted) throw error;
+                if (attempt === MODEL_DOWNLOAD_ATTEMPTS) {
+                  if (sourceIndex === sources.length - 1) throw error;
+                  break;
+                }
+                await (this.options.downloadRetryDelay
+                  ? this.options.downloadRetryDelay(attempt)
+                  : wait(Math.min(1000 * 2 ** (attempt - 1), 8000), signal));
+                this.setProgress(completedBytes, totalModelBytes, model.path);
+              }
+            }
+            if (downloaded) {
               break;
-            } catch (error) {
-              if (signal.aborted || sourceIndex === sources.length - 1) throw error;
-              this.setProgress(completedBytes, totalModelBytes, model.path);
             }
           }
           completedBytes += model.size;

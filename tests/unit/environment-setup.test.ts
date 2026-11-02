@@ -17,6 +17,7 @@ import { dirname, join, win32 } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   EnvironmentSetupService,
+  MODEL_DOWNLOAD_ATTEMPTS,
   REQUIRED_COMFY_NODES,
   extractZipArchive,
   modelDownloadUrls,
@@ -395,6 +396,7 @@ async function createHarness(
     detectHardware: async () => overrides.hardware ?? makeHardware(),
     downloadParts: parts,
     downloadFile: file,
+    downloadRetryDelay: async () => undefined,
     extract,
     startBackend: backend,
     ...overrides.service,
@@ -1819,6 +1821,7 @@ describe('EnvironmentSetupService failures and recovery', () => {
     const harness = await createHarness({
       manifest,
       service: {
+        downloadRetryDelay: async () => undefined,
         downloadFile: async (options) => {
           urls.push(options.url);
           const model = manifest.modelFiles.find(
@@ -1846,6 +1849,55 @@ describe('EnvironmentSetupService failures and recovery', () => {
       'https://hf-mirror.com/test/model-0.safetensors',
     );
     expect(urls.every((url) => url.startsWith('https://hf-mirror.com/'))).toBe(true);
+  });
+
+  test('retries a failed model source before switching URLs', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const urls: string[] = [];
+    const attemptsByModel = new Map<string, number>();
+    const delays: number[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async (attempt) => {
+          delays.push(attempt);
+        },
+        downloadFile: async (options) => {
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          urls.push(options.url);
+          const attempt = (attemptsByModel.get(model.path) ?? 0) + 1;
+          attemptsByModel.set(model.path, attempt);
+          if (model.path === manifest.modelFiles[0].path && attempt < 3) {
+            throw new Error('mirror fetch failed');
+          }
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: attempt > 1,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls.slice(0, 3)).toEqual([
+      'https://hf-mirror.com/test/model-0.safetensors',
+      'https://hf-mirror.com/test/model-0.safetensors',
+      'https://hf-mirror.com/test/model-0.safetensors',
+    ]);
+    expect(delays).toEqual([1, 2]);
   });
 
   test('falls back from the mirror to the official model source', async () => {
@@ -1882,7 +1934,9 @@ describe('EnvironmentSetupService failures and recovery', () => {
       installRoot: harness.installRoot,
     });
 
-    expect(urls.slice(0, 2)).toEqual([
+    expect(urls.slice(0, 4)).toEqual([
+      'https://hf-mirror.com/test/model-0.safetensors',
+      'https://hf-mirror.com/test/model-0.safetensors',
       'https://hf-mirror.com/test/model-0.safetensors',
       'https://huggingface.co/test/model-0.safetensors',
     ]);
@@ -1903,9 +1957,33 @@ describe('EnvironmentSetupService failures and recovery', () => {
   });
 
   test('retry preserves verified model files and only downloads missing models', async () => {
+    const manifest = makeManifest();
+    let remainingFailures = MODEL_DOWNLOAD_ATTEMPTS;
+    const networkDownloads: string[] = [];
     const harness = await createHarness({
-      configure: ({ failNextModel }) => {
-        failNextModel.value = 4;
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadFile: async (options) => {
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          if (model.path === manifest.modelFiles[4].path) {
+            if (remainingFailures > 0) {
+              remainingFailures -= 1;
+              throw new Error(`download failed for ${options.url}`);
+            }
+          }
+          if (!existsSync(options.destination)) networkDownloads.push(options.url);
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
       },
     });
     const input = {
@@ -1915,17 +1993,17 @@ describe('EnvironmentSetupService failures and recovery', () => {
 
     await expect(harness.service.start(input)).rejects.toThrow(/download failed/i);
     expect((await harness.store.load())?.status).toBe('failed');
-    const firstDownloads = [...harness.networkDownloads];
+    const firstDownloads = [...networkDownloads];
+    expect(firstDownloads).toHaveLength(4);
+
     await expect(harness.service.retry(input)).resolves.toMatchObject({
       stage: 'ready',
       healthy: true,
     });
 
-    const retriedUrls = harness.networkDownloads.slice(firstDownloads.length);
+    const retriedUrls = networkDownloads.slice(firstDownloads.length);
     expect(retriedUrls).toHaveLength(6);
-    expect(retriedUrls).not.toContain(harness.manifest.modelFiles[0].url);
-    expect(retriedUrls).not.toContain(harness.manifest.modelFiles[3].url);
-    expect(retriedUrls).toContain(harness.manifest.modelFiles[4].url);
+    expect(retriedUrls[0]).toBe(harness.manifest.modelFiles[4].url);
   });
 
   test('rejects a missing model even when its downloader reports success', async () => {
@@ -2967,6 +3045,7 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
 
   test('keeps old ready models and config when a manifest upgrade model download fails', async () => {
     const upgradedContent = (path: string) => Buffer.from(`upgraded model: ${path}`);
+    const manifest = makeManifest(upgradedContent);
     const first = await createHarness();
     await first.service.start({
       profileId: 'high-memory-candidate',
@@ -2985,10 +3064,25 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
     }
     const harness = await createHarness({
       installRoot: first.installRoot,
-      manifest: makeManifest(upgradedContent),
+      manifest,
       modelContent: upgradedContent,
-      configure: ({ failNextModel }) => {
-        failNextModel.value = 1;
+      service: {
+        downloadFile: async (options) => {
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          if (model.path === 'text_encoders/MiniMax-H3/text.safetensors') {
+            throw new Error('download failed');
+          }
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, upgradedContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
       },
     });
 
