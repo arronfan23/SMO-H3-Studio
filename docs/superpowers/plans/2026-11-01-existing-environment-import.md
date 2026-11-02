@@ -163,7 +163,7 @@ git commit -m "Resolve models for existing environments"
 
 ### 任务 3：导入事务与真实校验进度
 
-- [ ] **步骤 1：编写成功导入的失败测试**
+- [x] **步骤 1：编写成功导入的失败测试**
 
 使用小型测试运行包和模型调用：
 
@@ -188,7 +188,7 @@ expect(harness.downloads.file).not.toHaveBeenCalled();
 expect(harness.backend).toHaveBeenCalledTimes(1);
 ```
 
-- [ ] **步骤 2：补充失败、取消与回滚测试**
+- [x] **步骤 2：补充失败、取消与回滚测试**
 
 覆盖：模型缺失、哈希错误、非法 `runtimeRoot`、低配置档位、取消读取、后端缺节点、与安装互斥，以及 `transaction.activate()` 失败后不残留未验证 ready 配置。进度测试断言当前文件和累计字节数单调增加。
 
@@ -205,13 +205,13 @@ await expect(handlers.get('environment:import')?.({ ...input, extra: true }))
   .rejects.toThrow();
 ```
 
-- [ ] **步骤 3：运行测试确认失败**
+- [x] **步骤 3：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/environment-setup.test.ts`
 
 预期：FAIL，`importExisting` 尚不存在。
 
-- [ ] **步骤 4：实现导入事务**
+- [x] **步骤 4：实现导入事务**
 
 实现公共入口并复用 `trackOperation` 互斥：
 
@@ -240,13 +240,13 @@ const environmentImportSchema = z.object({
 
 为 `verifyFileHash` 与 `verifyModelFiles` 增加可选字节回调；原安装调用不传回调，行为不变。
 
-- [ ] **步骤 5：运行测试确认通过**
+- [x] **步骤 5：运行测试确认通过**
 
 运行：`npx vitest run tests/unit/environment-setup.test.ts tests/unit/app-services-env.test.ts && npm run typecheck`
 
 预期：PASS。
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git add src/shared/ipc.ts src/main/ipc.ts src/main/app-services.ts src/main/environment-setup.ts tests/unit/ipc.test.ts tests/unit/environment-setup.test.ts tests/unit/app-services-env.test.ts
