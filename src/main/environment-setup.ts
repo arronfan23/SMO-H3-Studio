@@ -549,19 +549,25 @@ $payload = $InputJson | ConvertFrom-Json
 Add-Type -AssemblyName System.IO.Compression
 $staging = [System.IO.Path]::GetFullPath([string]$payload.StagingDirectory)
 $rootPrefix = $staging.TrimEnd('\', '/') + '\'
-[System.IO.Directory]::CreateDirectory($staging) | Out-Null
+
+# Device paths bypass the legacy MAX_PATH limit for both drives and UNC shares.
+function Get-ExtendedPath([string]$Path) {
+  if ($Path.StartsWith('\\?\')) { return $Path }
+  if ($Path.StartsWith('\\')) { return '\\?\UNC\' + $Path.Substring(2) }
+  return '\\?\' + $Path
+}
 
 function Assert-Contained([string]$Candidate) {
-  $full = [System.IO.Path]::GetFullPath($Candidate)
-  if (-not $full.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+  if (-not $Candidate.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "ZIP entry is not contained in staging: $Candidate"
   }
-  return $full
+  return $Candidate
 }
 
 function Assert-NoReparsePoint([string]$Path) {
-  if ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path)) {
-    $item = Get-Item -Force -LiteralPath $Path
+  $extended = Get-ExtendedPath $Path
+  if ([System.IO.File]::Exists($extended) -or [System.IO.Directory]::Exists($extended)) {
+    $item = Get-Item -Force -LiteralPath $extended
     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
       throw "ZIP extraction refuses a reparse point: $Path"
     }
@@ -569,7 +575,7 @@ function Assert-NoReparsePoint([string]$Path) {
 }
 
 Assert-NoReparsePoint $staging
-$stream = [System.IO.File]::OpenRead([string]$payload.ArchivePath)
+$stream = [System.IO.File]::OpenRead((Get-ExtendedPath ([string]$payload.ArchivePath)))
 $archive = [System.IO.Compression.ZipArchive]::new(
   $stream,
   [System.IO.Compression.ZipArchiveMode]::Read
@@ -606,8 +612,9 @@ try {
     for ($index = 0; $index -lt $directoryCount; $index += 1) {
       $current = [System.IO.Path]::Combine($current, $segments[$index])
       Assert-NoReparsePoint $current
-      if (-not [System.IO.Directory]::Exists($current)) {
-        [System.IO.Directory]::CreateDirectory($current) | Out-Null
+      $extendedCurrent = Get-ExtendedPath $current
+      if (-not [System.IO.Directory]::Exists($extendedCurrent)) {
+        [System.IO.Directory]::CreateDirectory($extendedCurrent) | Out-Null
       }
       Assert-NoReparsePoint $current
     }
@@ -617,7 +624,7 @@ try {
     $source = $entry.Open()
     try {
       $destination = [System.IO.File]::Open(
-        $target,
+        (Get-ExtendedPath $target),
         [System.IO.FileMode]::CreateNew,
         [System.IO.FileAccess]::Write,
         [System.IO.FileShare]::None
