@@ -68,7 +68,9 @@ export function EnvironmentWizard({ environment }: EnvironmentWizardProps) {
   const emptyProgressMessage = state?.active
     ? state.stage === 'detect'
       ? '正在检测硬件，暂未开始下载'
-      : '正在获取下载信息…'
+      : state.stage === 'extract'
+        ? '正在准备运行时解压…'
+      : '正在准备环境配置…'
     : state?.stage === 'select'
       ? '检测完成，点击“开始安装”后开始下载'
       : '尚未开始安装';

@@ -1,8 +1,9 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { win32 } from 'node:path';
+import { createInterface } from 'node:readline';
 import { parse as parseYaml } from 'yaml';
 import {
   downloadFile as defaultDownloadFile,
@@ -128,6 +129,11 @@ export interface EnvironmentExtractInput {
   archivePath: string;
   stagingDirectory: string;
   signal?: AbortSignal;
+  onProgress?: (progress: {
+    extractedBytes: number;
+    totalBytes: number;
+    currentFile?: string;
+  }) => void;
 }
 
 export type EnvironmentExtractor = (
@@ -547,8 +553,19 @@ const POWERSHELL_EXTRACT_SCRIPT = String.raw`
 $InputJson = [System.Environment]::GetEnvironmentVariable('SMO_ENVIRONMENT_SETUP_ZIP')
 $payload = $InputJson | ConvertFrom-Json
 Add-Type -AssemblyName System.IO.Compression
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $staging = [System.IO.Path]::GetFullPath([string]$payload.StagingDirectory)
 $rootPrefix = $staging.TrimEnd('\', '/') + '\'
+
+function Write-ExtractProgress {
+  param([long]$ExtractedBytes, [long]$TotalBytes, [string]$CurrentFile)
+  $progress = @{
+    extractedBytes = $ExtractedBytes
+    totalBytes = $TotalBytes
+    currentFile = $CurrentFile
+  } | ConvertTo-Json -Compress
+  [Console]::Out.WriteLine("SMO_ZIP_PROGRESS $progress")
+}
 
 # Device paths bypass the legacy MAX_PATH limit for both drives and UNC shares.
 function Get-ExtendedPath([string]$Path) {
@@ -581,6 +598,18 @@ $archive = [System.IO.Compression.ZipArchive]::new(
   [System.IO.Compression.ZipArchiveMode]::Read
 )
 try {
+  $totalBytes = [long]0
+  foreach ($entry in $archive.Entries) {
+    if ($entry.FullName.Length -ne 0 -and -not $entry.FullName.EndsWith('/')) {
+      $totalBytes += $entry.Length
+    }
+  }
+  Write-ExtractProgress 0 $totalBytes ''
+
+  $extractedBytes = [long]0
+  $reportedBytes = [long]0
+  $lastFile = ''
+  $heartbeat = [System.Diagnostics.Stopwatch]::StartNew()
   foreach ($entry in $archive.Entries) {
     if ($entry.FullName.Length -eq 0) { continue }
     $normalized = $entry.FullName.Replace('\', '/')
@@ -621,6 +650,7 @@ try {
     if ($directoryEntry) { continue }
 
     Assert-NoReparsePoint $target
+    $lastFile = $entry.FullName
     $source = $entry.Open()
     try {
       $destination = [System.IO.File]::Open(
@@ -629,10 +659,33 @@ try {
         [System.IO.FileAccess]::Write,
         [System.IO.FileShare]::None
       )
-      try { $source.CopyTo($destination) } finally { $destination.Dispose() }
+      try {
+        $buffer = New-Object 'byte[]' 1048576
+        $fileBytes = [long]0
+        while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+          $destination.Write($buffer, 0, $read)
+          $fileBytes += $read
+          $extractedBytes += $read
+          if (
+            ($extractedBytes - $reportedBytes) -ge 16MB -or
+            $heartbeat.ElapsedMilliseconds -ge 500
+          ) {
+            $destination.Flush()
+            Write-ExtractProgress $extractedBytes $totalBytes $entry.FullName
+            $reportedBytes = $extractedBytes
+            $heartbeat.Restart()
+          }
+        }
+        if ($fileBytes -ne $entry.Length) {
+          throw "ZIP entry ended before its declared size: $($entry.FullName)"
+        }
+      } finally { $destination.Dispose() }
     } finally {
       $source.Dispose()
     }
+  }
+  if ($extractedBytes -ne $reportedBytes) {
+    Write-ExtractProgress $extractedBytes $totalBytes $lastFile
   }
 } finally {
   $archive.Dispose()
@@ -643,37 +696,80 @@ try {
 export async function extractZipArchive(
   input: EnvironmentExtractInput,
 ): Promise<void> {
+  input.signal?.throwIfAborted();
   await mkdir(input.stagingDirectory, { recursive: true });
+  const child = spawn('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    POWERSHELL_EXTRACT_SCRIPT,
+  ], {
+    windowsHide: true,
+    env: {
+      ...process.env,
+      SMO_ENVIRONMENT_SETUP_ZIP: JSON.stringify({
+        ArchivePath: input.archivePath,
+        StagingDirectory: input.stagingDirectory,
+      }),
+    },
+  });
+  const abortExtraction = (): void => {
+    child.kill();
+  };
+  input.signal?.addEventListener('abort', abortExtraction, { once: true });
+  let stderr = '';
+  let callbackError: unknown;
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-1024 * 1024);
+  });
+  const lines = createInterface({ input: child.stdout });
+  lines.on('line', (line) => {
+    if (!line.startsWith('SMO_ZIP_PROGRESS ')) return;
+    try {
+      const parsed = JSON.parse(line.slice('SMO_ZIP_PROGRESS '.length));
+      if (
+        !isRecord(parsed) ||
+        typeof parsed.extractedBytes !== 'number' ||
+        typeof parsed.totalBytes !== 'number' ||
+        !Number.isSafeInteger(parsed.extractedBytes) ||
+        !Number.isSafeInteger(parsed.totalBytes) ||
+        parsed.extractedBytes < 0 ||
+        parsed.extractedBytes > parsed.totalBytes
+      ) {
+        return;
+      }
+      input.onProgress?.({
+        extractedBytes: parsed.extractedBytes,
+        totalBytes: parsed.totalBytes,
+        ...(typeof parsed.currentFile === 'string' && parsed.currentFile.length > 0
+          ? { currentFile: parsed.currentFile }
+          : {}),
+      });
+    } catch (error) {
+      callbackError = error;
+      child.kill();
+    }
+  });
   await new Promise<void>((resolve, reject) => {
-    execFile(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        POWERSHELL_EXTRACT_SCRIPT,
-      ],
-      {
-        windowsHide: true,
-        signal: input.signal,
-        maxBuffer: 1024 * 1024,
-        env: {
-          ...process.env,
-          SMO_ENVIRONMENT_SETUP_ZIP: JSON.stringify({
-            ArchivePath: input.archivePath,
-            StagingDirectory: input.stagingDirectory,
-          }),
-        },
-      },
-      (error, _stdout, stderr) => {
-        if (!error) {
-          resolve();
-          return;
-        }
+    child.on('error', reject);
+    child.on('close', (code) => {
+      input.signal?.removeEventListener('abort', abortExtraction);
+      if (callbackError) {
+        reject(callbackError);
+      } else if (input.signal?.aborted) {
+        reject(input.signal.reason);
+      } else if (code !== 0) {
         const detail = stderr.trim();
-        reject(new Error(detail ? `ZIP extraction failed: ${detail}` : error.message));
-      },
-    );
+        reject(new Error(
+          detail
+            ? `ZIP extraction failed: ${detail}`
+            : `ZIP extraction exited with code ${code}`,
+        ));
+      } else {
+        resolve();
+      }
+    });
   });
 }
 
@@ -1401,12 +1497,20 @@ export class EnvironmentSetupService {
 
       this.setStage('extract');
       if (!runtimeValid) {
+        this.setProgress(0, 0, 'runtime');
         await this.removeStaging(layout);
         await mkdir(layout.stagingDirectory, { recursive: true });
         await (this.options.extract ?? this.options.extractor ?? extractZipArchive)({
           archivePath: layout.archivePath,
           stagingDirectory: layout.stagingDirectory,
           signal,
+          onProgress: (progress) => {
+            this.setProgress(
+              progress.extractedBytes,
+              progress.totalBytes,
+              progress.currentFile,
+            );
+          },
         });
         signal.throwIfAborted();
         const stats = await lstat(layout.stagedRuntimeRoot);
@@ -1509,7 +1613,9 @@ export class EnvironmentSetupService {
       };
       return this.getState();
     } catch (error) {
-      const originalMessage = errorMessage(error);
+      const originalMessage = signal.aborted
+        ? errorMessage(signal.reason)
+        : errorMessage(error);
       let message = originalMessage;
       this.state = {
         ...this.state,

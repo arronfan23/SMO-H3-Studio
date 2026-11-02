@@ -33,6 +33,7 @@ import type {
 import type {
   EnvironmentConfig,
   EnvironmentManifest,
+  EnvironmentState,
 } from '../../src/shared/environment';
 import type { HardwareInfo } from '../../src/shared/types';
 
@@ -1554,6 +1555,36 @@ describe('EnvironmentSetupService installation', () => {
     });
 
     expect(currentFiles).toEqual(['callback-runtime.zip']);
+  });
+
+  test('reports runtime extraction progress while the install is active', async () => {
+    let stateDuringExtract: EnvironmentState | undefined;
+    const harness = await createHarness({
+      service: {
+        extract: async ({ stagingDirectory, onProgress }) => {
+          await writeRuntimeFiles(join(stagingDirectory, TOP_LEVEL));
+          onProgress?.({
+            extractedBytes: 7,
+            totalBytes: 21,
+            currentFile: 'Top/file.txt',
+          });
+          stateDuringExtract = harness.service.getState();
+        },
+      },
+    });
+
+    const state = await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(stateDuringExtract?.stage).toBe('extract');
+    expect(stateDuringExtract?.progress).toEqual({
+      downloadedBytes: 7,
+      totalBytes: 21,
+      currentFile: 'Top/file.txt',
+    });
+    expect(state.progress.downloadedBytes).toBeGreaterThan(0);
   });
 
   test('start and retry share one in-flight operation', async () => {
@@ -3150,5 +3181,59 @@ describe('production ZIP extraction', () => {
     expect(
       await readFile(join(stagingDirectory, entryName.replaceAll('/', '\\')), 'utf8'),
     ).toBe('ok');
+  });
+
+  test('reports cumulative extraction progress', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-zip-progress-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const archivePath = join(directory, 'progress.zip');
+    const stagingDirectory = join(directory, 'staging');
+    const content = Buffer.alloc(1024 * 1024, 7);
+    await writeFile(
+      archivePath,
+      createStoredZip([{ name: 'Large/file.bin', content }]),
+    );
+    const reports: Array<{
+      extractedBytes: number;
+      totalBytes: number;
+      currentFile?: string;
+    }> = [];
+
+    await extractZipArchive({
+      archivePath,
+      stagingDirectory,
+      onProgress: (progress) => reports.push({ ...progress }),
+    });
+
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports.at(-1)).toEqual({
+      extractedBytes: content.length,
+      totalBytes: content.length,
+      currentFile: 'Large/file.bin',
+    });
+  });
+
+  test('reports the configured cancellation reason', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-zip-cancel-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const archivePath = join(directory, 'cancel.zip');
+    const stagingDirectory = join(directory, 'staging');
+    const controller = new AbortController();
+    await writeFile(
+      archivePath,
+      createStoredZip([{ name: 'Large/file.bin', content: Buffer.alloc(1024 * 1024, 7) }]),
+    );
+    const pending = extractZipArchive({
+      archivePath,
+      stagingDirectory,
+      signal: controller.signal,
+      onProgress: () => {
+        if (!controller.signal.aborted) {
+          controller.abort(new Error('Environment setup cancelled'));
+        }
+      },
+    });
+
+    await expect(pending).rejects.toThrow('Environment setup cancelled');
   });
 });
