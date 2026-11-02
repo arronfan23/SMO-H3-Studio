@@ -19,6 +19,7 @@ import {
   EnvironmentSetupService,
   REQUIRED_COMFY_NODES,
   extractZipArchive,
+  modelDownloadUrls,
   resolveExistingModelRoot,
   type EnvironmentExtractInput,
   type EnvironmentSetupServiceOptions,
@@ -1809,6 +1810,84 @@ describe('EnvironmentSetupService operation coordination', () => {
 });
 
 describe('EnvironmentSetupService failures and recovery', () => {
+  test('downloads Hugging Face models through the accessible mirror first', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const urls: string[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadFile: async (options) => {
+          urls.push(options.url);
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls).toHaveLength(manifest.modelFiles.length);
+    expect(urls[0]).toBe(
+      'https://hf-mirror.com/test/model-0.safetensors',
+    );
+    expect(urls.every((url) => url.startsWith('https://hf-mirror.com/'))).toBe(true);
+  });
+
+  test('falls back from the mirror to the official model source', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const urls: string[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadFile: async (options) => {
+          urls.push(options.url);
+          if (options.url.startsWith('https://hf-mirror.com/')) {
+            throw new Error('mirror fetch failed');
+          }
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls.slice(0, 2)).toEqual([
+      'https://hf-mirror.com/test/model-0.safetensors',
+      'https://huggingface.co/test/model-0.safetensors',
+    ]);
+  });
+
   test('rejects insufficient disk space before any download', async () => {
     const harness = await createHarness({ hardware: makeHardware({ freeDiskGiB: 0 }) });
 
@@ -3128,6 +3207,26 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
 });
 
 describe('production ZIP extraction', () => {
+  test('maps Hugging Face downloads to the mirror while preserving official fallback', () => {
+    expect(modelDownloadUrls({
+      url: 'https://huggingface.co/repo/resolve/main/model.safetensors?download=true',
+      path: 'models/model.safetensors',
+      size: 1,
+      sha256: '0'.repeat(64),
+      source: 'test',
+    })).toEqual([
+      'https://hf-mirror.com/repo/resolve/main/model.safetensors?download=true',
+      'https://huggingface.co/repo/resolve/main/model.safetensors?download=true',
+    ]);
+    expect(modelDownloadUrls({
+      url: 'https://models.test/model.safetensors',
+      path: 'models/model.safetensors',
+      size: 1,
+      sha256: '0'.repeat(64),
+      source: 'test',
+    })).toEqual(['https://models.test/model.safetensors']);
+  });
+
   test('extracts regular entries beneath staging', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-zip-valid-'));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

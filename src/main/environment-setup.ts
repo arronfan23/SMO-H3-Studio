@@ -538,6 +538,19 @@ async function writeExtraModelPaths(
   );
 }
 
+/**
+ * Hugging Face is unreachable on some networks where its community mirror is
+ * reachable. SHA256 verification still protects every downloaded byte.
+ */
+export function modelDownloadUrls(model: EnvironmentModelFile): string[] {
+  const source = new URL(model.url);
+  if (source.hostname !== 'huggingface.co') return [model.url];
+  return [
+    `https://hf-mirror.com${source.pathname}${source.search}`,
+    model.url,
+  ];
+}
+
 function readObjectInfo(result: unknown): Record<string, unknown> {
   if (!isRecord(result)) throw new Error('Backend health check returned an invalid result');
   if ('objectInfo' in result) {
@@ -1533,20 +1546,29 @@ export class EnvironmentSetupService {
         for (const model of selection.modelFiles) {
           const destination = win32.join(layout.modelRoot, ...model.path.split('/'));
           this.setProgress(completedBytes, totalModelBytes, model.path);
-          await (this.options.downloadFile ?? defaultDownloadFile)({
-            url: model.url,
-            destination,
-            expectedSize: model.size,
-            expectedSha256: model.sha256,
-            signal,
-            onProgress: (progress) => {
-              this.setProgress(
-                completedBytes + progress.downloadedBytes,
-                totalModelBytes,
-                model.path,
-              );
-            },
-          });
+          const sources = modelDownloadUrls(model);
+          for (const [sourceIndex, url] of sources.entries()) {
+            try {
+              await (this.options.downloadFile ?? defaultDownloadFile)({
+                url,
+                destination,
+                expectedSize: model.size,
+                expectedSha256: model.sha256,
+                signal,
+                onProgress: (progress) => {
+                  this.setProgress(
+                    completedBytes + progress.downloadedBytes,
+                    totalModelBytes,
+                    model.path,
+                  );
+                },
+              });
+              break;
+            } catch (error) {
+              if (signal.aborted || sourceIndex === sources.length - 1) throw error;
+              this.setProgress(completedBytes, totalModelBytes, model.path);
+            }
+          }
           completedBytes += model.size;
           this.setProgress(completedBytes, totalModelBytes, model.path);
         }
