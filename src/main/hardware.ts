@@ -25,13 +25,14 @@ const POWERSHELL_HARDWARE_SCRIPT = [
   "$ErrorActionPreference = 'Stop';",
   "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);",
   "$os = Get-CimInstance Win32_OperatingSystem;",
-  "$computer = Get-CimInstance Win32_ComputerSystem;",
+  "$memoryModules = @(Get-CimInstance Win32_PhysicalMemory);",
+  "$installedMemoryBytes = [uint64](($memoryModules | Measure-Object -Property Capacity -Sum).Sum);",
   "$targetDirectory = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($TargetDirectoryBase64)) | ConvertFrom-Json;",
   "$driveName = (Split-Path -Path $targetDirectory -Qualifier).TrimEnd(\":\");",
   "$drive = Get-PSDrive -Name $driveName;",
   "[pscustomobject]@{",
   "WindowsVersion = \"$($os.Caption) $($os.Version)\";",
-  "TotalMemoryBytes = [uint64]$computer.TotalPhysicalMemory;",
+  "InstalledMemoryBytes = $installedMemoryBytes;",
   "FreeDiskBytes = [uint64]$drive.Free;",
   "} | ConvertTo-Json -Compress",
   "}",
@@ -281,16 +282,16 @@ function parseWindowsHardwareOutput(stdout: string) {
     if (!isRecord(value)) throw new Error('Invalid Windows hardware payload');
 
     const windowsVersion = value.WindowsVersion;
-    const totalMemoryBytes = value.TotalMemoryBytes;
+    const installedMemoryBytes = value.InstalledMemoryBytes;
     const freeDiskBytes = value.FreeDiskBytes;
 
     if (typeof windowsVersion !== 'string' || windowsVersion.trim().length === 0) {
       throw new Error('Invalid Windows version');
     }
     if (
-      typeof totalMemoryBytes !== 'number' ||
-      !Number.isFinite(totalMemoryBytes) ||
-      totalMemoryBytes <= 0
+      typeof installedMemoryBytes !== 'number' ||
+      !Number.isFinite(installedMemoryBytes) ||
+      installedMemoryBytes <= 0
     ) {
       throw new Error('Invalid physical memory');
     }
@@ -304,7 +305,7 @@ function parseWindowsHardwareOutput(stdout: string) {
 
     return {
       windowsVersion: windowsVersion.trim(),
-      ramGiB: totalMemoryBytes / BYTES_PER_GIB,
+      ramGiB: installedMemoryBytes / BYTES_PER_GIB,
       freeDiskGiB: freeDiskBytes / BYTES_PER_GIB,
     };
   } catch {

@@ -13,7 +13,7 @@ const temporaryDirectories: string[] = [];
 const GPU_OUTPUT = '"NVIDIA GeForce RTX 5080", 16384 MiB, 576.88, 12.0\n';
 const SYSTEM_OUTPUT = JSON.stringify({
   WindowsVersion: 'Microsoft Windows 10 专业版 10.0.19045',
-  TotalMemoryBytes: 64 * 1024 ** 3,
+  InstalledMemoryBytes: 64 * 1024 ** 3,
   FreeDiskBytes: 512 * 1024 ** 3,
 });
 
@@ -430,13 +430,31 @@ describe('detectHardware', () => {
     expect(calls[1].args[3]).toContain('FromBase64String');
     expect(calls[1].args[3]).toContain("ErrorActionPreference = 'Stop'");
     expect(calls[1].args[3]).toContain('Get-CimInstance Win32_OperatingSystem');
-    expect(calls[1].args[3]).toContain('Get-CimInstance Win32_ComputerSystem');
+    expect(calls[1].args[3]).toContain('Get-CimInstance Win32_PhysicalMemory');
     expect(calls[1].args[3]).toContain(
       '$targetDirectory = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($TargetDirectoryBase64)) | ConvertFrom-Json;',
     );
     expect(calls[1].args[3]).toContain('Get-PSDrive -Name $driveName');
     expect(calls[1].args[3]).toContain('ConvertTo-Json -Compress');
     expect(calls[1].timeoutMs).toBe(5000);
+  });
+
+  test('uses installed DIMM capacity when Windows reserves part of a 32 GiB system', async () => {
+    const usableMemoryBytes = 31.837474822998047 * 1024 ** 3;
+    const runner = async (request: CommandRequest): Promise<string> => {
+      return request.command === 'nvidia-smi'
+        ? GPU_OUTPUT
+        : JSON.stringify({
+            WindowsVersion: 'Microsoft Windows 11 专业版',
+            InstalledMemoryBytes: 32 * 1024 ** 3,
+            TotalMemoryBytes: usableMemoryBytes,
+            FreeDiskBytes: 512 * 1024 ** 3,
+          });
+    };
+
+    const info = await hardware.detectHardware(runner);
+
+    expect(info.ramGiB).toBe(32);
   });
 
   test('reports a clear GPU process failure', async () => {
