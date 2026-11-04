@@ -175,8 +175,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export const MODEL_DOWNLOAD_ATTEMPTS = 3;
-const RUNTIME_DOWNLOAD_ATTEMPTS = 3;
+export const MODEL_DOWNLOAD_ATTEMPTS = 6;
+const RUNTIME_DOWNLOAD_ATTEMPTS = 6;
 
 async function wait(
   milliseconds: number,

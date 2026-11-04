@@ -1845,8 +1845,43 @@ describe('EnvironmentSetupService failures and recovery', () => {
       installRoot: harness.installRoot,
     });
 
-    expect(urls).toEqual([mirrorUrl, mirrorUrl, mirrorUrl, officialUrl]);
-    expect(delays).toEqual([1, 2]);
+    expect(urls).toEqual([...Array(6).fill(mirrorUrl), officialUrl]);
+    expect(delays).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test('keeps resuming the runtime after more than three transient disconnects', async () => {
+    const manifest = makeManifest();
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    const mirrorUrl = `https://ghproxy.net/${officialUrl}`;
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    const urls: string[] = [];
+    let remainingFailures = 4;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: async (options) => {
+          urls.push(options.parts[0].url);
+          if (remainingFailures > 0) {
+            remainingFailures -= 1;
+            throw new TypeError('fetch failed');
+          }
+          return {
+            resumed: urls.length > 1,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls).toEqual(Array(5).fill(mirrorUrl));
   });
 
   test('downloads Hugging Face models through the accessible mirror first', async () => {
@@ -1946,6 +1981,7 @@ describe('EnvironmentSetupService failures and recovery', () => {
     const harness = await createHarness({
       manifest,
       service: {
+        downloadRetryDelay: async () => undefined,
         downloadFile: async (options) => {
           urls.push(options.url);
           if (options.url.startsWith('https://hf-mirror.com/')) {
@@ -1971,12 +2007,51 @@ describe('EnvironmentSetupService failures and recovery', () => {
       installRoot: harness.installRoot,
     });
 
-    expect(urls.slice(0, 4)).toEqual([
-      'https://hf-mirror.com/test/model-0.safetensors',
-      'https://hf-mirror.com/test/model-0.safetensors',
-      'https://hf-mirror.com/test/model-0.safetensors',
+    expect(urls.slice(0, 7)).toEqual([
+      ...Array(6).fill('https://hf-mirror.com/test/model-0.safetensors'),
       'https://huggingface.co/test/model-0.safetensors',
     ]);
+  });
+
+  test('keeps resuming a model after more than three transient disconnects', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const firstModelUrl = 'https://hf-mirror.com/test/model-0.safetensors';
+    const urls: string[] = [];
+    let remainingFailures = 4;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadFile: async (options) => {
+          urls.push(options.url);
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          if (model === manifest.modelFiles[0] && remainingFailures > 0) {
+            remainingFailures -= 1;
+            throw new TypeError('fetch failed');
+          }
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: model === manifest.modelFiles[0],
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls.slice(0, 5)).toEqual(Array(5).fill(firstModelUrl));
   });
 
   test('rejects insufficient disk space before any download', async () => {
