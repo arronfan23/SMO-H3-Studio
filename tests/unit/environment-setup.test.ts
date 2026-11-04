@@ -1812,6 +1812,43 @@ describe('EnvironmentSetupService operation coordination', () => {
 });
 
 describe('EnvironmentSetupService failures and recovery', () => {
+  test('retries the runtime mirror and falls back to the official GitHub source', async () => {
+    const manifest = makeManifest();
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    const mirrorUrl = `https://ghproxy.net/${officialUrl}`;
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    const urls: string[] = [];
+    const delays: number[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async (attempt) => {
+          delays.push(attempt);
+        },
+        downloadParts: async (options) => {
+          urls.push(options.parts[0].url);
+          if (options.parts[0].url === mirrorUrl) {
+            throw new Error('mirror connection timed out');
+          }
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls).toEqual([mirrorUrl, mirrorUrl, mirrorUrl, officialUrl]);
+    expect(delays).toEqual([1, 2]);
+  });
+
   test('downloads Hugging Face models through the accessible mirror first', async () => {
     const manifest = makeManifest();
     manifest.modelFiles.forEach((model, index) => {

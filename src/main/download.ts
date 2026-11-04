@@ -47,6 +47,7 @@ export interface DownloadFileOptions {
   signal?: AbortSignal;
   onProgress?: DownloadProgressCallback;
   fetch?: DownloadFetch;
+  stallTimeoutMs?: number;
 }
 
 export interface DownloadPartsOptions {
@@ -66,6 +67,7 @@ const WINDOWS_ILLEGAL_CHARACTER_PATTERN = /[<>"|?*\x00-\x1F]/;
 const CONTENT_RANGE_PATTERN = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/i;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAXIMUM_REDIRECTS = 20;
+const DOWNLOAD_STALL_TIMEOUT_MS = 20_000;
 
 function validateExpectedSize(value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -343,113 +345,136 @@ export async function downloadFile(
 
   signal?.throwIfAborted();
   await mkdir(dirname(partPath), { recursive: true });
-  const response = await fetchWithValidatedRedirects(
-    fetchImpl,
-    url,
-    canResume ? { Range: `bytes=${downloadedBytes}-` } : undefined,
-    signal,
-  );
+  const stallTimeoutMs = options.stallTimeoutMs ?? DOWNLOAD_STALL_TIMEOUT_MS;
+  const timeoutController = new AbortController();
+  let stallTimer: NodeJS.Timeout | undefined;
+  let stallError: Error | undefined;
+  const forwardAbort = () => timeoutController.abort(signal?.reason);
+  const refreshStallTimeout = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      stallError = new Error(
+        `Download timed out after ${stallTimeoutMs} ms without progress`,
+      );
+      timeoutController.abort(stallError);
+    }, stallTimeoutMs);
+  };
+  if (signal?.aborted) forwardAbort();
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  refreshStallTimeout();
 
   let append = false;
-  if (response.status === 200) {
-    downloadedBytes = 0;
-    hash = createHash('sha256');
-  } else if (response.status === 206 && canResume) {
-    try {
-      validateContentRange(response.headers.get('content-range'), downloadedBytes);
-    } catch (error) {
+  try {
+    const response = await fetchWithValidatedRedirects(
+      fetchImpl,
+      url,
+      canResume ? { Range: `bytes=${downloadedBytes}-` } : undefined,
+      timeoutController.signal,
+    );
+
+    if (response.status === 200) {
+      downloadedBytes = 0;
+      hash = createHash('sha256');
+    } else if (response.status === 206 && canResume) {
+      try {
+        validateContentRange(response.headers.get('content-range'), downloadedBytes);
+      } catch (error) {
+        await discardResponse(response);
+        throw error;
+      }
+      append = true;
+    } else {
       await discardResponse(response);
-      throw error;
+      throw new Error(`Download failed with unexpected HTTP status ${response.status}`);
     }
-    append = true;
-  } else {
-    await discardResponse(response);
-    throw new Error(`Download failed with unexpected HTTP status ${response.status}`);
-  }
 
-  if (!response.body) {
-    throw new Error('Download response did not include a body');
-  }
-
-  if (append) {
-    try {
-      options.onProgress?.({
-        downloadedBytes,
-        totalBytes: expectedSize,
-        path: destination,
-      });
-    } catch (error) {
-      await discardResponse(response);
-      throw error;
+    if (!response.body) {
+      throw new Error('Download response did not include a body');
     }
-  }
 
-  let handle: FileHandle | undefined;
-  const output = new Writable({
-    autoDestroy: true,
-    construct(callback) {
-      open(partPath, append ? 'a' : 'w').then(
-        (opened) => {
-          handle = opened;
-          callback();
-        },
-        (error) => callback(error as Error),
-      );
-    },
-    write(chunk: Buffer, _encoding, callback) {
-      void (async () => {
-        if (downloadedBytes + chunk.length > expectedSize) {
-          throw new Error('Downloaded size exceeds the expected size');
-        }
-        const currentHandle = handle;
-        if (!currentHandle) throw new Error('Part file is not open');
-
-        let offset = 0;
-        while (offset < chunk.length) {
-          const { bytesWritten } = await currentHandle.write(
-            chunk,
-            offset,
-            chunk.length - offset,
-            null,
-          );
-          if (bytesWritten <= 0) throw new Error('Could not write downloaded data');
-          offset += bytesWritten;
-        }
-
-        hash.update(chunk);
-        downloadedBytes += chunk.length;
+    if (append) {
+      try {
         options.onProgress?.({
           downloadedBytes,
           totalBytes: expectedSize,
           path: destination,
         });
-      })().then(
-        () => callback(),
-        (error) => callback(error as Error),
-      );
-    },
-    destroy(error, callback) {
-      const currentHandle = handle;
-      handle = undefined;
-      if (!currentHandle) {
-        callback(error);
-        return;
+      } catch (error) {
+        await discardResponse(response);
+        throw error;
       }
-      currentHandle.close().then(
-        () => callback(error),
-        (closeError) => callback(error ?? closeError),
-      );
-    },
-  });
+    }
 
-  const body = Readable.fromWeb(
-    response.body as unknown as NodeReadableStream<Uint8Array>,
-  );
-  await pipeline(
-    body,
-    output,
-    { signal },
-  );
+    let handle: FileHandle | undefined;
+    const output = new Writable({
+      autoDestroy: true,
+      construct(callback) {
+        open(partPath, append ? 'a' : 'w').then(
+          (opened) => {
+            handle = opened;
+            callback();
+          },
+          (error) => callback(error as Error),
+        );
+      },
+      write(chunk: Buffer, _encoding, callback) {
+        void (async () => {
+          if (downloadedBytes + chunk.length > expectedSize) {
+            throw new Error('Downloaded size exceeds the expected size');
+          }
+          const currentHandle = handle;
+          if (!currentHandle) throw new Error('Part file is not open');
+
+          let offset = 0;
+          while (offset < chunk.length) {
+            const { bytesWritten } = await currentHandle.write(
+              chunk,
+              offset,
+              chunk.length - offset,
+              null,
+            );
+            if (bytesWritten <= 0) throw new Error('Could not write downloaded data');
+            offset += bytesWritten;
+          }
+
+          hash.update(chunk);
+          downloadedBytes += chunk.length;
+          refreshStallTimeout();
+          options.onProgress?.({
+            downloadedBytes,
+            totalBytes: expectedSize,
+            path: destination,
+          });
+        })().then(
+          () => callback(),
+          (error) => callback(error as Error),
+        );
+      },
+      destroy(error, callback) {
+        const currentHandle = handle;
+        handle = undefined;
+        if (!currentHandle) {
+          callback(error);
+          return;
+        }
+        currentHandle.close().then(
+          () => callback(error),
+          (closeError) => callback(error ?? closeError),
+        );
+      },
+    });
+
+    const body = Readable.fromWeb(
+      response.body as unknown as NodeReadableStream<Uint8Array>,
+    );
+    await pipeline(body, output, { signal: timeoutController.signal });
+  } catch (error) {
+    if (stallError) throw stallError;
+    throw error;
+  } finally {
+    clearTimeout(stallTimer);
+    signal?.removeEventListener('abort', forwardAbort);
+  }
 
   const actualSha256 = hash.digest('hex');
   if (downloadedBytes !== expectedSize) {

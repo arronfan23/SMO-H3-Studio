@@ -176,6 +176,7 @@ function errorMessage(error: unknown): string {
 }
 
 export const MODEL_DOWNLOAD_ATTEMPTS = 3;
+const RUNTIME_DOWNLOAD_ATTEMPTS = 3;
 
 async function wait(
   milliseconds: number,
@@ -573,6 +574,13 @@ export function modelDownloadUrls(model: EnvironmentModelFile): string[] {
     `https://hf-mirror.com${source.pathname}${source.search}`,
     model.url,
   ];
+}
+
+/** GitHub release downloads use a reachable mirror first; SHA256 still verifies every byte. */
+export function runtimeDownloadUrls(url: string): string[] {
+  const source = new URL(url);
+  if (source.hostname !== 'github.com') return [url];
+  return [`https://ghproxy.net/${url}`, url];
 }
 
 function readObjectInfo(result: unknown): Record<string, unknown> {
@@ -1515,21 +1523,48 @@ export class EnvironmentSetupService {
       } else {
         await assertNotReparsePoint(layout.workDirectory, 'the installation work directory');
         await assertNotReparsePoint(layout.downloadDirectory, 'the download directory');
-        await (this.options.downloadParts ?? defaultDownloadParts)({
-          parts: selection.runtime.archiveParts,
-          directory: layout.downloadDirectory,
-          destination: layout.archivePath,
-          expectedSize: selection.runtime.archiveSize,
-          expectedSha256: selection.runtime.archiveSha256,
-          signal,
-          onProgress: (progress) => {
-            this.setProgress(
-              progress.downloadedBytes,
-              progress.totalBytes,
-              progress.path,
-            );
-          },
-        });
+        const sourcesByPart = selection.runtime.archiveParts.map((part) =>
+          runtimeDownloadUrls(part.url),
+        );
+        const sourceCount = Math.max(...sourcesByPart.map((sources) => sources.length));
+        let downloaded = false;
+        for (let sourceIndex = 0; sourceIndex < sourceCount; sourceIndex += 1) {
+          const parts = selection.runtime.archiveParts.map((part, index) => {
+            const sources = sourcesByPart[index];
+            return { ...part, url: sources[sourceIndex] ?? sources[0] };
+          });
+          for (let attempt = 1; attempt <= RUNTIME_DOWNLOAD_ATTEMPTS; attempt += 1) {
+            try {
+              await (this.options.downloadParts ?? defaultDownloadParts)({
+                parts,
+                directory: layout.downloadDirectory,
+                destination: layout.archivePath,
+                expectedSize: selection.runtime.archiveSize,
+                expectedSha256: selection.runtime.archiveSha256,
+                signal,
+                onProgress: (progress) => {
+                  this.setProgress(
+                    progress.downloadedBytes,
+                    progress.totalBytes,
+                    progress.path,
+                  );
+                },
+              });
+              downloaded = true;
+              break;
+            } catch (error) {
+              if (signal.aborted) throw error;
+              if (attempt === RUNTIME_DOWNLOAD_ATTEMPTS) {
+                if (sourceIndex === sourceCount - 1) throw error;
+                break;
+              }
+              await (this.options.downloadRetryDelay
+                ? this.options.downloadRetryDelay(attempt)
+                : wait(Math.min(1000 * 2 ** (attempt - 1), 8000), signal));
+            }
+          }
+          if (downloaded) break;
+        }
       }
 
       this.setStage('extract');

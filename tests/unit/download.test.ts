@@ -116,6 +116,51 @@ afterEach(async () => {
 });
 
 describe('downloadFile', () => {
+  test('times out when the connection never returns a response', async () => {
+    const destination = join(directory, 'unreachable.bin');
+    const fetchMock = vi.fn<Fetch>((_input, init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      });
+    });
+
+    await expect(
+      downloadFile({
+        url: 'https://download.test/unreachable.bin',
+        destination,
+        expectedSize: 20,
+        expectedSha256: 'a'.repeat(64),
+        stallTimeoutMs: 20,
+        fetch: fetchMock,
+      }),
+    ).rejects.toThrow(/20 ms without progress/i);
+  });
+
+  test('times out when the response body stalls before sending data', async () => {
+    const destination = join(directory, 'stalled.bin');
+    const fetchMock = vi.fn<Fetch>().mockResolvedValue(
+      new Response(new ReadableStream<Uint8Array>(), {
+        status: 200,
+        headers: { 'Content-Length': '20' },
+      }),
+    );
+
+    await expect(
+      downloadFile({
+        url: 'https://download.test/stalled.bin',
+        destination,
+        expectedSize: 20,
+        expectedSha256: 'a'.repeat(64),
+        stallTimeoutMs: 20,
+        fetch: fetchMock,
+      }),
+    ).rejects.toThrow(/20 ms without progress/i);
+  });
+
   test('downloads a complete 200 response and verifies the receipt and destination', async () => {
     const payload = Buffer.from('complete verified download');
     const destination = join(directory, 'model.bin');
