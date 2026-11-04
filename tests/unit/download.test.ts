@@ -184,6 +184,184 @@ describe('downloadFile', () => {
     expect(await exists(`${destination}.part`)).toBe(false);
   });
 
+  test('downloads large files through concurrent bounded range requests', async () => {
+    const payload = Buffer.alloc(128 * 1024);
+    for (let index = 0; index < payload.length; index += 1) payload[index] = index % 251;
+    const destination = join(directory, 'parallel.bin');
+    const ranges: string[] = [];
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    handler = async (request, response) => {
+      const range = request.headers.range ?? '';
+      const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+      if (!match) {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+      const start = Number(match[1]);
+      const end = Number(match[2]) + 1;
+      ranges.push(range);
+      activeRequests += 1;
+      maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        response.writeHead(206, {
+          'Content-Length': end - start,
+          'Content-Range': `bytes ${start}-${end - 1}/${payload.length}`,
+        });
+        response.end(payload.subarray(start, end));
+      } finally {
+        activeRequests -= 1;
+      }
+    };
+
+    const receipt = await downloadFile({
+      url: 'https://download.test/parallel.bin',
+      destination,
+      expectedSize: payload.length,
+      expectedSha256: sha256(payload),
+      fetch: transport,
+      parallelThresholdBytes: 1,
+      chunkSizeBytes: 16 * 1024,
+      maxConnections: 4,
+    });
+
+    expect(receipt.bytes).toBe(payload.length);
+    expect(await readFile(destination)).toEqual(payload);
+    expect(ranges).toHaveLength(8);
+    expect(maximumActiveRequests).toBeGreaterThan(1);
+    expect(ranges).toContain('bytes=0-16383');
+    expect(ranges).toContain('bytes=114688-131071');
+  });
+
+  test('uses the existing sequential part prefix for parallel chunk downloads', async () => {
+    const payload = Buffer.alloc(64 * 1024);
+    for (let index = 0; index < payload.length; index += 1) payload[index] = index % 241;
+    const destination = join(directory, 'legacy-resume.bin');
+    const prefix = payload.subarray(0, 5000);
+    const ranges: string[] = [];
+    await writeFile(`${destination}.part`, prefix);
+    handler = (request, response) => {
+      const range = request.headers.range ?? '';
+      const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+      if (!match) {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+      const start = Number(match[1]);
+      const end = Number(match[2]) + 1;
+      ranges.push(range);
+      response.writeHead(206, {
+        'Content-Length': end - start,
+        'Content-Range': `bytes ${start}-${end - 1}/${payload.length}`,
+      });
+      response.end(payload.subarray(start, end));
+    };
+
+    await downloadFile({
+      url: 'https://download.test/legacy-resume.bin',
+      destination,
+      expectedSize: payload.length,
+      expectedSha256: sha256(payload),
+      fetch: transport,
+      parallelThresholdBytes: 1,
+      chunkSizeBytes: 16 * 1024,
+      maxConnections: 3,
+    });
+
+    expect(ranges).toContain('bytes=5000-21383');
+    expect(await readFile(destination)).toEqual(payload);
+  });
+
+  test('falls back to a sequential download when a server ignores Range requests', async () => {
+    const payload = Buffer.alloc(32 * 1024, 7);
+    const destination = join(directory, 'range-fallback.bin');
+    const ranges: Array<string | undefined> = [];
+    handler = (request, response) => {
+      ranges.push(request.headers.range);
+      response.writeHead(200, { 'Content-Length': payload.length });
+      response.end(payload);
+    };
+
+    const receipt = await downloadFile({
+      url: 'https://download.test/range-fallback.bin',
+      destination,
+      expectedSize: payload.length,
+      expectedSha256: sha256(payload),
+      fetch: transport,
+      parallelThresholdBytes: 1,
+      chunkSizeBytes: 8 * 1024,
+      maxConnections: 2,
+    });
+
+    expect(receipt.resumed).toBe(false);
+    expect(ranges.at(-1)).toBeUndefined();
+    expect(await readFile(destination)).toEqual(payload);
+    expect(await exists(`${destination}.part.chunks.json`)).toBe(false);
+  });
+
+  test('does not redownload chunks completed before a parallel connection drops', async () => {
+    const payload = Buffer.alloc(64 * 1024);
+    for (let index = 0; index < payload.length; index += 1) payload[index] = index % 239;
+    const destination = join(directory, 'parallel-resume.bin');
+    const completedFirstAttempt = new Set<string>();
+    const secondAttemptRanges: string[] = [];
+    let firstAttempt = true;
+    handler = async (request, response) => {
+      const range = request.headers.range ?? '';
+      const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+      if (!match) {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+      const start = Number(match[1]);
+      const end = Number(match[2]) + 1;
+      if (!firstAttempt) secondAttemptRanges.push(range);
+      if (firstAttempt && start === 0) {
+        while (completedFirstAttempt.size === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        response.writeHead(206, {
+          'Content-Length': end - start,
+          'Content-Range': `bytes ${start}-${end - 1}/${payload.length}`,
+        });
+        response.write(payload.subarray(start, start + 1024));
+        request.socket.destroy();
+        return;
+      }
+      response.writeHead(206, {
+        'Content-Length': end - start,
+        'Content-Range': `bytes ${start}-${end - 1}/${payload.length}`,
+      });
+      response.end(payload.subarray(start, end));
+      if (firstAttempt) completedFirstAttempt.add(range);
+    };
+    const options = {
+      url: 'https://download.test/parallel-resume.bin',
+      destination,
+      expectedSize: payload.length,
+      expectedSha256: sha256(payload),
+      fetch: transport,
+      parallelThresholdBytes: 1,
+      chunkSizeBytes: 16 * 1024,
+      maxConnections: 2,
+    } as const;
+
+    await expect(downloadFile(options)).rejects.toThrow();
+    firstAttempt = false;
+    await downloadFile(options);
+
+    expect(completedFirstAttempt.size).toBeGreaterThan(0);
+    for (const range of completedFirstAttempt) {
+      expect(secondAttemptRanges).not.toContain(range);
+    }
+    expect(await readFile(destination)).toEqual(payload);
+  });
+
   test('resumes a non-empty part file only with a matching 206 Content-Range', async () => {
     const payload = Buffer.from('prefix-and-remaining-data');
     const prefix = payload.subarray(0, 7);

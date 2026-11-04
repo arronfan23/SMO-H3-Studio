@@ -1,4 +1,5 @@
 import { createHash, type Hash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import {
   createReadStream,
   createWriteStream,
@@ -8,7 +9,10 @@ import {
   lstat,
   mkdir,
   open,
+  readFile,
   rename,
+  rm,
+  writeFile,
   type FileHandle,
 } from 'node:fs/promises';
 import {
@@ -38,6 +42,15 @@ export interface DownloadReceipt {
 
 export type DownloadFetch = typeof globalThis.fetch;
 export type DownloadProgressCallback = (progress: DownloadProgress) => void;
+const requireElectron = createRequire(import.meta.url);
+const defaultDownloadFetch: DownloadFetch = (input, init) => {
+  if (process.versions.electron) {
+    const { net } = requireElectron('electron') as typeof import('electron');
+    const request = input instanceof URL ? input.href : input;
+    return net.fetch(request, init) as unknown as ReturnType<DownloadFetch>;
+  }
+  return globalThis.fetch(input, init);
+};
 
 export interface DownloadFileOptions {
   url: string;
@@ -48,6 +61,9 @@ export interface DownloadFileOptions {
   onProgress?: DownloadProgressCallback;
   fetch?: DownloadFetch;
   stallTimeoutMs?: number;
+  parallelThresholdBytes?: number;
+  chunkSizeBytes?: number;
+  maxConnections?: number;
 }
 
 export interface DownloadPartsOptions {
@@ -68,6 +84,30 @@ const CONTENT_RANGE_PATTERN = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/i;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAXIMUM_REDIRECTS = 20;
 const DOWNLOAD_STALL_TIMEOUT_MS = 20_000;
+const PARALLEL_DOWNLOAD_THRESHOLD_BYTES = 64 * 1024 * 1024;
+const PARALLEL_DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+const PARALLEL_DOWNLOAD_CONNECTIONS = 6;
+
+class RangeDownloadUnsupportedError extends Error {}
+
+interface ParallelChunk {
+  index: number;
+  start: number;
+  end: number;
+}
+
+interface ParallelChunkLedger {
+  version: 1;
+  expectedSize: number;
+  expectedSha256: string;
+  chunkSize: number;
+  baseBytes: number;
+  completed: number[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 function validateExpectedSize(value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -299,7 +339,213 @@ function validateContentRange(header: string | null, expectedStart: number): voi
   }
 }
 
-export async function downloadFile(
+function positiveDownloadOption(
+  value: number | undefined,
+  fallback: number,
+  label: string,
+): number {
+  const selected = value ?? fallback;
+  if (!Number.isSafeInteger(selected) || selected <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+  return selected;
+}
+
+function makeParallelChunks(
+  baseBytes: number,
+  expectedSize: number,
+  chunkSize: number,
+): ParallelChunk[] {
+  const chunks: ParallelChunk[] = [];
+  let index = 0;
+  for (let start = baseBytes; start < expectedSize; start += chunkSize) {
+    chunks.push({ index, start, end: Math.min(start + chunkSize, expectedSize) });
+    index += 1;
+  }
+  return chunks;
+}
+
+function isParallelChunkLedger(value: unknown): value is ParallelChunkLedger {
+  if (!isRecord(value)) return false;
+  return (
+    value.version === 1 &&
+    typeof value.expectedSize === 'number' &&
+    Number.isSafeInteger(value.expectedSize) &&
+    value.expectedSize > 0 &&
+    typeof value.expectedSha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(value.expectedSha256) &&
+    typeof value.chunkSize === 'number' &&
+    Number.isSafeInteger(value.chunkSize) &&
+    value.chunkSize > 0 &&
+    typeof value.baseBytes === 'number' &&
+    Number.isSafeInteger(value.baseBytes) &&
+    value.baseBytes >= 0 &&
+    value.baseBytes < value.expectedSize &&
+    Array.isArray(value.completed) &&
+    value.completed.every(
+      (index) => Number.isSafeInteger(index) && index >= 0,
+    )
+  );
+}
+
+async function readParallelChunkLedger(
+  path: string,
+  expectedSize: number,
+  expectedSha256: string,
+  chunkSize: number,
+): Promise<ParallelChunkLedger | null> {
+  try {
+    const value: unknown = JSON.parse(await readFile(path, 'utf8'));
+    if (
+      !isParallelChunkLedger(value) ||
+      value.expectedSize !== expectedSize ||
+      value.expectedSha256 !== expectedSha256 ||
+      value.chunkSize !== chunkSize
+    ) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+async function writeParallelChunkLedger(
+  path: string,
+  ledger: ParallelChunkLedger,
+): Promise<void> {
+  const temporaryPath = `${path}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(ledger), 'utf8');
+  await rename(temporaryPath, path);
+}
+
+function validateChunkContentRange(
+  header: string | null,
+  chunk: ParallelChunk,
+  expectedSize: number,
+): void {
+  const match = header ? /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(header.trim()) : null;
+  if (
+    !match ||
+    Number(match[1]) !== chunk.start ||
+    Number(match[2]) !== chunk.end - 1 ||
+    (match[3] !== '*' && Number(match[3]) !== expectedSize)
+  ) {
+    throw new Error('Server returned an invalid Content-Range for a download chunk');
+  }
+}
+
+async function downloadParallelChunk(input: {
+  url: URL;
+  fetchImpl: DownloadFetch;
+  signal: AbortSignal;
+  stallTimeoutMs: number;
+  expectedSize: number;
+  handle: FileHandle;
+  chunk: ParallelChunk;
+  onBytes: (bytes: number) => void;
+}): Promise<void> {
+  const { chunk, signal } = input;
+  const expectedBytes = chunk.end - chunk.start;
+  const chunkController = new AbortController();
+  const forwardAbort = () => chunkController.abort(signal.reason);
+  let stallTimer: NodeJS.Timeout | undefined;
+  let stallError: Error | undefined;
+  const refreshStallTimeout = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      stallError = new Error(
+        `Download timed out after ${input.stallTimeoutMs} ms without progress`,
+      );
+      chunkController.abort(stallError);
+    }, input.stallTimeoutMs);
+  };
+  if (signal.aborted) forwardAbort();
+  signal.addEventListener('abort', forwardAbort, { once: true });
+  refreshStallTimeout();
+
+  try {
+    const response = await fetchWithValidatedRedirects(
+      input.fetchImpl,
+      input.url,
+      {
+        Range: `bytes=${chunk.start}-${chunk.end - 1}`,
+        'Accept-Encoding': 'identity',
+      },
+      chunkController.signal,
+    );
+    if (response.status === 200) {
+      await discardResponse(response);
+      throw new RangeDownloadUnsupportedError(
+        'Server does not support parallel Range downloads',
+      );
+    }
+    if (response.status !== 206) {
+      await discardResponse(response);
+      throw new Error(`Download failed with unexpected HTTP status ${response.status}`);
+    }
+    try {
+      validateChunkContentRange(
+        response.headers.get('content-range'),
+        chunk,
+        input.expectedSize,
+      );
+    } catch (error) {
+      await discardResponse(response);
+      throw error;
+    }
+    if (!response.body) throw new Error('Download response did not include a body');
+
+    const buffers: Buffer[] = [];
+    let receivedBytes = 0;
+    const collector = new Writable({
+      write(data: Buffer, _encoding, callback) {
+        try {
+          if (receivedBytes + data.length > expectedBytes) {
+            throw new Error('Downloaded chunk exceeds its requested range');
+          }
+          buffers.push(Buffer.from(data));
+          receivedBytes += data.length;
+          refreshStallTimeout();
+          input.onBytes(receivedBytes);
+          callback();
+        } catch (error) {
+          callback(error as Error);
+        }
+      },
+    });
+    const body = Readable.fromWeb(
+      response.body as unknown as NodeReadableStream<Uint8Array>,
+    );
+    await pipeline(body, collector, { signal: chunkController.signal });
+    if (receivedBytes !== expectedBytes) {
+      throw new Error(
+        `Downloaded chunk size mismatch: expected ${expectedBytes}, received ${receivedBytes}`,
+      );
+    }
+
+    const data = Buffer.concat(buffers, receivedBytes);
+    let offset = 0;
+    while (offset < data.length) {
+      const { bytesWritten } = await input.handle.write(
+        data,
+        offset,
+        data.length - offset,
+        chunk.start + offset,
+      );
+      if (bytesWritten <= 0) throw new Error('Could not write downloaded chunk');
+      offset += bytesWritten;
+    }
+  } catch (error) {
+    if (stallError) throw stallError;
+    throw error;
+  } finally {
+    clearTimeout(stallTimer);
+    signal.removeEventListener('abort', forwardAbort);
+  }
+}
+
+async function downloadFileParallel(
   options: DownloadFileOptions,
 ): Promise<DownloadReceipt> {
   const url = validateHttpsUrl(options.url);
@@ -307,7 +553,182 @@ export async function downloadFile(
   const expectedSha256 = validateExpectedSha256(options.expectedSha256);
   const destination = validateDestinationPath(options.destination);
   const partPath = `${destination}.part`;
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const ledgerPath = `${partPath}.chunks.json`;
+  const fetchImpl = options.fetch ?? defaultDownloadFetch;
+  const signal = options.signal;
+  const chunkSize = positiveDownloadOption(
+    options.chunkSizeBytes,
+    PARALLEL_DOWNLOAD_CHUNK_BYTES,
+    'Chunk size',
+  );
+  const maxConnections = positiveDownloadOption(
+    options.maxConnections,
+    PARALLEL_DOWNLOAD_CONNECTIONS,
+    'Maximum connections',
+  );
+  const stallTimeoutMs = options.stallTimeoutMs ?? DOWNLOAD_STALL_TIMEOUT_MS;
+
+  signal?.throwIfAborted();
+  const existingDestination = await verifyExistingFile(
+    destination,
+    expectedSize,
+    expectedSha256,
+    signal,
+  );
+  if (existingDestination) return existingDestination;
+  await mkdir(dirname(partPath), { recursive: true });
+  const partStats = await regularFileStats(partPath);
+  const storedLedger =
+    partStats?.size === expectedSize
+      ? await readParallelChunkLedger(ledgerPath, expectedSize, expectedSha256, chunkSize)
+      : null;
+  const completePart = storedLedger
+    ? null
+    : await verifyExistingFile(partPath, expectedSize, expectedSha256, signal);
+  if (completePart) {
+    await rename(partPath, destination);
+    await rm(ledgerPath, { force: true });
+    return completePart;
+  }
+
+  const baseBytes = storedLedger
+    ? storedLedger.baseBytes
+    : partStats && partStats.size < expectedSize
+      ? partStats.size
+      : 0;
+  const chunks = makeParallelChunks(baseBytes, expectedSize, chunkSize);
+  const chunkCount = chunks.length;
+  const completed = new Set(
+    (storedLedger?.completed ?? []).filter(
+      (index) => Number.isSafeInteger(index) && index >= 0 && index < chunkCount,
+    ),
+  );
+  const resumed = baseBytes > 0 || completed.size > 0;
+  const ledger: ParallelChunkLedger = {
+    version: 1,
+    expectedSize,
+    expectedSha256,
+    chunkSize,
+    baseBytes,
+    completed: [],
+  };
+  let completedBytes = baseBytes;
+  for (const chunk of chunks) {
+    if (completed.has(chunk.index)) completedBytes += chunk.end - chunk.start;
+  }
+
+  const operationController = new AbortController();
+  const forwardAbort = () => operationController.abort(signal?.reason);
+  if (signal?.aborted) forwardAbort();
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  let handle: FileHandle | undefined;
+  let operationError: unknown;
+  try {
+    handle = await open(partPath, partStats ? 'r+' : 'w+');
+    await handle.truncate(expectedSize);
+    await writeParallelChunkLedger(ledgerPath, {
+      ...ledger,
+      completed: [...completed].sort((left, right) => left - right),
+    });
+
+    const activeBytes = new Map<number, number>();
+    const reportProgress = () => {
+      let downloadedBytes = completedBytes;
+      for (const bytes of activeBytes.values()) downloadedBytes += bytes;
+      options.onProgress?.({
+        downloadedBytes,
+        totalBytes: expectedSize,
+        path: destination,
+      });
+    };
+    reportProgress();
+
+    let saveChain: Promise<void> = Promise.resolve();
+    const queueLedgerSave = () => {
+      const snapshot = {
+        ...ledger,
+        completed: [...completed].sort((left, right) => left - right),
+      };
+      const operation = saveChain.then(() => writeParallelChunkLedger(ledgerPath, snapshot));
+      saveChain = operation.catch(() => undefined);
+      return operation;
+    };
+
+    let cursor = 0;
+    let firstError: unknown;
+    const worker = async () => {
+      while (firstError === undefined) {
+        const chunk = chunks[cursor];
+        cursor += 1;
+        if (!chunk) return;
+        if (completed.has(chunk.index)) continue;
+        try {
+          operationController.signal.throwIfAborted();
+          await downloadParallelChunk({
+            url,
+            fetchImpl,
+            signal: operationController.signal,
+            stallTimeoutMs,
+            expectedSize,
+            handle: handle!,
+            chunk,
+            onBytes: (bytes) => {
+              activeBytes.set(chunk.index, bytes);
+              reportProgress();
+            },
+          });
+          activeBytes.delete(chunk.index);
+          completed.add(chunk.index);
+          completedBytes += chunk.end - chunk.start;
+          await queueLedgerSave();
+          reportProgress();
+        } catch (error) {
+          activeBytes.delete(chunk.index);
+          if (firstError === undefined) firstError = error;
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(maxConnections, chunkCount) }, () => worker()),
+    );
+    await saveChain;
+    if (firstError !== undefined) throw firstError;
+    operationController.signal.throwIfAborted();
+  } catch (error) {
+    operationError = error;
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', forwardAbort);
+    if (handle) {
+      await handle.close().catch((error) => {
+        if (operationError === undefined) throw error;
+      });
+    }
+  }
+
+  signal?.throwIfAborted();
+  const hash = createHash('sha256');
+  const hashedBytes = await hashExistingFile(partPath, hash, signal);
+  const actualSha256 = hash.digest('hex');
+  if (hashedBytes !== expectedSize || actualSha256 !== expectedSha256) {
+    await rm(partPath, { force: true });
+    await rm(ledgerPath, { force: true });
+    throw new Error('Downloaded SHA256 does not match the expected SHA256');
+  }
+  await rename(partPath, destination);
+  await rm(ledgerPath, { force: true });
+  return { resumed, bytes: expectedSize, sha256: actualSha256 };
+}
+
+async function downloadFileSequential(
+  options: DownloadFileOptions,
+): Promise<DownloadReceipt> {
+  const url = validateHttpsUrl(options.url);
+  const expectedSize = validateExpectedSize(options.expectedSize);
+  const expectedSha256 = validateExpectedSha256(options.expectedSha256);
+  const destination = validateDestinationPath(options.destination);
+  const partPath = `${destination}.part`;
+  const fetchImpl = options.fetch ?? defaultDownloadFetch;
   const signal = options.signal;
 
   signal?.throwIfAborted();
@@ -491,6 +912,33 @@ export async function downloadFile(
   return { resumed: append, bytes: downloadedBytes, sha256: actualSha256 };
 }
 
+export async function downloadFile(
+  options: DownloadFileOptions,
+): Promise<DownloadReceipt> {
+  const parallelThresholdBytes = positiveDownloadOption(
+    options.parallelThresholdBytes,
+    PARALLEL_DOWNLOAD_THRESHOLD_BYTES,
+    'Parallel download threshold',
+  );
+  if (options.expectedSize < parallelThresholdBytes) {
+    return downloadFileSequential(options);
+  }
+
+  try {
+    return await downloadFileParallel(options);
+  } catch (error) {
+    if (!(error instanceof RangeDownloadUnsupportedError) || options.signal?.aborted) {
+      throw error;
+    }
+
+    const destination = validateDestinationPath(options.destination);
+    await rm(`${destination}.part.chunks.json`, { force: true });
+    await rm(`${destination}.part.chunks.json.tmp`, { force: true });
+    await rm(`${destination}.part`, { force: true });
+    return downloadFileSequential(options);
+  }
+}
+
 export async function downloadParts(
   options: DownloadPartsOptions,
 ): Promise<DownloadReceipt> {
@@ -539,7 +987,7 @@ export async function downloadParts(
   }
 
   const signal = options.signal;
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl = options.fetch ?? defaultDownloadFetch;
   const mergedPartPath = `${destination}.part`;
   signal?.throwIfAborted();
   const existingDestination = await verifyExistingFile(
