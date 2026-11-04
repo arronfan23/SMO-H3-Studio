@@ -500,6 +500,50 @@ describe('downloadFile', () => {
     expect(await readFile(destination)).toEqual(payload);
   });
 
+  test('does not wait forever when redirect body cancellation never settles', async () => {
+    const payload = Buffer.from('redirect without cleanup deadlock');
+    const destination = join(directory, 'redirect-cleanup.bin');
+    const redirectBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('redirect'));
+      },
+      cancel() {
+        return new Promise<void>(() => undefined);
+      },
+    });
+    const fetchMock = vi.fn<Fetch>()
+      .mockResolvedValueOnce(
+        new Response(redirectBody, {
+          status: 302,
+          headers: { Location: 'https://download.test/payload' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(payload, { status: 200 }));
+    let watchdog: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      watchdog = setTimeout(() => reject(new Error('Redirect cleanup hung')), 250);
+    });
+
+    try {
+      const receipt = await Promise.race([
+        downloadFile({
+          url: 'https://download.test/start',
+          destination,
+          expectedSize: payload.length,
+          expectedSha256: sha256(payload),
+          fetch: fetchMock,
+        }),
+        timeout,
+      ]);
+
+      expect(receipt.bytes).toBe(payload.length);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(await readFile(destination)).toEqual(payload);
+    } finally {
+      clearTimeout(watchdog);
+    }
+  });
+
   test('rejects an HTTPS to HTTP redirect without making the follow-up request', async () => {
     const payload = Buffer.from('must not be reached');
     const destination = join(directory, 'redirected.bin');

@@ -283,9 +283,11 @@ async function verifyExistingFile(
   return { resumed: false, bytes, sha256: actualSha256 };
 }
 
-async function discardResponse(response: Response): Promise<void> {
+function discardResponse(response: Response): void {
   try {
-    await response.body?.cancel();
+    // Some network stacks never settle cancel() after a failed or redirected
+    // request. Cleanup must not hold the download state machine hostage.
+    void response.body?.cancel().catch(() => undefined);
   } catch {
     // The original HTTP/status error is more useful than a body-cleanup error.
   }
