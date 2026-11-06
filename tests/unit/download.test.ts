@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { createHash } from 'node:crypto';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { access, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import {
   createServer,
@@ -498,6 +498,84 @@ describe('downloadFile', () => {
       }),
     ).resolves.toMatchObject({ bytes: payload.length, sha256: sha256(payload) });
     expect(await readFile(destination)).toEqual(payload);
+  });
+
+  test('uses Electron net.request to complete a download across a cancelled redirect', async () => {
+    const payload = Buffer.from('GitHub release payload');
+    const destination = join(directory, 'electron-redirect.bin');
+    const downloadModule = await import('../../src/main/download');
+    const createElectronDownloadFetch = (
+      downloadModule as unknown as {
+        createElectronDownloadFetch?: (net: unknown) => Fetch;
+      }
+    ).createElectronDownloadFetch;
+    expect(createElectronDownloadFetch).toBeTypeOf('function');
+    if (!createElectronDownloadFetch) return;
+
+    const requests: Array<{
+      options: Record<string, unknown>;
+      request: InstanceType<typeof EventEmitter>;
+      abort: ReturnType<typeof vi.fn>;
+    }> = [];
+    const net = {
+      request(options: Record<string, unknown>) {
+        const request = Object.assign(new EventEmitter(), {
+          abort: vi.fn(),
+          end: vi.fn(),
+        });
+        const entry = { options, request, abort: request.abort };
+        requests.push(entry);
+        const requestIndex = requests.length - 1;
+        request.end.mockImplementation(() => {
+          queueMicrotask(() => {
+            if (requestIndex === 0) {
+              const redirectUrl = 'https://objects.githubusercontent.com/runtime.zip';
+              request.emit('redirect', 302, 'GET', redirectUrl, {
+                location: [redirectUrl],
+              });
+              request.emit('error', new Error('Redirect was cancelled'));
+              return;
+            }
+
+            const response = Object.assign(new EventEmitter(), {
+              statusCode: 200,
+              statusMessage: 'OK',
+              headers: { 'content-length': String(payload.length) },
+            });
+            request.emit('response', response);
+            queueMicrotask(() => {
+              response.emit('data', payload);
+              response.emit('end');
+            });
+          });
+        });
+        return request;
+      },
+    };
+
+    const receipt = await downloadFile({
+      url: 'https://github.com/example/runtime/releases/download/v1/runtime.zip',
+      destination,
+      expectedSize: payload.length,
+      expectedSha256: sha256(payload),
+      fetch: createElectronDownloadFetch(net),
+    });
+
+    expect(receipt.bytes).toBe(payload.length);
+    expect(await readFile(destination)).toEqual(payload);
+    expect(requests).toHaveLength(2);
+    expect(requests.map((entry) => entry.options)).toEqual([
+      expect.objectContaining({
+        method: 'GET',
+        url: 'https://github.com/example/runtime/releases/download/v1/runtime.zip',
+        redirect: 'manual',
+      }),
+      expect.objectContaining({
+        method: 'GET',
+        url: 'https://objects.githubusercontent.com/runtime.zip',
+        redirect: 'manual',
+      }),
+    ]);
   });
 
   test('does not wait forever when redirect body cancellation never settles', async () => {

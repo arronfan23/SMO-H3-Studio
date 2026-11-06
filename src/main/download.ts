@@ -26,6 +26,11 @@ import {
 import { Readable, Transform, Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import type {
+  ClientRequest,
+  IncomingMessage as ElectronIncomingMessage,
+  Net,
+} from 'electron';
 import type { EnvironmentArchivePart } from '../shared/environment';
 
 export interface DownloadProgress {
@@ -43,11 +48,127 @@ export interface DownloadReceipt {
 export type DownloadFetch = typeof globalThis.fetch;
 export type DownloadProgressCallback = (progress: DownloadProgress) => void;
 const requireElectron = createRequire(import.meta.url);
+
+function electronResponseHeaders(
+  input: Record<string, string | string[]>,
+): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(input)) {
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(name, item);
+    } else {
+      headers.set(name, value);
+    }
+  }
+  return headers;
+}
+
+function electronResponseBody(
+  response: ElectronIncomingMessage,
+  request: ClientRequest,
+): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      let finished = false;
+      const finish = (complete: () => void) => {
+        if (finished) return;
+        finished = true;
+        complete();
+      };
+      response.on('data', (chunk) => {
+        if (!finished) controller.enqueue(chunk);
+      });
+      response.once('end', () => finish(() => controller.close()));
+      response.once('aborted', () =>
+        finish(() => controller.error(new Error('Download response was aborted'))),
+      );
+      response.once('error', (error) => finish(() => controller.error(error)));
+    },
+    cancel() {
+      request.abort();
+    },
+  });
+}
+
+export function createElectronDownloadFetch(net: Net): DownloadFetch {
+  return (input, init) => {
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    const headers: Record<string, string> = {};
+    new Headers(init?.headers).forEach((value, name) => {
+      headers[name] = value;
+    });
+
+    return new Promise<Response>((resolve, reject) => {
+      const request = net.request({
+        method: init?.method ?? 'GET',
+        url,
+        headers,
+        redirect: 'manual',
+      });
+      let settled = false;
+      const abort = () => {
+        if (!settled) {
+          settled = true;
+          reject(init?.signal?.reason ?? new Error('Download was aborted'));
+        }
+        request.abort();
+      };
+
+      request.once('error', (error) => {
+        // Manual redirects are cancelled by Chromium before the next request.
+        if (settled) return;
+        settled = true;
+        reject(error);
+      });
+      request.on('redirect', (statusCode, _method, redirectUrl, responseHeaders) => {
+        if (settled) return;
+        settled = true;
+        const redirectHeaders = electronResponseHeaders(responseHeaders);
+        if (redirectUrl && !redirectHeaders.has('location')) {
+          redirectHeaders.set('location', redirectUrl);
+        }
+        resolve(
+          new Response(null, {
+            status: statusCode,
+            headers: redirectHeaders,
+          }),
+        );
+      });
+      request.on('response', (response) => {
+        if (settled) return;
+        settled = true;
+        const hasBody = ![204, 205, 304].includes(response.statusCode);
+        resolve(
+          new Response(hasBody ? electronResponseBody(response, request) : null, {
+            status: response.statusCode,
+            statusText: response.statusMessage,
+            headers: electronResponseHeaders(response.headers),
+          }),
+        );
+      });
+
+      if (init?.signal?.aborted) {
+        abort();
+        return;
+      }
+      init?.signal?.addEventListener('abort', abort, { once: true });
+      request.once('close', () => {
+        init?.signal?.removeEventListener('abort', abort);
+      });
+      request.end();
+    });
+  };
+}
+
 const defaultDownloadFetch: DownloadFetch = (input, init) => {
   if (process.versions.electron) {
     const { net } = requireElectron('electron') as typeof import('electron');
-    const request = input instanceof URL ? input.href : input;
-    return net.fetch(request, init) as unknown as ReturnType<DownloadFetch>;
+    return createElectronDownloadFetch(net)(input, init);
   }
   return globalThis.fetch(input, init);
 };

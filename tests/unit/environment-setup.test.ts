@@ -1812,7 +1812,7 @@ describe('EnvironmentSetupService operation coordination', () => {
 });
 
 describe('EnvironmentSetupService failures and recovery', () => {
-  test('retries the runtime mirror and falls back to the official GitHub source', async () => {
+  test('retries the official GitHub source and falls back to the runtime mirror', async () => {
     const manifest = makeManifest();
     const officialUrl =
       'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
@@ -1828,8 +1828,8 @@ describe('EnvironmentSetupService failures and recovery', () => {
         },
         downloadParts: async (options) => {
           urls.push(options.parts[0].url);
-          if (options.parts[0].url === mirrorUrl) {
-            throw new Error('mirror connection timed out');
+          if (options.parts[0].url === officialUrl) {
+            throw new Error('official connection timed out');
           }
           return {
             resumed: false,
@@ -1845,7 +1845,7 @@ describe('EnvironmentSetupService failures and recovery', () => {
       installRoot: harness.installRoot,
     });
 
-    expect(urls).toEqual([...Array(6).fill(mirrorUrl), officialUrl]);
+    expect(urls).toEqual([...Array(6).fill(officialUrl), mirrorUrl]);
     expect(delays).toEqual([1, 2, 3, 4, 5]);
   });
 
@@ -1881,7 +1881,7 @@ describe('EnvironmentSetupService failures and recovery', () => {
       installRoot: harness.installRoot,
     });
 
-    expect(urls).toEqual(Array(5).fill(mirrorUrl));
+    expect(urls).toEqual(Array(5).fill(officialUrl));
   });
 
   test('downloads Hugging Face models through the accessible mirror first', async () => {

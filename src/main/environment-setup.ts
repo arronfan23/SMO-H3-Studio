@@ -576,11 +576,11 @@ export function modelDownloadUrls(model: EnvironmentModelFile): string[] {
   ];
 }
 
-/** GitHub release downloads use a reachable mirror first; SHA256 still verifies every byte. */
+/** GitHub is preferred; the mirror is a fallback and SHA256 verifies every byte. */
 export function runtimeDownloadUrls(url: string): string[] {
   const source = new URL(url);
   if (source.hostname !== 'github.com') return [url];
-  return [`https://ghproxy.net/${url}`, url];
+  return [url, `https://ghproxy.net/${url}`];
 }
 
 function readObjectInfo(result: unknown): Record<string, unknown> {
