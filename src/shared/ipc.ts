@@ -43,6 +43,7 @@ export interface WindowScreenPoint {
 }
 
 export const IPC_CHANNELS = [
+  'app:getVersion',
   'jobs:start',
   'jobs:retry',
   'jobs:cancel',
@@ -260,6 +261,7 @@ function requestSchema<T extends (typeof IPC_CHANNELS)[number], P extends z.ZodT
 
 export function createIpcSchema() {
   return z.discriminatedUnion('channel', [
+    requestSchema('app:getVersion', emptyPayload),
     requestSchema('jobs:start', generationRequestSchema),
     requestSchema(
       'jobs:retry',
@@ -355,6 +357,9 @@ export interface ComfyHealth {
 }
 
 export interface SmoApi {
+  readonly app: {
+    getVersion(): Promise<string>;
+  };
   readonly avatars: {
     list(): Promise<Avatar[]>;
     create(input: IpcPayload<'avatars:create'>): Promise<Avatar>;

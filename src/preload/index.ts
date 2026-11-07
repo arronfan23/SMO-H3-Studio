@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SmoApi } from '../shared/ipc';
 
 const api: SmoApi = {
+  app: {
+    getVersion: () => ipcRenderer.invoke('app:getVersion', {}),
+  },
   avatars: {
     list: () => ipcRenderer.invoke('avatars:list', {}),
     create: (input) => ipcRenderer.invoke('avatars:create', input),

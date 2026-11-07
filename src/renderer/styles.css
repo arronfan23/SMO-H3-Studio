@@ -941,6 +941,14 @@ body[data-window-maximized='true'] .window-resize-handle {
   gap: 18px;
 }
 
+.settings-version {
+  margin: 22px 4px 0;
+  color: #748078;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .settings-section {
   padding: 20px;
 }

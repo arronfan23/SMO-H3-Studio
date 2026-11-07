@@ -60,6 +60,7 @@ export function SettingsPage({
   const modelDirectory = controlledDirectory ?? localDirectory;
   const setModelDirectory = onModelDirectoryChange ?? setLocalDirectory;
   const [loading, setLoading] = useState(true);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [health, setHealth] = useState<ComfyHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [startingComfy, setStartingComfy] = useState(false);
@@ -90,9 +91,10 @@ export function SettingsPage({
     }
     setLoading(true);
     setLlmStatus({ kind: 'idle' });
-    const [healthResult, profileResult] = await Promise.allSettled([
+    const [healthResult, profileResult, versionResult] = await Promise.allSettled([
       window.smo.comfy.health(),
       window.smo.llm.getProfile(),
+      window.smo.app.getVersion(),
     ]);
     if (!mountedRef.current) {
       return;
@@ -103,6 +105,7 @@ export function SettingsPage({
     const loadedProfile = profileResult.status === 'fulfilled' ? profileResult.value : null;
     setProfile(loadedProfile);
     setProfileError(profileResult.status === 'rejected' ? errorMessage(profileResult.reason) : null);
+    setAppVersion(versionResult.status === 'fulfilled' ? versionResult.value : null);
     setBaseUrl(loadedProfile?.baseUrl ?? '');
     setModel(loadedProfile?.model ?? '');
     setApiKey('');
@@ -599,6 +602,9 @@ export function SettingsPage({
           </section>
         </div>
       )}
+      <footer className="settings-version">
+        SMO.H3 Studio · {appVersion === null ? '版本未知' : `版本 ${appVersion}`}
+      </footer>
     </div>
   );
 }

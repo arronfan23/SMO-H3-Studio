@@ -38,12 +38,13 @@ import {
   type LocalLlmUpstream,
 } from '../fixtures/llm-upstream';
 
-const { cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke, webUtilsGetPathForFile } = vi.hoisted(() => {
+const { appGetVersion, cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke, webUtilsGetPathForFile } = vi.hoisted(() => {
   const prefix = Buffer.from('ipc-test-cipher\0');
   const transform = (value: Buffer) =>
     Buffer.from(value.map((byte) => byte ^ 0x5a));
 
   return {
+    appGetVersion: vi.fn(() => '0.3.15-test'),
     exposeInMainWorld: vi.fn(),
     ipcMainHandle: vi.fn(),
     ipcRendererInvoke: vi.fn(),
@@ -63,6 +64,7 @@ const { cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke, webUtilsGet
 });
 
 vi.mock('electron', () => ({
+  app: { getVersion: appGetVersion },
   contextBridge: { exposeInMainWorld },
   ipcMain: { handle: ipcMainHandle },
   ipcRenderer: { invoke: ipcRendererInvoke },
@@ -1568,6 +1570,15 @@ describe('LLM configuration privacy', () => {
   });
 });
 
+describe('app version IPC', () => {
+  test('returns the Electron package version through the fixed channel', async () => {
+    const harness = await createHarness();
+
+    expect(IPC_CHANNELS).toContain('app:getVersion');
+    await expect(harness.invoke('app:getVersion', {})).resolves.toBe('0.3.15-test');
+  });
+});
+
 describe('preload API', () => {
   let api: SmoApi;
 
@@ -1612,6 +1623,7 @@ describe('preload API', () => {
 
   test('exposes only the fixed domain methods', () => {
     expect(Object.keys(api).sort()).toEqual([
+      'app',
       'avatars',
       'comfy',
       'environment',
@@ -1660,6 +1672,7 @@ describe('preload API', () => {
       'resize',
       'toggleMaximize',
     ]);
+    expect(Object.keys(api.app)).toEqual(['getVersion']);
 
     const exposedMethods = Object.values(api).flatMap((domain) => Object.keys(domain));
     for (const forbidden of ['invoke', 'shell', 'process', 'require', 'ipcRenderer']) {
@@ -1668,6 +1681,11 @@ describe('preload API', () => {
   });
 
   test.each([
+    {
+      channel: 'app:getVersion',
+      payload: {},
+      call: (smo: SmoApi) => smo.app.getVersion(),
+    },
     {
       channel: 'avatars:list',
       payload: {},

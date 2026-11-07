@@ -38,6 +38,7 @@ function createWork(overrides: Partial<Work>): Work {
 
 function createSmoMock() {
   return {
+    app: { getVersion: vi.fn() },
     avatars: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
     jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn() },
     files: {
@@ -78,6 +79,7 @@ async function renderStudio() {
 beforeEach(() => {
   vi.clearAllMocks();
   window.smo = smo as unknown as SmoApi;
+  smo.app.getVersion.mockResolvedValue('0.3.15-test');
   smo.avatars.list.mockResolvedValue([avatar]);
   smo.avatars.create.mockRejectedValue(new Error('Unexpected avatar creation'));
   smo.avatars.update.mockRejectedValue(new Error('Unexpected avatar rename'));
@@ -1957,6 +1959,28 @@ describe('works and settings', () => {
     expect(await screen.findByText('ComfyUI 不可用')).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('连接被拒绝');
     expect(screen.getByText('未配置 LLM')).toBeInTheDocument();
+  });
+});
+
+describe('settings page app version', () => {
+  test('shows the Electron package version in the settings footer', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(
+      await screen.findByText('SMO.H3 Studio · 版本 0.3.15-test'),
+    ).toBeInTheDocument();
+  });
+
+  test('shows an unknown version without disabling the rest of settings', async () => {
+    smo.app.getVersion.mockRejectedValue(new Error('version unavailable'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(
+      await screen.findByText('SMO.H3 Studio · 版本未知'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重新检测' })).toBeEnabled();
   });
 });
 

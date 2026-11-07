@@ -26,7 +26,7 @@
 
 ### 任务 1：动态版本号
 
-- [ ] **步骤 1：编写失败的 IPC 与界面测试**
+- [x] **步骤 1：编写失败的 IPC 与界面测试**
 
 IPC 测试增加：
 
@@ -38,13 +38,13 @@ expect(ipcRendererInvoke('app:getVersion', {})).resolves.toBe('0.3.15-test');
 
 设置页测试让 `smo.app.getVersion` 返回 `0.3.15-test`，进入设置后断言页脚包含 `SMO.H3 Studio · 版本 0.3.15-test`；另以拒绝 Promise 验证显示 `版本未知` 且页面其他设置仍可操作。
 
-- [ ] **步骤 2：运行测试并确认缺少版本 API**
+- [x] **步骤 2：运行测试并确认缺少版本 API**
 
 运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/studio.test.tsx -t "version|版本"`
 
 预期：FAIL，`smo.app` 或 IPC 通道不存在。
 
-- [ ] **步骤 3：实现受限版本链路**
+- [x] **步骤 3：实现受限版本链路**
 
 在 IPC 白名单和 discriminated union 中加入：
 
@@ -74,7 +74,7 @@ app: { getVersion: () => ipcRenderer.invoke('app:getVersion', {}) },
 
 CSS 只设置文字颜色、字号、间距和文本换行，不添加卡片、图标或说明性营销文字。同步补齐测试中的 `smo.app` 模拟，保持现有主线程测试改动不被回退。
 
-- [ ] **步骤 4：运行版本测试和类型检查**
+- [x] **步骤 4：运行版本测试和类型检查**
 
 运行：
 
@@ -85,7 +85,7 @@ npm run typecheck
 
 预期：测试与三个 TypeScript 项目均 PASS。
 
-- [ ] **步骤 5：提交版本功能**
+- [x] **步骤 5：提交版本功能**
 
 ```bash
 git add src/shared/ipc.ts src/main/ipc.ts src/preload/index.ts src/renderer/SettingsPage.tsx src/renderer/styles.css tests/unit/ipc.test.ts tests/unit/studio.test.tsx

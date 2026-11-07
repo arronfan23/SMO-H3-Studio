@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { app as electronApp, ipcMain } from 'electron';
 import type { ComfyClient, ComfySystemStats } from './comfy';
 import type { AvatarService } from './avatars';
 import type { FileService } from './files';
@@ -83,6 +83,8 @@ async function dispatch(
   services: IpcServices,
 ): Promise<unknown> {
   switch (request.channel) {
+    case 'app:getVersion':
+      return electronApp.getVersion();
     case 'jobs:start':
       return services.startGeneration(request.payload);
     case 'jobs:retry':
