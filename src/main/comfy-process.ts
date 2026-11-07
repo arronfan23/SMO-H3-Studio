@@ -6,7 +6,7 @@ import type { ComfyClient, ComfySystemStats } from './comfy';
 export const DEFAULT_COMFY_ROOT =
   'G:\\H3Selflift整合包\\ComfyUI_SelfLift_Spark_SM120_CUDA130';
 
-const DEFAULT_STARTUP_TIMEOUT_MS = 180_000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 600_000;
 // A startup with neither a health check success nor an exit record is
 // considered dead after this long (e.g. the backend was killed externally
 // without writing the status file); the next start attempt then launches a
