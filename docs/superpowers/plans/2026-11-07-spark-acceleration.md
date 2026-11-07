@@ -273,7 +273,7 @@ npm run test:e2e:package
 
 预期：构建退出码 0，6 项打包态测试 PASS。
 
-- [ ] **步骤 5：提交并发布**
+- [x] **步骤 5：提交并发布**
 
 只暂存本计划涉及的文件，保留主线程未完成的 `tests/e2e/environment.spec.ts` 和 `tests/unit/environment-wizard.test.tsx` 改动。推送 `codex/runtime-in-app-repo`，用 `gh release create` 上传新便携包，再核对 Release 资产的 SHA256 与本地文件一致。
 
