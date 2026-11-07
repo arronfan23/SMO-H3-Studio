@@ -206,6 +206,7 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
             'VedaSparseAttention': { input: { required: {} } },
             'QwenH3PromptLocal': { input: { required: {} } },
             'MiniMaxH3ReferenceToVideo': { input: { required: {} } },
+            'MiniMaxH3SparkAttentionSM120': { input: { required: {} } },
           };
           for (const node of omitObjectInfoNodes) {
             delete objectInfo[node];

@@ -753,16 +753,20 @@ test.describe('SMO.H3 Studio portable package', () => {
     const submitted = comfyMock.submittedPrompts[comfyMock.submittedPrompts.length - 1];
     const submittedNodes = submitted.prompt as Record<
       string,
-      { class_type: string }
+      { class_type: string; inputs: Record<string, unknown> }
     >;
-    // The submitted graph must be exactly the packaged workflow: same node IDs,
-    // same node types (inputs are patched in place, never added or removed).
+    // Every packaged node survives unchanged; supported hardware adds exactly
+    // one Spark node at the final sampler boundary.
     expect(Object.keys(submittedNodes).sort()).toEqual(
-      Object.keys(packagedWorkflow).sort(),
+      [...Object.keys(packagedWorkflow), 'smo_spark'].sort(),
     );
-    for (const [nodeId, node] of Object.entries(submittedNodes)) {
-      expect(node.class_type).toBe(packagedWorkflow[nodeId].class_type);
+    for (const [nodeId, node] of Object.entries(packagedWorkflow)) {
+      expect(submittedNodes[nodeId].class_type).toBe(node.class_type);
     }
+    expect(submittedNodes.smo_spark.class_type).toBe('MiniMaxH3SparkAttentionSM120');
+    expect(submittedNodes.smo_spark.inputs.model).toEqual(['153', 0]);
+    expect(submittedNodes['269'].inputs.low_res_model).toEqual(['smo_spark', 0]);
+    expect(submittedNodes['124'].inputs.model).toEqual(['smo_spark', 0]);
 
     // Works view: completed work with playable packaged output.
     await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
