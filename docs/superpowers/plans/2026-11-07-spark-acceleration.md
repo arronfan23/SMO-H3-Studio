@@ -26,7 +26,7 @@
 
 **文件：** `src/main/spark-acceleration.ts`、`tests/unit/spark-acceleration.test.ts`
 
-- [ ] **步骤 1：编写失败的转换测试**
+- [x] **步骤 1：编写失败的转换测试**
 
 使用现有 `resources/workflows/text-ref2va.json` 和 `audio-digital-human.json` 作为真实输入，至少覆盖：
 
@@ -52,13 +52,13 @@ expect(textGraph.smo_spark).toBeUndefined();
 
 音频断言源模型为 `['62', 0]`、`steps` 为 6；参数化断言 `{sm120,12.0}`、`{sm89,8.9}` 分别选择对应加速，`{sm89,8.6}` 返回 `none`。对输出再次调用转换，`smo_spark` 数量仍为 1。
 
-- [ ] **步骤 2：运行测试并确认因模块不存在而失败**
+- [x] **步骤 2：运行测试并确认因模块不存在而失败**
 
 运行：`npx vitest run tests/unit/spark-acceleration.test.ts`
 
 预期：FAIL，无法导入 `spark-acceleration`。
 
-- [ ] **步骤 3：实现硬件选择与图转换**
+- [x] **步骤 3：实现硬件选择与图转换**
 
 建立以下公开契约：
 
@@ -110,13 +110,13 @@ scheduler.inputs.model = ['smo_spark', 0];
 
 已有 `smo_spark` 时直接返回结构化克隆，不重复连接。缺失节点、模型链接或非正整数步数时抛出明确错误。
 
-- [ ] **步骤 4：运行转换测试**
+- [x] **步骤 4：运行转换测试**
 
 运行：`npx vitest run tests/unit/spark-acceleration.test.ts`
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：提交独立转换模块**
+- [x] **步骤 5：提交独立转换模块**
 
 ```bash
 git add src/main/spark-acceleration.ts tests/unit/spark-acceleration.test.ts
