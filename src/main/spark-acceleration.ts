@@ -50,8 +50,8 @@ export function applySparkAcceleration<T extends WorkflowGraph>(
   graph: T,
   acceleration: SparkAcceleration,
 ): T {
-  const copy = structuredClone(graph);
-  if (acceleration === 'none' || copy.smo_spark !== undefined) return copy;
+  const copy = structuredClone(graph) as T & { smo_spark?: WorkflowNode };
+  if (acceleration === 'none' || 'smo_spark' in copy) return copy;
 
   const sampler = findSingleNode(copy, 'SelfLiftAvatarH3Sampler');
   const scheduler = findSingleNode(copy, 'BasicScheduler');

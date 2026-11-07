@@ -127,7 +127,7 @@ git commit -m "Add Spark workflow acceleration transform"
 
 **文件：** `src/main/generation.ts`、`src/main/app-services.ts`、`tests/unit/generation.test.ts`
 
-- [ ] **步骤 1：编写失败的生成集成测试**
+- [x] **步骤 1：编写失败的生成集成测试**
 
 在生成 harness 中传入：
 
@@ -140,13 +140,13 @@ acceleration: {
 
 运行文字和音频生成后，对 `comfy.submissions` 中真实提交图断言 `smo_spark` 存在且采样器连接正确；读取 `store.works` 断言 `metadata.acceleration === 'spark-sm120'`。另以 RTX 30 的 `{sm89,8.6}` 运行一次，断言提交图没有 `smo_spark` 且元数据为 `none`。
 
-- [ ] **步骤 2：运行集成测试并确认缺少加速**
+- [x] **步骤 2：运行集成测试并确认缺少加速**
 
 运行：`npx vitest run tests/unit/generation.test.ts -t "Spark"`
 
 预期：FAIL，提交图没有 `smo_spark`。
 
-- [ ] **步骤 3：接入统一生成边界**
+- [x] **步骤 3：接入统一生成边界**
 
 在 `GenerationHandlerOptions` 添加 `acceleration?: SparkAccelerationEnvironment`，在请求入队时计算一次：
 
@@ -170,13 +170,13 @@ const submitted = await comfy.submit(workflow);
 
 在 `app-services.ts` 创建生成器时传入 `acceleration: environmentConfig ?? undefined`，使所有重试也使用同一环境指纹。
 
-- [ ] **步骤 4：运行生成测试**
+- [x] **步骤 4：运行生成测试**
 
 运行：`npx vitest run tests/unit/generation.test.ts`
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：提交生成集成**
+- [x] **步骤 5：提交生成集成**
 
 ```bash
 git add src/main/generation.ts src/main/app-services.ts tests/unit/generation.test.ts

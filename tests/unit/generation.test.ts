@@ -17,6 +17,7 @@ import { FileService } from '../../src/main/files';
 import { createGenerationHandler, createRetryHandler } from '../../src/main/generation';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 import { MediaRegistry } from '../../src/main/media';
+import type { SparkAccelerationEnvironment } from '../../src/main/spark-acceleration';
 import { Store } from '../../src/main/store';
 import type {
   GenerationRequest,
@@ -174,6 +175,7 @@ async function createHarness(
     progressErrorReporter?: (error: unknown) => void;
     workflowResolver?: (mode: GenerationRequest["mode"]) => string;
     ensureReady?: () => Promise<unknown>;
+    acceleration?: SparkAccelerationEnvironment;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'smo-h3-generation-'));
@@ -228,6 +230,7 @@ async function createHarness(
     mediaRegistry,
     uploadsDirectory,
     ensureReady: options.ensureReady,
+    acceleration: options.acceleration,
     copyFile: options.copyFile,
     durationReader: options.durationReader ?? (async () => 60),
     removeFile: options.removeFile,
@@ -865,9 +868,78 @@ describe('GenerationHandler workflows', () => {
     expect(work.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      acceleration: 'none',
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     expect(JSON.stringify(work.metadata)).not.toContain(apiKey);
+  });
+});
+
+
+describe('GenerationHandler Spark acceleration', () => {
+  const sm120: SparkAccelerationEnvironment = {
+    runtimeId: 'sm120',
+    hardwareFingerprint: { cudaComputeCapability: '12.0' },
+  };
+
+  test('submits the accelerated text graph and records Spark metadata', async () => {
+    const harness = await createHarness({ acceleration: sm120 });
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    const graph = harness.comfy.submissions[0] as Record<string, any>;
+    expect(graph.smo_spark).toMatchObject({
+      class_type: 'MiniMaxH3SparkAttentionSM120',
+      inputs: { model: ['153', 0], steps: 8 },
+    });
+    expect(graph['269'].inputs.low_res_model).toEqual(['smo_spark', 0]);
+    expect(work.metadata?.acceleration).toBe('spark-sm120');
+  });
+
+  test('submits the accelerated audio graph with six scheduler steps', async () => {
+    const harness = await createHarness({ acceleration: sm120 });
+    harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'audio.mp4' })];
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    await waitForWork(harness.store, result.id, 'done');
+
+    const graph = harness.comfy.submissions[0] as Record<string, any>;
+    expect(graph.smo_spark).toMatchObject({
+      class_type: 'MiniMaxH3SparkAttentionSM120',
+      inputs: { model: ['62', 0], steps: 6 },
+    });
+    expect(graph['86'].inputs.low_res_model).toEqual(['smo_spark', 0]);
+  });
+
+  test('uses the same Spark acceleration when retrying a failed work', async () => {
+    const harness = await createHarness({ acceleration: sm120 });
+    const original = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, original.id, 'done');
+    harness.store.updateWork(original.id, { status: 'failed', error: 'retry test' });
+
+    const retry = await harness.retryWork(original.id);
+    await waitForWork(harness.store, retry.id, 'done');
+
+    expect(harness.comfy.submissions).toHaveLength(2);
+    for (const submission of harness.comfy.submissions) {
+      expect((submission as Record<string, any>).smo_spark).toBeDefined();
+    }
+  });
+
+  test('keeps RTX 30 on the compatible graph without Spark', async () => {
+    const harness = await createHarness({
+      acceleration: {
+        runtimeId: 'sm89',
+        hardwareFingerprint: { cudaComputeCapability: '8.6' },
+      },
+    });
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(harness.comfy.submissions[0]).not.toHaveProperty('smo_spark');
+    expect(work.metadata?.acceleration).toBe('none');
   });
 });
 
@@ -893,6 +965,7 @@ describe("GenerationHandler workflow selection", () => {
     expect(work.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: activePath,
+      acceleration: 'none',
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     expect(harness.comfy.submissions[0]).toMatchObject({
@@ -919,6 +992,7 @@ describe("GenerationHandler workflow selection", () => {
     expect(retryWork.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: originalCopy,
+      acceleration: 'none',
       retryOf: original.id,
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
@@ -1481,6 +1555,7 @@ describe('GenerationHandler retry', () => {
     expect(retryWork.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      acceleration: 'none',
       retryOf: original.id,
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
@@ -1489,6 +1564,7 @@ describe('GenerationHandler retry', () => {
     expect(originalAfterRetry?.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      acceleration: 'none',
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
   });

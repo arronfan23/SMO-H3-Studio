@@ -10,6 +10,11 @@ import {
 import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
 import type { Store } from './store';
+import {
+  applySparkAcceleration,
+  selectSparkAcceleration,
+  type SparkAccelerationEnvironment,
+} from './spark-acceleration';
 import { patchWorkflow } from '../shared/workflow';
 import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
 import type {
@@ -37,7 +42,10 @@ const WORKFLOW_FILENAMES = {
 
 const PROGRESS_FLUSH_INTERVAL_MS = 200;
 
-type WorkflowGraph = Record<string, { inputs: Record<string, unknown> }>;
+type WorkflowGraph = Record<
+  string,
+  { class_type: string; inputs: Record<string, unknown> }
+>;
 
 export interface GenerationHandlerOptions {
   store: Pick<Store, 'listAvatars' | 'addWork' | 'updateWork'>;
@@ -52,6 +60,7 @@ export interface GenerationHandlerOptions {
   uploadsDirectory: string;
   workflowResolver?: (mode: GenerationRequest["mode"]) => string;
   ensureReady?: () => Promise<unknown>;
+  acceleration?: SparkAccelerationEnvironment;
   copyFile?: typeof copyFile;
   durationReader?: AudioDurationReader;
   removeFile?: typeof rm;
@@ -317,6 +326,7 @@ export function createGenerationHandler(
         : resolve(workflowPath) === resolve(defaultWorkflowPath)
           ? workflowFilename
           : requestedWorkflowPath;
+    const acceleration = selectSparkAcceleration(options.acceleration);
     let stagedAudioPath: string | undefined;
     if (request.mode === 'audio') {
       const sourcePath = request.audioPath!;
@@ -334,6 +344,7 @@ export function createGenerationHandler(
     const baseMetadata: WorkMetadata = {
       request,
       workflowVersion,
+      acceleration,
       ...(originalRetryOf ? { retryOf: originalRetryOf } : {}),
     };
 
@@ -531,7 +542,10 @@ export function createGenerationHandler(
                 [WORKFLOW_PATHS.audio.seed]: request.seed,
                 [WORKFLOW_PATHS.audio.output]: `SMO-H3/${workId}`,
               };
-        const workflow = patchWorkflow(frozen, changes);
+        const workflow = applySparkAcceleration(
+          patchWorkflow(frozen, changes),
+          acceleration,
+        );
         throwIfCancelled();
         const submitted = await comfy.submit(workflow);
         submittedPromptId = submitted.prompt_id;

@@ -598,6 +598,7 @@ export async function createAppServices(
         mediaRegistry,
         uploadsDirectory: join(dataDirectory, 'uploads'),
         ensureReady: () => activeComfyProcess!.ensureReady(),
+        acceleration: environmentConfig ?? undefined,
         durationReader,
       });
 
