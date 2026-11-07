@@ -84,7 +84,7 @@ describe('desktop shell manifest', () => {
       'test:e2e': 'npm run build && playwright test',
       typecheck: 'tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.e2e.json',
       assets: 'node scripts/prepare-brand.mjs && node scripts/build-workflows.mjs',
-      pack: 'npm run build && electron-builder --win portable',
+      pack: 'npm run build && electron-builder --win',
     });
   });
 
@@ -207,6 +207,13 @@ describe('electron-builder configuration', () => {
       deleteAppDataOnUninstall: false,
       artifactName: 'SMO.H3-Studio-Setup-${version}.${ext}',
     });
+  });
+
+  test('lets the builder configuration select both Windows targets', async () => {
+    const manifest = await readManifest();
+
+    expect(manifest.scripts.pack).toContain('electron-builder --win');
+    expect(manifest.scripts.pack).not.toContain('--win portable');
   });
 
   test('uses release output without embedding runtime resources in app.asar', async () => {

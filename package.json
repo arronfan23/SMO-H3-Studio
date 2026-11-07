@@ -1,6 +1,6 @@
 {
   "name": "smo-h3-studio",
-  "version": "0.3.14",
+  "version": "0.3.15",
   "productName": "SMO.H3 Studio",
   "private": true,
   "description": "SMO desktop digital human video studio",
@@ -14,7 +14,7 @@
     "test:e2e:real": "playwright test --config playwright.real.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.e2e.json",
     "assets": "node scripts/prepare-brand.mjs && node scripts/build-workflows.mjs",
-    "pack": "npm run build && electron-builder --win portable"
+    "pack": "npm run build && electron-builder --win"
   },
   "type": "module",
   "dependencies": {

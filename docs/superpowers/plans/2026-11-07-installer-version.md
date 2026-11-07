@@ -162,7 +162,7 @@ git commit -m "Add customizable NSIS installer (installer task 2)"
 
 ### 任务 3：真实安装验收与发布
 
-- [ ] **步骤 1：运行自动回归并构建两个产物**
+- [x] **步骤 1：运行自动回归并构建两个产物**
 
 将版本更新为下一补丁版本，运行：
 
@@ -175,7 +175,7 @@ npm run test:e2e:package
 
 预期：除主线程已有的 5 个未完成“使用已有环境”测试外，其他单元测试通过；类型检查、构建和 6 项便携打包测试通过。`release` 同时存在 Setup 与便携 exe。
 
-- [ ] **步骤 2：验证自定义安装路径与快捷方式**
+- [x] **步骤 2：验证自定义安装路径与快捷方式**
 
 将 Setup 安装到明确选择的非默认测试路径 `G:\SMO-H3-Studio-Installed`。使用安装向导选择该目录；自动验收可用 `/S /D=G:\SMO-H3-Studio-Installed` 验证 NSIS 的自定义目录行为。
 
@@ -186,6 +186,15 @@ npm run test:e2e:package
 - 开始菜单快捷方式存在。
 - 启动已安装客户端后，设置页版本与 `package.json` 一致。
 - 既有 `G:\SMO-H3-Data` 配置和环境继续复用，没有触发运行时或模型下载。
+
+## 实际安装验收记录
+
+- Setup 和便携版均成功构建，便携版 6 项打包测试通过。
+- 使用 `/S /D=G:\SMO-H3-Studio-Installed` 完成自定义目录安装。
+- 已安装 exe、桌面快捷方式和开始菜单快捷方式均指向 `G:\SMO-H3-Studio-Installed\SMO.H3 Studio.exe`。
+- `G:\SMO-H3-Data\environment.json` 保持原文件与最后修改时间，没有重新配置或下载模型。
+- 通过 Playwright 启动已安装客户端，设置页实际显示 `SMO.H3 Studio · 版本 0.3.15`。
+- 完整回归中仅保留主线程已有的 5 个未完成“使用已有环境”失败；版本功能引入的其他测试失败已修复。
 
 - [ ] **步骤 3：提交并发布双产物**
 

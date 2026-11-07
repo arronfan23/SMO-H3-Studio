@@ -94,7 +94,7 @@ export function SettingsPage({
     const [healthResult, profileResult, versionResult] = await Promise.allSettled([
       window.smo.comfy.health(),
       window.smo.llm.getProfile(),
-      window.smo.app.getVersion(),
+      window.smo.app?.getVersion() ?? Promise.resolve(null),
     ]);
     if (!mountedRef.current) {
       return;
@@ -105,7 +105,11 @@ export function SettingsPage({
     const loadedProfile = profileResult.status === 'fulfilled' ? profileResult.value : null;
     setProfile(loadedProfile);
     setProfileError(profileResult.status === 'rejected' ? errorMessage(profileResult.reason) : null);
-    setAppVersion(versionResult.status === 'fulfilled' ? versionResult.value : null);
+    setAppVersion(
+      versionResult.status === 'fulfilled' && typeof versionResult.value === 'string'
+        ? versionResult.value
+        : null,
+    );
     setBaseUrl(loadedProfile?.baseUrl ?? '');
     setModel(loadedProfile?.model ?? '');
     setApiKey('');
