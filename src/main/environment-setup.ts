@@ -27,6 +27,7 @@ import type {
   EnvironmentState,
 } from '../shared/environment';
 import type { HardwareInfo } from '../shared/types';
+import { selectSparkAcceleration } from './spark-acceleration';
 
 export const REQUIRED_COMFY_NODES = [
   'SelfLiftH3Sampler',
@@ -35,6 +36,17 @@ export const REQUIRED_COMFY_NODES = [
   'QwenH3PromptLocal',
   'MiniMaxH3ReferenceToVideo',
 ] as const;
+
+function requiredComfyNodesFor(config: EnvironmentConfig): string[] {
+  const acceleration = selectSparkAcceleration(config);
+  const sparkNode =
+    acceleration === 'spark-sm120'
+      ? 'MiniMaxH3SparkAttentionSM120'
+      : acceleration === 'spark-sm89'
+        ? 'MiniMaxH3SparkAttentionSM89'
+        : undefined;
+  return [...REQUIRED_COMFY_NODES, ...(sparkNode ? [sparkNode] : [])];
+}
 
 const REQUIRED_RUNTIME_FILES = [
   'python_embeded/python.exe',
@@ -1182,7 +1194,7 @@ export class EnvironmentSetupService {
       signal.throwIfAborted();
       transaction = readBackendTransaction(result);
       const objectInfo = readObjectInfo(result);
-      const missingNodes = REQUIRED_COMFY_NODES.filter(
+      const missingNodes = requiredComfyNodesFor(config).filter(
         (node) => !Object.hasOwn(objectInfo, node),
       );
       if (missingNodes.length > 0) {
@@ -1346,7 +1358,7 @@ export class EnvironmentSetupService {
       signal.throwIfAborted();
       transaction = readBackendTransaction(result);
       const objectInfo = readObjectInfo(result);
-      const missingNodes = REQUIRED_COMFY_NODES.filter(
+      const missingNodes = requiredComfyNodesFor(candidate).filter(
         (node) => !Object.hasOwn(objectInfo, node),
       );
       if (missingNodes.length > 0) {
@@ -1680,7 +1692,7 @@ export class EnvironmentSetupService {
       signal.throwIfAborted();
       transaction = readBackendTransaction(result);
       const objectInfo = readObjectInfo(result);
-      const missingNodes = REQUIRED_COMFY_NODES.filter(
+      const missingNodes = requiredComfyNodesFor(candidate).filter(
         (node) => !Object.hasOwn(objectInfo, node),
       );
       if (missingNodes.length > 0) {

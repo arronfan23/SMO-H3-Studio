@@ -464,7 +464,10 @@ describe('packaged environment manifest', () => {
 
 describe('createEnvironmentStartBackend', () => {
   const objectInfoFixture = Object.fromEntries(
-    REQUIRED_COMFY_NODES.map((node) => [node, { input: {} }]),
+    [...REQUIRED_COMFY_NODES, 'MiniMaxH3SparkAttentionSM120'].map((node) => [
+      node,
+      { input: {} },
+    ]),
   );
 
   function makeBackendInput(

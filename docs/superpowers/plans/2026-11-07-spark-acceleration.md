@@ -187,17 +187,17 @@ git commit -m "Enable Spark for supported generation hardware"
 
 **文件：** `src/main/environment-setup.ts`、`tests/unit/environment-setup.test.ts`
 
-- [ ] **步骤 1：编写失败的校验测试**
+- [x] **步骤 1：编写失败的校验测试**
 
 在 SM120 安装 harness 的后端 `objectInfo` 中删除 `MiniMaxH3SparkAttentionSM120`，断言安装失败且错误包含该节点；以 SM89、CUDA CC 8.6 的硬件运行一次，断言没有 Spark 节点仍可完成基础校验。
 
-- [ ] **步骤 2：运行校验测试并确认旧逻辑漏检**
+- [x] **步骤 2：运行校验测试并确认旧逻辑漏检**
 
 运行：`npx vitest run tests/unit/environment-setup.test.ts -t "Spark"`
 
 预期：SM120 缺失 Spark 的用例错误地通过安装，因此测试 FAIL。
 
-- [ ] **步骤 3：按配置计算必需节点**
+- [x] **步骤 3：按配置计算必需节点**
 
 新增内部辅助函数并替换三个 `REQUIRED_COMFY_NODES.filter` 调用点：
 
@@ -215,13 +215,13 @@ function requiredNodesFor(config: EnvironmentConfig): string[] {
 
 安装、已有环境导入及重新验证均使用当前 `EnvironmentConfig`。测试中的正常 SM120 后端夹具加入 `MiniMaxH3SparkAttentionSM120`，与真实运行包一致。
 
-- [ ] **步骤 4：运行环境测试**
+- [x] **步骤 4：运行环境测试**
 
 运行：`npx vitest run tests/unit/environment-setup.test.ts tests/unit/app-services-env.test.ts`
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：提交校验改动**
+- [x] **步骤 5：提交校验改动**
 
 ```bash
 git add src/main/environment-setup.ts tests/unit/environment-setup.test.ts

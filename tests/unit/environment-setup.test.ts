@@ -210,7 +210,9 @@ function makeHardware(overrides: Partial<HardwareInfo> = {}): HardwareInfo {
 }
 
 function makeObjectInfo(): Record<string, Record<string, unknown>> {
-  return Object.fromEntries(REQUIRED_COMFY_NODES.map((node) => [node, {}]));
+  return Object.fromEntries(
+    [...REQUIRED_COMFY_NODES, 'MiniMaxH3SparkAttentionSM120'].map((node) => [node, {}]),
+  );
 }
 
 async function writeRuntimeFiles(
@@ -2166,6 +2168,49 @@ describe('EnvironmentSetupService failures and recovery', () => {
     expect((await harness.store.load())?.status).toBe('failed');
     expect(harness.service.getState()).toMatchObject({ active: false, healthy: false });
     expect(harness.backend).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not become ready when the SM120 Spark node is missing', async () => {
+    const harness = await createHarness({
+      configure: ({ backend }) => {
+        backend.mockImplementation(async () => {
+          const info = makeObjectInfo();
+          delete info.MiniMaxH3SparkAttentionSM120;
+          return { systemStats: {}, objectInfo: info };
+        });
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/MiniMaxH3SparkAttentionSM120/i);
+    expect(harness.service.getState()).toMatchObject({ active: false, healthy: false });
+  });
+
+  test('allows RTX 30 to pass validation without a Spark node', async () => {
+    const harness = await createHarness({
+      hardware: makeHardware({
+        gpu: 'NVIDIA GeForce RTX 3060',
+        vramGiB: 12,
+        cudaComputeCapability: '8.6',
+      }),
+      configure: ({ backend }) => {
+        backend.mockImplementation(async () => ({
+          systemStats: {},
+          objectInfo: Object.fromEntries(REQUIRED_COMFY_NODES.map((node) => [node, {}])),
+        }));
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'balanced-16gb',
+        installRoot: harness.installRoot,
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true });
   });
 
   test('rejects critical runtime files whose upstream hash does not match', async () => {
