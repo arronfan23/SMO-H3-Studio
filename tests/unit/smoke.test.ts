@@ -193,6 +193,22 @@ describe('desktop shell manifest', () => {
 });
 
 describe('electron-builder configuration', () => {
+  test('configures a customizable NSIS installer alongside the portable app', async () => {
+    const config = await readBuilderConfig();
+
+    expect(config.win?.target).toEqual(['nsis', 'portable']);
+    expect(config.nsis).toMatchObject({
+      oneClick: false,
+      perMachine: false,
+      allowToChangeInstallationDirectory: true,
+      createDesktopShortcut: true,
+      createStartMenuShortcut: true,
+      runAfterFinish: true,
+      deleteAppDataOnUninstall: false,
+      artifactName: 'SMO.H3-Studio-Setup-${version}.${ext}',
+    });
+  });
+
   test('uses release output without embedding runtime resources in app.asar', async () => {
     const config = await readBuilderConfig();
 

@@ -96,7 +96,7 @@ git commit -m "Show app version in settings (installer task 1)"
 
 ### 任务 2：NSIS 安装版与便携版双构建
 
-- [ ] **步骤 1：编写失败的构建配置测试**
+- [x] **步骤 1：编写失败的构建配置测试**
 
 使用项目已有 `yaml` 解析器读取 `electron-builder.yml`，断言：
 
@@ -116,13 +116,13 @@ expect(config.nsis.artifactName).toBe('SMO.H3-Studio-Setup-${version}.${ext}');
 
 保留现有 portable 配置断言，确保原下载形式没有回归。
 
-- [ ] **步骤 2：运行配置测试并确认缺少 NSIS 配置**
+- [x] **步骤 2：运行配置测试并确认缺少 NSIS 配置**
 
 运行：`npx vitest run tests/unit/smoke.test.ts -t "NSIS|installer|安装"`
 
 预期：FAIL，当前只有 portable target。
 
-- [ ] **步骤 3：实现双目标配置**
+- [x] **步骤 3：实现双目标配置**
 
 将 Windows target 改为：
 
@@ -147,13 +147,13 @@ portable:
 
 不修改 `appId`、环境清单、数据目录解析、工作流或模型配置。
 
-- [ ] **步骤 4：运行配置与现有打包资源测试**
+- [x] **步骤 4：运行配置与现有打包资源测试**
 
 运行：`npx vitest run tests/unit/smoke.test.ts tests/unit/runtime-packaging.test.ts`
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：提交安装器配置**
+- [x] **步骤 5：提交安装器配置**
 
 ```bash
 git add electron-builder.yml tests/unit/smoke.test.ts

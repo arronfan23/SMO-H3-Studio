@@ -15,7 +15,18 @@ extraResources:
   - from: resources/skills
     to: resources/skills
 win:
-  target: portable
+  target:
+    - nsis
+    - portable
   icon: resources/brand/icon.ico
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  artifactName: SMO.H3-Studio-Setup-${version}.${ext}
 portable:
   artifactName: SMO.H3-Studio-${version}.${ext}
