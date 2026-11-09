@@ -62,6 +62,15 @@ export class FileService {
     return filePath;
   }
 
+  async authorizeDroppedAudio(filePath: string): Promise<string> {
+    const extension = extname(filePath).toLowerCase().replace(/^\./, '');
+    if (!AUDIO_EXTENSIONS.includes(extension)) {
+      throw new Error(`Unsupported audio extension: ${extension || '(none)'}`);
+    }
+    await this.mediaRegistry.authorizeSelectedFile(filePath);
+    return filePath;
+  }
+
   mediaUrl(filePath: string): Promise<string> {
     return this.mediaRegistry.createMediaUrl(filePath);
   }

@@ -272,6 +272,53 @@ describe('FileService.authorizeDroppedImage', () => {
   });
 });
 
+describe('FileService.authorizeDroppedAudio', () => {
+  async function createService(directory: string) {
+    const registry = new MediaRegistry({
+      avatarsDirectory: join(directory, 'avatars'),
+      outputDirectory: join(directory, 'output'),
+    });
+    const files = new FileService({
+      mediaRegistry: registry,
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      outputDirectory: join(directory, 'output'),
+      dataDirectory: directory,
+    });
+    return { files, registry };
+  }
+
+  test('audio drop authorizes the selected file and returns the original path', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-audio-drop-'));
+    const path = join(directory, 'voice.mp3');
+    await writeFile(path, 'audio');
+    const { files, registry } = await createService(directory);
+
+    try {
+      await expect(registry.isSelectedFile(path)).resolves.toBe(false);
+      await expect(files.authorizeDroppedAudio(path)).resolves.toBe(path);
+      await expect(registry.isSelectedFile(path)).resolves.toBe(true);
+      await expect(registry.createMediaUrl(path)).resolves.toMatch(/^smo-media:/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('audio drop rejects unsupported files without authorizing them', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-audio-drop-'));
+    const path = join(directory, 'voice.txt');
+    await writeFile(path, 'notes');
+    const { files, registry } = await createService(directory);
+
+    try {
+      await expect(files.authorizeDroppedAudio(path)).rejects.toThrow(/Unsupported audio/);
+      await expect(registry.isSelectedFile(path)).resolves.toBe(false);
+      await expect(registry.createMediaUrl(path)).rejects.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('FileService.openFolder', () => {
   test('opens a folder inside the output directory', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-open-folder-'));

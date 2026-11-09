@@ -51,6 +51,7 @@ export const IPC_CHANNELS = [
   'files:selectImage',
   'files:selectAudio',
   'files:authorizeDroppedImage',
+  'files:authorizeDroppedAudio',
   'files:mediaUrl',
   'files:openFolder',
   'llm:saveProfile',
@@ -281,6 +282,10 @@ export function createIpcSchema() {
       z.object({ path: nonEmptyString }).strict(),
     ),
     requestSchema(
+      'files:authorizeDroppedAudio',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
+    requestSchema(
       'files:mediaUrl',
       z.object({ path: nonEmptyString }).strict(),
     ),
@@ -388,6 +393,7 @@ export interface SmoApi {
     // authorize an arbitrary string path. Typed structurally (unknown) so the
     // main-process tsconfig (no DOM lib) still compiles this API surface.
     authorizeDroppedImage(file: unknown): Promise<string>;
+    authorizeDroppedAudio(file: unknown): Promise<string>;
     mediaUrl(path: string): Promise<string>;
     openFolder(path: string): Promise<void>;
   };

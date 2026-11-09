@@ -49,7 +49,12 @@ export interface IpcServices {
   avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
   files: Pick<
     FileService,
-    'selectImage' | 'selectAudio' | 'authorizeDroppedImage' | 'mediaUrl' | 'openFolder'
+    | 'selectImage'
+    | 'selectAudio'
+    | 'authorizeDroppedImage'
+    | 'authorizeDroppedAudio'
+    | 'mediaUrl'
+    | 'openFolder'
   >;
   comfy: Pick<ComfyClient, 'health'>;
   startComfy: () => Promise<ComfySystemStats>;
@@ -104,6 +109,8 @@ async function dispatch(
       return services.files.selectAudio();
     case 'files:authorizeDroppedImage':
       return services.files.authorizeDroppedImage(request.payload.path);
+    case 'files:authorizeDroppedAudio':
+      return services.files.authorizeDroppedAudio(request.payload.path);
     case 'files:mediaUrl':
       return services.files.mediaUrl(request.payload.path);
     case 'files:openFolder':

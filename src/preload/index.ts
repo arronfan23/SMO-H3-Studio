@@ -28,6 +28,12 @@ const api: SmoApi = {
           file as Parameters<typeof webUtils.getPathForFile>[0],
         ),
       }),
+    authorizeDroppedAudio: (file) =>
+      ipcRenderer.invoke('files:authorizeDroppedAudio', {
+        path: webUtils.getPathForFile(
+          file as Parameters<typeof webUtils.getPathForFile>[0],
+        ),
+      }),
     mediaUrl: (path) => ipcRenderer.invoke('files:mediaUrl', { path }),
     openFolder: (path) => ipcRenderer.invoke('files:openFolder', { path }),
   },

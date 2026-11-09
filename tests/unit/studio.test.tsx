@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
+import { AudioDigitalHumanForm } from '../../src/renderer/AudioDigitalHumanForm';
 import { SKILL_NAMES } from '../../src/shared/skills';
 import {
   AUTO_SKILL_OPTION,
@@ -47,6 +48,7 @@ function createSmoMock() {
       mediaUrl: vi.fn(),
       openFolder: vi.fn(),
       authorizeDroppedImage: vi.fn(),
+      authorizeDroppedAudio: vi.fn(),
     },
     llm: {
       saveProfile: vi.fn(),
@@ -90,6 +92,9 @@ beforeEach(() => {
     `smo-media://media/${encodeURIComponent(path)}`,
   );
   smo.files.authorizeDroppedImage.mockImplementation(
+    async (file: { name: string }) => `G:\\dropped\\${file.name}`,
+  );
+  smo.files.authorizeDroppedAudio.mockImplementation(
     async (file: { name: string }) => `G:\\dropped\\${file.name}`,
   );
   smo.works.list.mockResolvedValue([]);
@@ -1066,6 +1071,288 @@ describe('audio digital human studio', () => {
     fireEvent.loadedMetadata(audio);
     expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(seconds);
   }
+
+  test('audio drop authorizes one file, previews it, and keeps it after switching panels', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+    const file = new File(['audio'], 'dropped.mp3', { type: 'audio/mpeg' });
+
+    fireEvent.drop(dropzone, { dataTransfer: { files: [file] } });
+
+    expect(smo.files.authorizeDroppedAudio).toHaveBeenCalledWith(file);
+    expect(smo.files.selectAudio).not.toHaveBeenCalled();
+    const audio = await panel.findByLabelText('所选音频');
+    expect(audio).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.mp3')}`,
+    );
+    expect(panel.getByText('dropped.mp3')).toBeInTheDocument();
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 7.25 });
+    fireEvent.loadedMetadata(audio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(7.25);
+
+    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    expect(panel.getByText('dropped.mp3')).toBeInTheDocument();
+    expect(panel.getByLabelText('所选音频')).toBe(audio);
+  });
+
+  test('audio drop 拖入多个文件时拒绝授权并显示错误', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+
+    fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+      dataTransfer: {
+        files: [new File(['a'], 'a.mp3'), new File(['b'], 'b.wav')],
+      },
+    });
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('一次只能拖入一个音频文件');
+    expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+  });
+
+  test.each(['notes.txt', 'photo.png'])(
+    'audio drop 拖入非音频 %s 时拒绝授权',
+    async (name) => {
+      await renderStudio();
+      fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+      const panel = within(audioPanel());
+
+      fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+        dataTransfer: { files: [new File(['x'], name)] },
+      });
+
+      expect(await panel.findByRole('alert')).toHaveTextContent(
+        '仅支持 WAV、MP3、FLAC、OGG 或 M4A 音频',
+      );
+      expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    },
+  );
+
+  test('audio drop 拖入子元素触发 dragleave 时保留高亮', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+    const child = panel.getByText('尚未选择音频');
+
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+    const enterChild = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(enterChild, 'relatedTarget', { value: child });
+    fireEvent(dropzone, enterChild);
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+
+    const leaveZone = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(leaveZone, 'relatedTarget', { value: document.body });
+    fireEvent(dropzone, leaveZone);
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'reset.mp3')] },
+    });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+  });
+
+  test('audio drop 过期对话框授权不能覆盖较新的拖入选择', async () => {
+    let resolveSelect!: (path: string | null) => void;
+    smo.files.selectAudio.mockImplementationOnce(
+      () => new Promise<string | null>((resolve) => { resolveSelect = resolve; }),
+    );
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+
+    fireEvent.click(panel.getByRole('button', { name: '选择音频' }));
+    fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+      dataTransfer: { files: [new File(['audio'], 'new-drop.wav')] },
+    });
+    expect(await panel.findByText('new-drop.wav')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSelect('G:\\recordings\\stale-dialog.mp3');
+    });
+    expect(panel.getByText('new-drop.wav')).toBeInTheDocument();
+    expect(panel.queryByText('stale-dialog.mp3')).not.toBeInTheDocument();
+  });
+
+  test('audio drop 慢授权不能覆盖移除，并正确释放 selecting 状态', async () => {
+    let resolveDrop!: (path: string) => void;
+    smo.files.authorizeDroppedAudio.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveDrop = resolve; }),
+    );
+    await renderLoadedAudio('G:\\recordings\\original.mp3', 8);
+    const panel = within(audioPanel());
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['audio'], 'slow.mp3')] },
+    });
+    expect(dropzone).toHaveAttribute('aria-busy', 'true');
+    expect(panel.getByRole('button', { name: '正在选择…' })).toBeDisabled();
+    fireEvent.click(panel.getByRole('button', { name: '移除音频' }));
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveDrop('G:\\dropped\\slow.mp3');
+    });
+    expect(panel.queryByText('slow.mp3')).not.toBeInTheDocument();
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+    expect(dropzone).toHaveAttribute('aria-busy', 'false');
+    expect(panel.getByRole('button', { name: '选择音频' })).toBeEnabled();
+  });
+
+  test('audio drop 生成中禁止替换当前音频', async () => {
+    let resolveStart!: (value: { id: string }) => void;
+    smo.jobs.start.mockImplementationOnce(
+      () => new Promise<{ id: string }>((resolve) => { resolveStart = resolve; }),
+    );
+    await renderLoadedAudio('G:\\recordings\\generating.mp3', 8);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '生成期间保持当前音频' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+    expect(dropzone).toHaveAttribute('aria-disabled', 'true');
+    expect(panel.getByRole('button', { name: '选择音频' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '移除音频' })).toBeDisabled();
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['audio'], 'replacement.mp3')] },
+    });
+    expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    expect(panel.getByText('generating.mp3')).toBeInTheDocument();
+    expect(panel.queryByText('replacement.mp3')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveStart({ id: 'audio-drop-generation' });
+    });
+  });
+
+  test('audio drop 全局 busy 禁止替换当前音频', async () => {
+    const audioPath = 'G:\\recordings\\busy-original.mp3';
+    smo.files.selectAudio.mockResolvedValue(audioPath);
+    const form = (
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />
+    );
+    const view = render(form);
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(audio);
+
+    view.rerender(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        busy
+      />,
+    );
+    const dropzone = screen.getByRole('group', { name: '音频拖放区' });
+    expect(dropzone).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['audio'], 'busy-replacement.mp3')] },
+    });
+
+    expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    expect(screen.getByText('busy-original.mp3')).toBeInTheDocument();
+    expect(screen.queryByText('busy-replacement.mp3')).not.toBeInTheDocument();
+  });
+
+  test('重复选择同一音频会重新读取时长、忽略旧 metadata 并可润色', async () => {
+    const audioPath = 'G:\\recordings\\repeat-select.mp3';
+    smo.llm.polish.mockResolvedValue({
+      text: '重复选择后的润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+    const firstAudio = panel.getByLabelText('所选音频');
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '重复选择后仍能润色' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '5' } });
+
+    fireEvent.click(panel.getByRole('button', { name: '选择音频' }));
+    await waitFor(() => expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0));
+    expect(panel.getByLabelText('起始截取（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：12.50 秒')).not.toBeInTheDocument();
+    const secondAudio = panel.getByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+
+    Object.defineProperty(firstAudio, 'duration', { configurable: true, value: 99 });
+    fireEvent.loadedMetadata(firstAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：99.00 秒')).not.toBeInTheDocument();
+
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 6.25 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6.25);
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '重复选择后的润色结果',
+    );
+    expect(smo.llm.polish).toHaveBeenCalledWith(
+      expect.objectContaining({ text: '重复选择后仍能润色', duration: 6.25 }),
+    );
+  });
+
+  test('重复拖入同一音频会重新读取时长、忽略旧 metadata 并可生成', async () => {
+    const audioPath = 'G:\\recordings\\repeat-drop.mp3';
+    await renderLoadedAudio(audioPath, 9);
+    const panel = within(audioPanel());
+    const firstAudio = panel.getByLabelText('所选音频');
+    smo.files.authorizeDroppedAudio.mockResolvedValue(audioPath);
+
+    fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+      dataTransfer: {
+        files: [new File(['audio'], 'repeat-drop.mp3', { type: 'audio/mpeg' })],
+      },
+    });
+    await waitFor(() => expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0));
+    const secondAudio = panel.getByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+
+    Object.defineProperty(firstAudio, 'duration', { configurable: true, value: 88 });
+    fireEvent.loadedMetadata(firstAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：88.00 秒')).not.toBeInTheDocument();
+
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 5.5 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(5.5);
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '重复拖入后仍能生成' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'audio',
+        audioPath,
+        prompt: '重复拖入后仍能生成',
+        trimStart: 0,
+        duration: 5.5,
+      }),
+    );
+  });
 
   test('polishes the actual clip without media payloads and generates the edited result once', async () => {
     const audioPath = 'G:\\recordings\\polish.mp3';

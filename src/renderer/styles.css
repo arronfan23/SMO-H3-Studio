@@ -803,6 +803,48 @@ body[data-window-maximized='true'] .window-resize-handle {
   color: #68746c;
 }
 
+.audio-input {
+  display: grid;
+  gap: 8px;
+}
+
+.audio-dropzone {
+  padding: 10px;
+  border: 1px dashed #b8c3ba;
+  border-radius: var(--radius-control);
+}
+
+.audio-dropzone[data-drop-active='true'] {
+  outline: 2px dashed #258665;
+  outline-offset: 4px;
+}
+
+.audio-dropzone[aria-disabled='true'] {
+  opacity: 0.65;
+}
+
+.audio-dropzone-empty {
+  padding: 10px;
+  color: #68746c;
+  font-size: 13px;
+  text-align: center;
+}
+
+.audio-dropzone .audio-file {
+  padding: 0;
+  background: transparent;
+}
+
+.audio-dropzone .audio-file .button {
+  flex: 0 0 auto;
+}
+
+.audio-duration {
+  margin: 0;
+  color: #68746c;
+  font-size: 13px;
+}
+
 .audio-preview {
   display: block;
   width: 100%;

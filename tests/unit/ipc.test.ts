@@ -298,6 +298,7 @@ describe('IPC input schema', () => {
     { channel: 'files:selectAudio', payload: {} },
     { channel: 'files:mediaUrl', payload: { path: 'G:\\media\\result.mp4' } },
     { channel: 'files:authorizeDroppedImage', payload: { path: 'G:\\photos\\dropped.png' } },
+    { channel: 'files:authorizeDroppedAudio', payload: { path: 'G:\\audio\\voice.mp3' } },
   ])('accepts controlled file request $channel', (request) => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
@@ -599,6 +600,13 @@ describe('IPC input schema', () => {
     {
       channel: 'files:authorizeDroppedImage',
       payload: { path: 'G:\\photos\\dropped.png', shell: true },
+    },
+    { channel: 'files:authorizeDroppedAudio', payload: {} },
+    { channel: 'files:authorizeDroppedAudio', payload: { path: '' } },
+    { channel: 'files:authorizeDroppedAudio', payload: { path: '   ' } },
+    {
+      channel: 'files:authorizeDroppedAudio',
+      payload: { path: 'G:\\audio\\voice.mp3', shell: true },
     },
     { channel: 'comfy:open', payload: { url: 'http://example.com' } },
     { channel: 'avatars:update', payload: { id: '', name: 'Renamed' } },
@@ -964,6 +972,22 @@ describe('main-process IPC handlers', () => {
     await expect(
       harness.invoke('avatars:create', { name: 'Nope', photoPath: audioPath }),
     ).rejects.toThrow();
+  });
+
+  test('audio drop authorizes the file for controlled media access', async () => {
+    const harness = await createHarness();
+    const source = join(harness.directory, 'dropped.mp3');
+    await writeFile(source, 'audio-data');
+
+    await expect(
+      harness.invoke('files:mediaUrl', { path: source }),
+    ).rejects.toThrow(/not allowed/i);
+    await expect(
+      harness.invoke('files:authorizeDroppedAudio', { path: source }),
+    ).resolves.toBe(source);
+    await expect(
+      harness.invoke('files:mediaUrl', { path: source }),
+    ).resolves.toMatch(/^smo-media:\/\/media\//);
   });
 
   test('retries a work through the real retry handler', async () => {
@@ -1674,6 +1698,30 @@ describe('preload API', () => {
     expect(ipcRendererInvoke).not.toHaveBeenCalled();
   });
 
+  test('audio drop resolves the File through webUtils instead of accepting a raw path', async () => {
+    webUtilsGetPathForFile.mockReturnValue('G:\\audio\\dropped.mp3');
+    const file = { name: 'dropped.mp3' };
+
+    await api.files.authorizeDroppedAudio(file);
+
+    expect(webUtilsGetPathForFile).toHaveBeenCalledWith(file);
+    expect(ipcRendererInvoke).toHaveBeenCalledTimes(1);
+    expect(ipcRendererInvoke).toHaveBeenCalledWith('files:authorizeDroppedAudio', {
+      path: 'G:\\audio\\dropped.mp3',
+    });
+  });
+
+  test('audio drop cannot authorize an arbitrary renderer path string', async () => {
+    webUtilsGetPathForFile.mockImplementation(() => {
+      throw new Error('getPathForFile expects a File object');
+    });
+
+    expect(() => api.files.authorizeDroppedAudio('G:\\private\\hacked.mp3')).toThrow(
+      /File object/,
+    );
+    expect(ipcRendererInvoke).not.toHaveBeenCalled();
+  });
+
   test('exposes only the fixed domain methods', () => {
     expect(Object.keys(api).sort()).toEqual([
       'app',
@@ -1710,6 +1758,7 @@ describe('preload API', () => {
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
     expect(Object.keys(api.works)).toEqual(['delete', 'list', 'rename']);
     expect(Object.keys(api.files).sort()).toEqual([
+      'authorizeDroppedAudio',
       'authorizeDroppedImage',
       'mediaUrl',
       'openFolder',
@@ -1801,6 +1850,14 @@ describe('preload API', () => {
       call: (smo: SmoApi) => {
         webUtilsGetPathForFile.mockReturnValueOnce('G:\\photos\\dropped.png');
         return smo.files.authorizeDroppedImage({ name: 'dropped.png' });
+      },
+    },
+    {
+      channel: 'files:authorizeDroppedAudio',
+      payload: { path: 'G:\\audio\\dropped.mp3' },
+      call: (smo: SmoApi) => {
+        webUtilsGetPathForFile.mockReturnValueOnce('G:\\audio\\dropped.mp3');
+        return smo.files.authorizeDroppedAudio({ name: 'dropped.mp3' });
       },
     },
     {

@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { FileAudio, Sparkles, Video } from 'lucide-react';
+import { Sparkles, Video } from 'lucide-react';
 import { SKILL_NAMES, type SkillName } from '../shared/skills';
 import {
   DEFAULT_GENERATION_OPTIONS,
@@ -7,11 +7,12 @@ import {
   type GenerationOptionsValue,
 } from '../shared/generation-options';
 import { GenerationOptions } from './GenerationOptions';
+import { AudioInput } from './AudioInput';
 import { JobStatus } from './JobStatus';
 import { StepNumberField } from './StepNumberField';
 import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
 import { useMediaUrl } from './useMediaUrl';
-import { errorMessage, fileName } from './ui';
+import { errorMessage } from './ui';
 
 type PromptTab = 'original' | 'polished';
 
@@ -50,6 +51,7 @@ export function AudioDigitalHumanForm({
 }) {
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioSeconds, setAudioSeconds] = useState<number | null>(null);
+  const [audioRevision, setAudioRevision] = useState(0);
   const [originalText, setOriginalText] = useState('');
   const [polishedText, setPolishedText] = useState('');
   const [activeTab, setActiveTab] = useState<PromptTab>('original');
@@ -61,13 +63,13 @@ export function AudioDigitalHumanForm({
   const [options, setOptions] = useState<GenerationOptionsValue>(
     DEFAULT_GENERATION_OPTIONS,
   );
-  const [selecting, setSelecting] = useState(false);
   const [polishing, setPolishing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const { url: audioUrl, error: mediaError } = useMediaUrl(audioPath);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRevisionRef = useRef(0);
   const originalTabRef = useRef<HTMLButtonElement | null>(null);
   const polishedTabRef = useRef<HTMLButtonElement | null>(null);
   const operationRef = useRef<'polish' | 'generation' | null>(null);
@@ -94,28 +96,20 @@ export function AudioDigitalHumanForm({
       ? AUTO_SKILL_OPTION.description
       : SKILL_OPTIONS[skill].description;
 
-  const selectAudio = async (): Promise<void> => {
-    setSelecting(true);
-    setError(null);
-    try {
-      const selected = await window.smo.files.selectAudio();
-      if (selected !== null) {
-        polishRequestIdRef.current += 1;
-        pendingPolishRef.current = null;
-        if (operationRef.current === 'polish') {
-          operationRef.current = null;
-        }
-        setPolishing(false);
-        setAudioPath(selected);
-        setAudioSeconds(null);
-        setDuration(0);
-        setTrimStart(0);
-      }
-    } catch (selectError) {
-      setError(errorMessage(selectError));
-    } finally {
-      setSelecting(false);
+  const handleAudioSelected = (selected: string | null): void => {
+    // The same path may be chosen again; invalidate its old element and events.
+    audioRevisionRef.current += 1;
+    setAudioRevision(audioRevisionRef.current);
+    polishRequestIdRef.current += 1;
+    pendingPolishRef.current = null;
+    if (operationRef.current === 'polish') {
+      operationRef.current = null;
     }
+    setPolishing(false);
+    setAudioPath(selected);
+    setAudioSeconds(null);
+    setDuration(0);
+    setTrimStart(0);
   };
 
   const resolveValidClip = (text: string): { audioPath: string; duration: number } | null => {
@@ -317,18 +311,18 @@ export function AudioDigitalHumanForm({
         void startGeneration();
       }}
     >
-      <button className="button button-secondary" type="button" onClick={() => void selectAudio()} disabled={selecting || busy}>
-        <FileAudio size={16} aria-hidden="true" />
-        {selecting ? '正在选择…' : '选择音频'}
-      </button>
-      {audioPath && (
-        <div className="audio-file">
-          <strong>{fileName(audioPath)}</strong>
-          {audioSeconds !== null && <span>音频时长：{audioSeconds.toFixed(2)} 秒</span>}
-        </div>
+      <AudioInput
+        path={audioPath}
+        disabled={submitting || busy}
+        onSelected={handleAudioSelected}
+        onError={setError}
+      />
+      {audioPath && audioSeconds !== null && (
+        <p className="audio-duration">音频时长：{audioSeconds.toFixed(2)} 秒</p>
       )}
       {audioUrl && (
         <audio
+          key={`${audioPath}:${audioRevision}`}
           ref={audioRef}
           className="audio-preview"
           aria-label="所选音频"
@@ -336,6 +330,9 @@ export function AudioDigitalHumanForm({
           preload="metadata"
           src={audioUrl}
           onLoadedMetadata={(event) => {
+            if (audioRevision !== audioRevisionRef.current) {
+              return;
+            }
             const seconds = event.currentTarget.duration;
             if (Number.isFinite(seconds) && seconds > 0) {
               setAudioSeconds(seconds);
