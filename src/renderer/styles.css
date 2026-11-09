@@ -385,6 +385,21 @@ body[data-window-maximized='true'] .window-resize-handle {
   object-fit: cover;
 }
 
+.person-preview .avatar-image {
+  aspect-ratio: auto;
+  min-height: 180px;
+  max-height: none;
+  overflow: visible;
+}
+
+.person-preview .avatar-image img {
+  width: 100%;
+  max-width: fit-content;
+  height: auto;
+  max-height: 65vh;
+  object-fit: contain;
+}
+
 .reference-label {
   margin: 12px 0 0;
   color: #68746c;

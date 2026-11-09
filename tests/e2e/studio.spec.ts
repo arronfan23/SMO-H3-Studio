@@ -39,7 +39,7 @@ async function createTestMedia(directory: string): Promise<{
     '-f',
     'lavfi',
     '-i',
-    'testsrc=duration=1:size=512x512:rate=1',
+    'testsrc=duration=1:size=400x800:rate=1',
     '-vframes',
     '1',
     imagePath,
@@ -354,6 +354,47 @@ async function openStudio(page: Page, avatarName: string): Promise<void> {
   ).toBeVisible();
 }
 
+async function assertStudioReferenceLayout(page: Page, viewName: string): Promise<void> {
+  const image = page.locator('.person-preview .avatar-image img');
+  await image.scrollIntoViewIfNeeded();
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
+    .toBeGreaterThan(0);
+
+  const layout = await page.evaluate(() => {
+    const imageElement = document.querySelector<HTMLImageElement>(
+      '.person-preview .avatar-image img',
+    );
+    const container = document.querySelector<HTMLElement>('.person-preview .avatar-image');
+    const label = document.querySelector<HTMLElement>('.person-preview .reference-label');
+    if (!imageElement || !container || !label) {
+      return null;
+    }
+    const imageRect = imageElement.getBoundingClientRect();
+    const labelRect = label.getBoundingClientRect();
+    const imageStyle = getComputedStyle(imageElement);
+    const containerStyle = getComputedStyle(container);
+    return {
+      naturalRatio: imageElement.naturalWidth / imageElement.naturalHeight,
+      renderedRatio: imageRect.width / imageRect.height,
+      objectFit: imageStyle.objectFit,
+      containerAspectRatio: containerStyle.aspectRatio,
+      containerOverflow: containerStyle.overflow,
+      labelOverlapsImage: labelRect.top < imageRect.bottom - 2,
+      documentOverflow: document.documentElement.scrollWidth > window.innerWidth,
+    };
+  });
+
+  expect(layout, viewName).not.toBeNull();
+  expect(layout!.naturalRatio, viewName).toBeCloseTo(0.5, 2);
+  expect(layout!.renderedRatio, viewName).toBeCloseTo(layout!.naturalRatio, 2);
+  expect(layout!.objectFit, viewName).toBe('contain');
+  expect(layout!.containerAspectRatio, viewName).toBe('auto');
+  expect(layout!.containerOverflow, viewName).toBe('visible');
+  expect(layout!.labelOverlapsImage, viewName).toBe(false);
+  expect(layout!.documentOverflow, viewName).toBe(false);
+}
+
 async function readVisibleTextJobId(page: Page): Promise<string> {
   const jobId = page.locator(
     '#text-mode-panel section[aria-label="任务状态"]:visible code',
@@ -469,6 +510,74 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
       await expect(page!.locator('#original-text')).toHaveValue(draft);
     }
+  });
+
+  test('视频子模式切换与页面导航保留完整草稿', async () => {
+    const avatarName = 'E2E Video Draft Avatar';
+    await createAvatar(page!, avatarName);
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await openStudio(page!, avatarName);
+
+    await page!.fill('#original-text', 'Original text video draft.');
+    await page!.fill('#text-steps', '11');
+    await page!.click('#text-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#polished-text')).toBeVisible({ timeout: 30_000 });
+    await page!.fill('#polished-text', 'Edited text video polished draft.');
+
+    await page!.click('#audio-mode-tab');
+    await page!.click('button:has-text("选择音频")');
+    await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
+    await page!.waitForFunction(() => {
+      const audio = document.querySelector<HTMLAudioElement>('#audio-mode-panel audio');
+      return audio !== null && Number.isFinite(audio.duration) && audio.duration > 0;
+    });
+    await page!.fill('#audio-prompt', 'Original audio video draft.');
+    await page!.fill('#audio-steps', '9');
+    await page!.click('#audio-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#audio-polished-text')).toBeVisible({ timeout: 30_000 });
+    await page!.fill('#audio-polished-text', 'Edited audio video polished draft.');
+
+    await page!.click('#text-mode-tab');
+    await expect(page!.locator('#polished-text')).toHaveValue(
+      'Edited text video polished draft.',
+    );
+    await expect(page!.locator('#text-steps')).toHaveValue('11');
+    await page!.click('#original-tab');
+    await expect(page!.locator('#original-text')).toHaveValue('Original text video draft.');
+    await page!.click('#polished-tab');
+
+    await page!.click('#audio-mode-tab');
+    await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
+    await expect(page!.locator('#audio-polished-text')).toHaveValue(
+      'Edited audio video polished draft.',
+    );
+    await expect(page!.locator('#audio-steps')).toHaveValue('9');
+    await page!.click('#audio-original-tab');
+    await expect(page!.locator('#audio-prompt')).toHaveValue('Original audio video draft.');
+    await page!.click('#audio-polished-tab');
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      await page!.click(`nav[aria-label="主导航"] button:has-text("${moduleName}")`);
+      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await expect(page!.locator('#audio-mode-panel')).toBeVisible();
+      await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
+      await expect(page!.locator('#audio-polished-text')).toHaveValue(
+        'Edited audio video polished draft.',
+      );
+      await expect(page!.locator('#audio-steps')).toHaveValue('9');
+    }
+
+    await page!.click('#text-mode-tab');
+    await expect(page!.locator('#polished-text')).toHaveValue(
+      'Edited text video polished draft.',
+    );
+    await expect(page!.locator('#text-steps')).toHaveValue('11');
+    await page!.click('#original-tab');
+    await expect(page!.locator('#original-text')).toHaveValue('Original text video draft.');
+
+    await page!.click('#audio-mode-tab');
+    await page!.click('#audio-original-tab');
+    await expect(page!.locator('#audio-prompt')).toHaveValue('Original audio video draft.');
   });
 
   test('configures LLM profile and tests the model', async () => {
@@ -847,7 +956,10 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       // text mode explicitly instead of relying on an implicit reset.
       await page!.click('#text-mode-tab');
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
+      await assertStudioReferenceLayout(page!, `studio-${viewport.width}x${viewport.height}`);
       await assertViewLayout(page!, 'studio-text', [
+        '.person-preview .avatar-image img',
+        '.person-preview .reference-label',
         '#original-text',
         '#polished-tab',
         '#text-mode-panel .button-generate',
@@ -934,6 +1046,16 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       return results;
     });
     expect(violations).toEqual([]);
+
+    await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+    await expect(page!.locator('#text-mode-panel')).toBeVisible();
+    await assertStudioReferenceLayout(page!, 'studio-200-zoom');
+    await assertViewLayout(page!, 'studio-200-zoom', [
+      '.person-preview .avatar-image img',
+      '.person-preview .reference-label',
+      '#original-text',
+      '#text-mode-panel .button-generate',
+    ]);
   });
 
   test('window maximize round trip toggles the rounded frame', async () => {

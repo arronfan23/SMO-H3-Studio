@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { type KeyboardEvent, useRef, useState } from 'react';
 import { UserPlus } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import { AudioDigitalHumanForm } from './AudioDigitalHumanForm';
@@ -21,8 +21,41 @@ export function StudioPage({
   onCreateAvatar: () => void;
   pageActive?: boolean;
 }) {
-  const [mode, setMode] = useState<'text' | 'audio'>('text');
+  const [videoMode, setVideoMode] = useState<'text' | 'audio'>('text');
+  const textModeTabRef = useRef<HTMLButtonElement | null>(null);
+  const audioModeTabRef = useRef<HTMLButtonElement | null>(null);
   const { busy, refresh } = useActiveJob();
+
+  const focusVideoMode = (nextMode: 'text' | 'audio'): void => {
+    setVideoMode(nextMode);
+    (nextMode === 'text' ? textModeTabRef : audioModeTabRef).current?.focus();
+  };
+
+  const handleVideoModeKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    const currentMode =
+      event.target === audioModeTabRef.current
+        ? 'audio'
+        : event.target === textModeTabRef.current
+          ? 'text'
+          : videoMode;
+    let nextMode: 'text' | 'audio';
+    switch (event.key) {
+      case 'ArrowLeft':
+      case 'ArrowRight':
+        nextMode = currentMode === 'text' ? 'audio' : 'text';
+        break;
+      case 'Home':
+        nextMode = 'text';
+        break;
+      case 'End':
+        nextMode = 'audio';
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    focusVideoMode(nextMode);
+  };
 
   if (loading) {
     return <div className="page-state">正在读取数字模特…</div>;
@@ -51,24 +84,33 @@ export function StudioPage({
             <p className="reference-label">参考人物：&lt;Picture 1&gt;</p>
           </section>
           <section className="production-controls" aria-label="制作控制区">
-            <div className="tab-list mode-tabs" role="tablist" aria-label="制作模式">
+            <div
+              className="tab-list mode-tabs"
+              role="tablist"
+              aria-label="制作模式"
+              onKeyDown={handleVideoModeKeyDown}
+            >
               <button
+                ref={textModeTabRef}
                 id="text-mode-tab"
                 type="button"
                 role="tab"
-                aria-selected={mode === 'text'}
+                aria-selected={videoMode === 'text'}
                 aria-controls="text-mode-panel"
-                onClick={() => setMode('text')}
+                tabIndex={videoMode === 'text' ? 0 : -1}
+                onClick={() => setVideoMode('text')}
               >
                 文字生视频
               </button>
               <button
+                ref={audioModeTabRef}
                 id="audio-mode-tab"
                 type="button"
                 role="tab"
-                aria-selected={mode === 'audio'}
+                aria-selected={videoMode === 'audio'}
                 aria-controls="audio-mode-panel"
-                onClick={() => setMode('audio')}
+                tabIndex={videoMode === 'audio' ? 0 : -1}
+                onClick={() => setVideoMode('audio')}
               >
                 音频数字人
               </button>
@@ -77,12 +119,12 @@ export function StudioPage({
               id="text-mode-panel"
               role="tabpanel"
               aria-labelledby="text-mode-tab"
-              hidden={mode !== 'text'}
+              hidden={videoMode !== 'text'}
             >
               <TextToVideoForm
                 avatarId={avatar.id}
                 modelDirectory={modelDirectory}
-                active={mode === 'text'}
+                active={videoMode === 'text'}
                 busy={busy}
                 onJobStarted={refresh}
               />
@@ -91,12 +133,12 @@ export function StudioPage({
               id="audio-mode-panel"
               role="tabpanel"
               aria-labelledby="audio-mode-tab"
-              hidden={mode !== 'audio'}
+              hidden={videoMode !== 'audio'}
             >
               <AudioDigitalHumanForm
                 avatarId={avatar.id}
                 modelDirectory={modelDirectory}
-                active={mode === 'audio'}
+                active={videoMode === 'audio'}
                 pageActive={pageActive}
                 busy={busy}
                 onJobStarted={refresh}

@@ -777,6 +777,74 @@ describe('SMO.H3 Studio navigation and avatars', () => {
 });
 
 describe('text-to-video studio', () => {
+  test('视频子模式具有清晰的面板与 tab ARIA 关系，且不提前加入语音或图像主 tab', async () => {
+    await renderStudio();
+
+    const preview = screen.getByRole('region', { name: '当前人物预览' });
+    const controls = screen.getByRole('region', { name: '制作控制区' });
+    const modeTabs = within(controls).getByRole('tablist', { name: '制作模式' });
+    expect(within(modeTabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      '文字生视频',
+      '音频数字人',
+    ]);
+    expect(screen.queryByRole('tab', { name: /语音|图像/ })).not.toBeInTheDocument();
+
+    const textTab = within(modeTabs).getByRole('tab', { name: '文字生视频' });
+    const audioTab = within(modeTabs).getByRole('tab', { name: '音频数字人' });
+    const textPanel = document.getElementById('text-mode-panel');
+    const audioPanel = document.getElementById('audio-mode-panel');
+    expect(textTab).toHaveAttribute('aria-controls', 'text-mode-panel');
+    expect(audioTab).toHaveAttribute('aria-controls', 'audio-mode-panel');
+    expect(textPanel).toHaveAttribute('role', 'tabpanel');
+    expect(textPanel).toHaveAttribute('aria-labelledby', 'text-mode-tab');
+    expect(audioPanel).toHaveAttribute('role', 'tabpanel');
+    expect(audioPanel).toHaveAttribute('aria-labelledby', 'audio-mode-tab');
+    expect(textPanel).toBeVisible();
+    expect(audioPanel).not.toBeVisible();
+    expect(preview).not.toBeNull();
+    expect(controls).not.toContainElement(preview);
+
+    fireEvent.click(audioTab);
+    expect(textPanel).not.toBeVisible();
+    expect(audioPanel).toBeVisible();
+    expect(textTab).toHaveAttribute('aria-selected', 'false');
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('视频子 tab 支持 roving tabindex 和键盘循环导航', async () => {
+    await renderStudio();
+
+    const controls = screen.getByRole('region', { name: '制作控制区' });
+    const modeTabs = within(controls).getByRole('tablist', { name: '制作模式' });
+    const textTab = within(modeTabs).getByRole('tab', { name: '文字生视频' });
+    const audioTab = within(modeTabs).getByRole('tab', { name: '音频数字人' });
+
+    textTab.focus();
+    fireEvent.keyDown(textTab, { key: 'ArrowRight' });
+    expect(audioTab).toHaveFocus();
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+    expect(textTab).toHaveAttribute('tabindex', '-1');
+    expect(audioTab).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(audioTab, { key: 'ArrowRight' });
+    expect(textTab).toHaveFocus();
+    expect(textTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(textTab, { key: 'ArrowLeft' });
+    expect(audioTab).toHaveFocus();
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(audioTab, { key: 'Home' });
+    expect(textTab).toHaveFocus();
+    expect(textTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(textTab, { key: 'End' });
+    expect(audioTab).toHaveFocus();
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+    expect(textTab).toHaveAttribute('tabindex', '-1');
+    expect(audioTab).toHaveAttribute('tabindex', '0');
+  });
+
   test('polishes without media payloads, edits the result, and starts the confirmed text', async () => {
     smo.llm.polish.mockResolvedValue({
       text: '润色后的镜头',
@@ -1041,6 +1109,92 @@ describe('text-to-video studio', () => {
     expect(screen.getByRole('heading', { name: avatar.name })).toBeInTheDocument();
   });
 
+  test('视频子模式切换和应用页面往返保留原文、润色文本、音频与步数', async () => {
+    smo.llm.polish.mockImplementation(async ({ text }: { text: string }) => ({
+      text: `润色：${text}`,
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    }));
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\video-submode.mp3');
+    await renderStudio();
+
+    let textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    fireEvent.change(textPanel.getByLabelText('原始文字'), {
+      target: { value: '视频子模式原文' },
+    });
+    fireEvent.change(textPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '11' },
+    });
+    fireEvent.click(textPanel.getByRole('button', { name: 'AI 润色' }));
+    expect(await textPanel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '润色：视频子模式原文',
+    );
+    fireEvent.change(textPanel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '编辑后的视频子模式润色文本' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    let audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+    fireEvent.click(audioPanel.getByRole('button', { name: '选择音频' }));
+    const selectedAudio = await audioPanel.findByLabelText('所选音频');
+    Object.defineProperty(selectedAudio, 'duration', { configurable: true, value: 9 });
+    fireEvent.loadedMetadata(selectedAudio);
+    fireEvent.change(audioPanel.getByLabelText('动作/画面提示词'), {
+      target: { value: '音频子模式原文' },
+    });
+    fireEvent.change(audioPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '9' },
+    });
+    fireEvent.click(audioPanel.getByRole('button', { name: 'AI 润色' }));
+    expect(await audioPanel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '润色：音频子模式原文',
+    );
+    fireEvent.change(audioPanel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '编辑后的音频子模式润色文本' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    expect(textPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '编辑后的视频子模式润色文本',
+    );
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(11);
+    fireEvent.click(textPanel.getByRole('tab', { name: '原文' }));
+    expect(textPanel.getByLabelText('原始文字')).toHaveValue('视频子模式原文');
+    fireEvent.click(textPanel.getByRole('tab', { name: '润色结果' }));
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+    expect(audioPanel.getByLabelText('所选音频')).toBe(selectedAudio);
+    expect(audioPanel.getByText('video-submode.mp3')).toBeInTheDocument();
+    expect(audioPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '编辑后的音频子模式润色文本',
+    );
+    expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(9);
+    fireEvent.click(audioPanel.getByRole('tab', { name: '原文' }));
+    expect(audioPanel.getByLabelText('动作/画面提示词')).toHaveValue('音频子模式原文');
+    fireEvent.click(audioPanel.getByRole('tab', { name: '润色结果' }));
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+      expect(audioPanel.getByLabelText('所选音频')).toBe(selectedAudio);
+      expect(audioPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+        '编辑后的音频子模式润色文本',
+      );
+      expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(9);
+    }
+
+    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    expect(textPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '编辑后的视频子模式润色文本',
+    );
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(11);
+  });
+
   test('uses works:list for real running and done states instead of inventing completion', async () => {
     smo.works.list.mockResolvedValue([
       createWork({ id: 'job-real', status: 'running' }),
@@ -1210,7 +1364,7 @@ describe('录音', () => {
     expect(smo.recordings.save).toHaveBeenCalledTimes(2);
   });
 
-  test('录音保存中隐藏仍接受迟到路径并在返回面板后保留录音', async () => {
+  test('视频子模式隐藏时录音保存中仍接受迟到路径并在返回面板后保留录音', async () => {
     let resolveSave!: (path: string) => void;
     smo.recordings.save.mockImplementation(
       () =>

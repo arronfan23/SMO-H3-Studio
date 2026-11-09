@@ -89,4 +89,34 @@ describe('responsive studio CSS contracts', () => {
     const inset = Number(mainRule!.match(/margin-right:\s*(\d+)px/)?.[1]);
     expect(inset).toBeGreaterThanOrEqual(eastWidth);
   });
+
+  test('制作台模特参考图保持原始比例，数字模特卡片继续裁切', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+    const previewRule = css.match(/\.person-preview \.avatar-image\s*\{([^}]*)\}/)?.[1];
+    const previewImageRule = css.match(
+      /\.person-preview \.avatar-image img\s*\{([^}]*)\}/,
+    )?.[1];
+    const cardRule = css.match(/\.avatar-item \.avatar-image\s*\{([^}]*)\}/)?.[1];
+
+    expect(previewRule).toBeDefined();
+    expect(previewRule).toContain('aspect-ratio: auto');
+    expect(previewRule).toContain('min-height: 180px');
+    expect(previewRule).toContain('overflow: visible');
+    expect(previewRule).toContain('max-height: none');
+
+    expect(previewImageRule).toBeDefined();
+    for (const declaration of [
+      'width: 100%',
+      'max-width: fit-content',
+      'height: auto',
+      'max-height: 65vh',
+      'object-fit: contain',
+    ]) {
+      expect(previewImageRule).toContain(declaration);
+    }
+
+    expect(cardRule).toBeDefined();
+    expect(cardRule).toContain('aspect-ratio: 1');
+    expect(css).toMatch(/\.avatar-image img\s*\{[^}]*object-fit:\s*cover/);
+  });
 });
