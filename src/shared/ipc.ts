@@ -123,6 +123,7 @@ const generationRequestSchema = z
     prompt: nonEmptyString,
     duration: positiveFiniteNumber,
     seed: z.number().int().nonnegative(),
+    steps: z.number().int().min(1).max(100),
     audioPath: nonEmptyString.optional(),
     trimStart: nonNegativeFiniteNumber.optional(),
     retryOf: z.string().optional(),

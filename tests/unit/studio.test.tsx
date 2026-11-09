@@ -817,6 +817,7 @@ describe('text-to-video studio', () => {
         prompt: '用户最终确认的镜头文本',
         duration: 9,
         seed: 42,
+        steps: 8,
       }),
     );
     expect(await screen.findByText('job-1')).toBeInTheDocument();
@@ -1009,6 +1010,7 @@ describe('audio digital human studio', () => {
       trimStart: 1.25,
       duration: 6,
       seed: 42,
+      steps: 6,
     });
     expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
   });
@@ -1558,6 +1560,7 @@ describe('audio digital human studio', () => {
         trimStart: 1.25,
         duration: 6,
         seed: 7,
+        steps: 6,
       }),
     );
     await waitFor(() =>
@@ -1730,6 +1733,7 @@ describe('generation options and hardware apply', () => {
       prompt: '默认选项直接生成',
       duration: 8,
       seed: 42,
+      steps: 8,
     });
   });
 

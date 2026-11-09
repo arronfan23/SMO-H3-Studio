@@ -237,6 +237,7 @@ export function AudioDigitalHumanForm({
         trimStart,
         duration: clip.duration,
         seed,
+        steps: 6,
       });
       setJobId(result.id);
     } catch (startError) {

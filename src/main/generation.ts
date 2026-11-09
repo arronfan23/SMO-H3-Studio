@@ -98,6 +98,7 @@ function sanitizeRequest(request: GenerationRequest): GenerationRequest {
     prompt: request.prompt,
     duration: request.duration,
     seed: request.seed,
+    steps: request.steps,
   };
   if (request.audioPath !== undefined) {
     sanitized.audioPath = request.audioPath;
@@ -120,6 +121,9 @@ function validateRequest(request: GenerationRequest): void {
   }
   if (!Number.isInteger(request.seed) || request.seed < 0) {
     throw new Error('Generation seed must be a non-negative integer');
+  }
+  if (!Number.isInteger(request.steps) || request.steps < 1 || request.steps > 100) {
+    throw new Error('Generation steps must be an integer between 1 and 100');
   }
   if (request.mode === 'text') {
     if (!Number.isFinite(request.duration) || request.duration < 4 || request.duration > 15) {
@@ -531,6 +535,7 @@ export function createGenerationHandler(
                 [WORKFLOW_PATHS.text.prompt]: request.prompt,
                 [WORKFLOW_PATHS.text.duration]: request.duration,
                 [WORKFLOW_PATHS.text.seed]: request.seed,
+                [WORKFLOW_PATHS.text.steps]: request.steps,
                 [WORKFLOW_PATHS.text.output]: `SMO-H3/${workId}`,
               }
             : {
@@ -540,6 +545,7 @@ export function createGenerationHandler(
                 [WORKFLOW_PATHS.audio.trimStart]: request.trimStart ?? 0,
                 [WORKFLOW_PATHS.audio.trimDuration]: request.duration,
                 [WORKFLOW_PATHS.audio.seed]: request.seed,
+                [WORKFLOW_PATHS.audio.steps]: request.steps,
                 [WORKFLOW_PATHS.audio.output]: `SMO-H3/${workId}`,
               };
         const workflow = applySparkAcceleration(
@@ -624,7 +630,11 @@ export interface RetryHandlerOptions {
   startGeneration: GenerationHandler;
 }
 
-function isRetryableRequest(value: unknown): value is GenerationRequest {
+type RetryableRequest = Omit<GenerationRequest, 'steps'> & {
+  steps?: GenerationRequest['steps'];
+};
+
+function isRetryableRequest(value: unknown): value is RetryableRequest {
   if (typeof value !== 'object' || value === null) {
     return false;
   }
@@ -652,6 +662,15 @@ function isRetryableRequest(value: unknown): value is GenerationRequest {
   ) {
     return false;
   }
+  if (
+    request.steps !== undefined &&
+    (typeof request.steps !== 'number' ||
+      !Number.isInteger(request.steps) ||
+      request.steps < 1 ||
+      request.steps > 100)
+  ) {
+    return false;
+  }
   if (request.audioPath !== undefined) {
     if (typeof request.audioPath !== 'string' || request.audioPath.trim().length === 0) {
       return false;
@@ -676,7 +695,7 @@ function isRetryableRequest(value: unknown): value is GenerationRequest {
 }
 
 function isRetryableMetadata(value: unknown): value is {
-  request: GenerationRequest;
+  request: RetryableRequest;
   workflowVersion: string;
 } {
   if (typeof value !== 'object' || value === null) {
@@ -707,7 +726,11 @@ export function createRetryHandler(
       throw new Error('Work metadata is missing request or workflowVersion');
     }
 
-    const { request } = work.metadata;
+    const storedRequest = work.metadata.request;
+    const request: GenerationRequest = {
+      ...storedRequest,
+      steps: storedRequest.steps ?? (storedRequest.mode === 'text' ? 8 : 6),
+    };
     const avatar = store.listAvatars().find((candidate) => candidate.id === request.avatarId);
     if (avatar === undefined) {
       throw new Error(`Avatar not found: ${request.avatarId}`);

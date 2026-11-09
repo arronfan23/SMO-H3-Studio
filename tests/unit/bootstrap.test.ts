@@ -50,6 +50,7 @@ const generationRequest = {
   prompt: 'A quiet studio shot.',
   duration: 8,
   seed: 42,
+  steps: 8,
 } as const;
 
 const cleanups: Array<() => void | Promise<void>> = [];

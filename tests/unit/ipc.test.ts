@@ -78,6 +78,7 @@ const generationRequest = {
   prompt: 'A quiet studio shot.',
   duration: 8,
   seed: 42,
+  steps: 12,
 } as const;
 
 const polishRequest = {
@@ -802,6 +803,36 @@ describe('main-process IPC handlers', () => {
       status: 'pending',
     });
     expect(received).toEqual(generationRequest);
+  });
+
+  test('accepts video steps and forwards the request unchanged', async () => {
+    const startGeneration = vi.fn(async () => ({ id: 'job-steps' }));
+    const harness = await createHarness({ startGeneration });
+    const video = { ...generationRequest, steps: 12 };
+
+    await expect(harness.invoke('jobs:start', video)).resolves.toEqual({
+      id: 'job-steps',
+    });
+    expect(startGeneration).toHaveBeenCalledWith(video);
+
+    for (const steps of [0, 101, 1.5]) {
+      await expect(
+        harness.invoke('jobs:start', { ...video, steps }),
+      ).rejects.toThrow();
+    }
+    await expect(
+      harness.invoke('jobs:start', { ...video, unknown: true }),
+    ).rejects.toThrow();
+    expect(startGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  test('requires steps in new generation requests', async () => {
+    const harness = await createHarness();
+    const { steps: _steps, ...requestWithoutSteps } = generationRequest;
+
+    await expect(
+      harness.invoke('jobs:start', requestWithoutSteps),
+    ).rejects.toThrow();
   });
 
   test('cancels only the requested job through the real JobCoordinator', async () => {

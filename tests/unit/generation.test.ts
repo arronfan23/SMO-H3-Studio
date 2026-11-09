@@ -243,6 +243,7 @@ async function createHarness(
     prompt: 'A quiet studio shot.',
     duration: 8,
     seed: 42,
+    steps: 12,
   };
   const audioRequest: GenerationRequest = {
     ...textRequest,
@@ -250,6 +251,7 @@ async function createHarness(
     prompt: 'Natural lip movement and a steady camera.',
     duration: 6.5,
     seed: 99,
+    steps: 9,
     audioPath,
   };
 
@@ -596,6 +598,18 @@ describe('GenerationHandler execution state metadata', () => {
 });
 
 describe('GenerationHandler workflows', () => {
+  test.each([0, 101, 1.5])(
+    'rejects invalid video steps %s before queueing',
+    async (steps) => {
+      const harness = await createHarness();
+
+      await expect(
+        harness.startGeneration({ ...harness.textRequest, steps }),
+      ).rejects.toThrow(/steps/i);
+      expect(harness.store.listWorks()).toEqual([]);
+    },
+  );
+
   test('runs the complete text workflow and records the real mp4 output', async () => {
     const harness = await createHarness();
     const workflowPath = join(workflowsDirectory, 'text-ref2va.json');
@@ -619,6 +633,7 @@ describe('GenerationHandler workflows', () => {
     expected['136'].inputs.prompt = request.prompt;
     expected['132'].inputs.value = 12;
     expected['269'].inputs.seed = 123;
+    expected['124'].inputs.steps = request.steps;
     expected['180'].inputs.filename_prefix = `SMO-H3/${result.id}`;
     expect(harness.comfy.submissions).toEqual([expected]);
     expect(harness.comfy.waits).toEqual(['prompt-1']);
@@ -686,6 +701,7 @@ describe('GenerationHandler workflows', () => {
       expected['85'].inputs.start_index = expectedStart;
       expected['85'].inputs.duration = request.duration;
       expected['86'].inputs.seed = request.seed;
+      expected['51'].inputs.steps = request.steps;
       expected['65'].inputs.filename_prefix = `SMO-H3/${result.id}`;
       expect(harness.comfy.submissions).toEqual([expected]);
       expect(work.status).toBe('done');
@@ -882,22 +898,23 @@ describe('GenerationHandler Spark acceleration', () => {
     hardwareFingerprint: { cudaComputeCapability: '12.0' },
   };
 
-  test('submits the accelerated text graph and records Spark metadata', async () => {
+  test('submits the accelerated text graph with twelve scheduler steps and records Spark metadata', async () => {
     const harness = await createHarness({ acceleration: sm120 });
 
     const result = await harness.startGeneration(harness.textRequest);
     const work = await waitForWork(harness.store, result.id, 'done');
 
     const graph = harness.comfy.submissions[0] as Record<string, any>;
+    expect(graph['124'].inputs.steps).toBe(12);
     expect(graph.smo_spark).toMatchObject({
       class_type: 'MiniMaxH3SparkAttentionSM120',
-      inputs: { model: ['153', 0], steps: 8 },
+      inputs: { model: ['153', 0], steps: 12 },
     });
     expect(graph['269'].inputs.low_res_model).toEqual(['smo_spark', 0]);
     expect(work.metadata?.acceleration).toBe('spark-sm120');
   });
 
-  test('submits the accelerated audio graph with six scheduler steps', async () => {
+  test('submits the accelerated audio graph with nine scheduler steps', async () => {
     const harness = await createHarness({ acceleration: sm120 });
     harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'audio.mp4' })];
 
@@ -905,9 +922,10 @@ describe('GenerationHandler Spark acceleration', () => {
     await waitForWork(harness.store, result.id, 'done');
 
     const graph = harness.comfy.submissions[0] as Record<string, any>;
+    expect(graph['51'].inputs.steps).toBe(9);
     expect(graph.smo_spark).toMatchObject({
       class_type: 'MiniMaxH3SparkAttentionSM120',
-      inputs: { model: ['62', 0], steps: 6 },
+      inputs: { model: ['62', 0], steps: 9 },
     });
     expect(graph['86'].inputs.low_res_model).toEqual(['smo_spark', 0]);
   });
@@ -1512,6 +1530,49 @@ describe('GenerationHandler failures and cancellation', () => {
 
 
 describe('GenerationHandler retry', () => {
+  test.each([
+    { mode: 'text', expectedSteps: 8, schedulerId: '124' },
+    { mode: 'audio', expectedSteps: 6, schedulerId: '51' },
+  ] as const)(
+    'retries legacy $mode request metadata with $expectedSteps steps',
+    async ({ mode, expectedSteps, schedulerId }) => {
+      const harness = await createHarness();
+      const source = mode === 'text' ? harness.textRequest : harness.audioRequest;
+      const legacyRequest: Partial<GenerationRequest> = { ...source };
+      delete legacyRequest.steps;
+      if (mode === 'audio') {
+        harness.comfy.outputs = [
+          outputFile({ nodeId: '65', filename: 'legacy-audio.mp4' }),
+        ];
+      }
+      const original = harness.store.addWork({
+        id: `legacy-${mode}-steps`,
+        avatarId: harness.avatar.id,
+        mode,
+        outputPath: null,
+        status: 'failed',
+        metadata: {
+          request: legacyRequest as GenerationRequest,
+          workflowVersion:
+            mode === 'text' ? 'text-ref2va.json' : 'audio-digital-human.json',
+        },
+      });
+
+      const retry = await harness.retryWork(original.id);
+      const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+      const graph = harness.comfy.submissions[0] as Record<
+        string,
+        { inputs: Record<string, unknown> }
+      >;
+      expect(graph[schedulerId].inputs.steps).toBe(expectedSteps);
+      expect(retryWork.metadata?.request?.steps).toBe(expectedSteps);
+      expect(harness.store.getWork(original.id)?.metadata?.request).not.toHaveProperty(
+        'steps',
+      );
+    },
+  );
+
   test('retries legacy subtitle metadata without injecting subtitle guidance', async () => {
     const harness = await createHarness();
     const legacyRequest = {
@@ -1642,6 +1703,9 @@ describe('GenerationHandler retry', () => {
     { scenario: 'empty prompt', request: { mode: 'text', avatarId: 'avatar-1', prompt: '  ', duration: 8, seed: 1 } },
     { scenario: 'invalid duration', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: -1, seed: 1 } },
     { scenario: 'invalid seed', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1.5 } },
+    { scenario: 'zero steps', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, steps: 0 } },
+    { scenario: 'too many steps', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, steps: 101 } },
+    { scenario: 'fractional steps', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, steps: 1.5 } },
     { scenario: 'invalid audioPath type', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 123 } },
     { scenario: 'invalid trimStart', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', trimStart: -1 } },
     { scenario: 'invalid subtitles type', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, subtitles: 'yes' } },

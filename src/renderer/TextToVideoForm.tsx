@@ -118,6 +118,7 @@ export function TextToVideoForm({
         prompt,
         duration: resolvedDuration,
         seed,
+        steps: 8,
       });
       setJobId(result.id);
     } catch (startError) {

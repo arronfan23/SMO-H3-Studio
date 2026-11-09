@@ -153,7 +153,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     return works.filter((work) => work.status === activeFilter);
   }, [works, activeFilter]);
 
-  const avatarName = (id: string): string =>
+  const avatarName = (id: string | null): string =>
     avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
 
   const workTitle = (work: Work): string =>

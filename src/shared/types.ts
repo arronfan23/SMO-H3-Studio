@@ -1,15 +1,20 @@
 export type VideoMode = 'text' | 'audio';
+export type WorkMode = VideoMode | 'speech' | 'image';
+export type AudioOutputFormat = 'wav' | 'mp3' | 'flac' | 'm4a';
 
-export interface GenerationRequest {
+export interface VideoGenerationRequest {
   mode: VideoMode;
   avatarId: string;
   prompt: string;
   duration: number;
   seed: number;
+  steps: number;
   audioPath?: string;
   trimStart?: number;
   retryOf?: string;
 }
+
+export type GenerationRequest = VideoGenerationRequest;
 
 export interface GenerationStartResult {
   /** Identifies a queued job; generation may still be running. */
@@ -66,8 +71,8 @@ export interface WorkMetadata {
 
 export interface Work {
   id: string;
-  avatarId: string;
-  mode: VideoMode;
+  avatarId: string | null;
+  mode: WorkMode;
   outputPath: string | null;
   status: WorkStatus;
   createdAt: string;

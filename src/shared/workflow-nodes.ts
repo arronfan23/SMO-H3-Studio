@@ -4,6 +4,7 @@ export const WORKFLOW_NODES = {
     prompt: '136',
     duration: '132',
     seed: '269',
+    steps: '124',
     output: '180',
   },
   audio: {
@@ -12,6 +13,7 @@ export const WORKFLOW_NODES = {
     prompt: '42',
     trim: '85',
     seed: '86',
+    steps: '51',
     output: '65',
   },
 } as const;
@@ -22,6 +24,7 @@ export const WORKFLOW_PATHS = {
     prompt: `${WORKFLOW_NODES.text.prompt}.inputs.prompt`,
     duration: `${WORKFLOW_NODES.text.duration}.inputs.value`,
     seed: `${WORKFLOW_NODES.text.seed}.inputs.seed`,
+    steps: `${WORKFLOW_NODES.text.steps}.inputs.steps`,
     output: `${WORKFLOW_NODES.text.output}.inputs.filename_prefix`,
   },
   audio: {
@@ -31,6 +34,7 @@ export const WORKFLOW_PATHS = {
     trimStart: `${WORKFLOW_NODES.audio.trim}.inputs.start_index`,
     trimDuration: `${WORKFLOW_NODES.audio.trim}.inputs.duration`,
     seed: `${WORKFLOW_NODES.audio.seed}.inputs.seed`,
+    steps: `${WORKFLOW_NODES.audio.steps}.inputs.steps`,
     output: `${WORKFLOW_NODES.audio.output}.inputs.filename_prefix`,
   },
 } as const;
