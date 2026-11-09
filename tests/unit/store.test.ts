@@ -28,6 +28,66 @@ function makeTemporaryDatabasePath(): string {
   return join(directory, 'library.db');
 }
 
+function createLegacyDatabase(databasePath: string): string {
+  const database = new DatabaseSync(databasePath);
+  const createdAt = '2026-10-25T08:00:00.000Z';
+  let worksSchema = '';
+
+  try {
+    database.exec(`
+      CREATE TABLE avatars (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        photoPath TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      );
+      CREATE TABLE works (
+        id TEXT PRIMARY KEY NOT NULL,
+        avatarId TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('text', 'audio')),
+        outputPath TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
+        createdAt TEXT NOT NULL,
+        title TEXT,
+        completedAt TEXT,
+        promptId TEXT,
+        metadata TEXT,
+        error TEXT,
+        FOREIGN KEY (avatarId) REFERENCES avatars(id) ON DELETE RESTRICT
+      );
+    `);
+    database
+      .prepare('INSERT INTO avatars (id, name, photoPath, createdAt) VALUES (?, ?, ?, ?)')
+      .run('avatar-legacy', 'Legacy avatar', 'avatars/legacy.jpg', createdAt);
+    database
+      .prepare(
+        `INSERT INTO works
+         (id, avatarId, mode, outputPath, status, createdAt, title, completedAt, promptId, metadata, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'legacy-text',
+        'avatar-legacy',
+        'text',
+        'works/legacy.mp4',
+        'done',
+        createdAt,
+        '旧作品标题',
+        '2026-10-25T08:05:00.000Z',
+        'prompt-legacy',
+        JSON.stringify({ workflowVersion: 'legacy-text.json', note: '保留' }),
+        'Legacy error',
+      );
+    worksSchema = database
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'works'")
+      .get()?.sql as string;
+  } finally {
+    database.close();
+  }
+
+  return worksSchema;
+}
+
 function makeWork(avatarId: string, id = 'work-1'): NewWork {
   return {
     id,
@@ -489,6 +549,190 @@ describe('work rename', () => {
 });
 
 describe('schema initialization', () => {
+  test('migrates legacy 作品 fields and supports speech and image works', () => {
+    const databasePath = makeTemporaryDatabasePath();
+    createLegacyDatabase(databasePath);
+
+    withStore((store) => {
+      expect(store.getWork('legacy-text')).toEqual({
+        id: 'legacy-text',
+        avatarId: 'avatar-legacy',
+        mode: 'text',
+        outputPath: 'works/legacy.mp4',
+        status: 'done',
+        createdAt: '2026-10-25T08:00:00.000Z',
+        title: '旧作品标题',
+        completedAt: '2026-10-25T08:05:00.000Z',
+        promptId: 'prompt-legacy',
+        metadata: { workflowVersion: 'legacy-text.json', note: '保留' },
+        error: 'Legacy error',
+      });
+      expect(() => store.deleteAvatar('avatar-legacy')).toThrow(
+        /cannot be deleted while works exist/i,
+      );
+
+      const speech = store.addWork({
+        id: 'speech',
+        avatarId: null,
+        mode: 'speech',
+        outputPath: null,
+        status: 'running',
+      });
+      const image = store.addWork({
+        id: 'image',
+        avatarId: null,
+        mode: 'image',
+        outputPath: null,
+        status: 'done',
+      });
+
+      expect(store.getWork('speech')).toEqual(speech);
+      expect(store.getWork('image')).toEqual(image);
+      expect(speech.avatarId).toBeNull();
+      expect(image.avatarId).toBeNull();
+    }, databasePath);
+
+    const migrated = new DatabaseSync(databasePath);
+    try {
+      migrated.exec('PRAGMA foreign_keys = ON');
+      expect(migrated.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      expect(() =>
+        migrated.prepare('DELETE FROM avatars WHERE id = ?').run('avatar-legacy'),
+      ).toThrow(/FOREIGN KEY constraint failed/i);
+      expect(
+        migrated.prepare("SELECT COUNT(*) AS count FROM works WHERE id = 'legacy-text'").get(),
+      ).toEqual({ count: 1 });
+    } finally {
+      migrated.close();
+    }
+  });
+
+  test('rolls back a failed 作品 migration without replacing the old table', () => {
+    const databasePath = makeTemporaryDatabasePath();
+    const originalSchema = createLegacyDatabase(databasePath);
+    const conflict = new DatabaseSync(databasePath);
+    try {
+      conflict.exec(`
+        CREATE TABLE works_media (id TEXT PRIMARY KEY);
+        INSERT INTO works_media (id) VALUES ('existing-table');
+      `);
+    } finally {
+      conflict.close();
+    }
+
+    let unexpectedlyOpened: Store | undefined;
+    try {
+      expect(() => {
+        unexpectedlyOpened = new Store(databasePath);
+      }).toThrow();
+    } finally {
+      unexpectedlyOpened?.close();
+    }
+
+    const database = new DatabaseSync(databasePath);
+    try {
+      expect(
+        database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'works'").get(),
+      ).toEqual({ sql: originalSchema });
+      expect(
+        database.prepare('SELECT * FROM works WHERE id = ?').get('legacy-text'),
+      ).toMatchObject({
+        avatarId: 'avatar-legacy',
+        mode: 'text',
+        title: '旧作品标题',
+        completedAt: '2026-10-25T08:05:00.000Z',
+        promptId: 'prompt-legacy',
+        error: 'Legacy error',
+      });
+      expect(database.prepare('SELECT id FROM works_media').all()).toEqual([
+        { id: 'existing-table' },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  test('rejects legacy 作品 with foreign key violations before schema migration', () => {
+    const databasePath = makeTemporaryDatabasePath();
+    const originalSchema = createLegacyDatabase(databasePath);
+    const orphan = new DatabaseSync(databasePath);
+    try {
+      orphan.exec('PRAGMA foreign_keys = OFF');
+      orphan
+        .prepare('UPDATE works SET avatarId = ? WHERE id = ?')
+        .run('missing-avatar', 'legacy-text');
+      // The conflicting destination proves that the FK check precedes any DDL.
+      orphan.exec('CREATE TABLE works_media (id TEXT PRIMARY KEY)');
+    } finally {
+      orphan.close();
+    }
+
+    expect(() => new Store(databasePath)).toThrow(/foreign key check/i);
+
+    const database = new DatabaseSync(databasePath);
+    try {
+      expect(
+        database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'works'").get(),
+      ).toEqual({ sql: originalSchema });
+      expect(database.prepare('SELECT avatarId FROM works WHERE id = ?').get('legacy-text')).toEqual({
+        avatarId: 'missing-avatar',
+      });
+      expect(
+        database.prepare('SELECT COUNT(*) AS count FROM works_media').get(),
+      ).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  test('creates the four-mode 作品 schema directly without a migration table', () => {
+    const databasePath = makeTemporaryDatabasePath();
+
+    withStore((store) => {
+      store.addWork({
+        id: 'new-speech',
+        avatarId: null,
+        mode: 'speech',
+        outputPath: null,
+        status: 'running',
+      });
+      store.addWork({
+        id: 'new-image',
+        avatarId: null,
+        mode: 'image',
+        outputPath: null,
+        status: 'done',
+      });
+      expect(store.listWorks().map((work) => work.id).sort()).toEqual([
+        'new-image',
+        'new-speech',
+      ]);
+    }, databasePath);
+
+    const database = new DatabaseSync(databasePath);
+    try {
+      expect(
+        database.prepare("SELECT name FROM sqlite_master WHERE name = 'works_media'").all(),
+      ).toEqual([]);
+      expect(
+        database
+          .prepare('PRAGMA table_info(works)')
+          .all()
+          .find((column) => column.name === 'avatarId'),
+      ).toMatchObject({ notnull: 0 });
+      expect(
+        database.prepare("SELECT sql FROM sqlite_master WHERE name = 'works'").get()?.sql,
+      ).toMatch(/'speech'.*'image'/);
+      expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      database.close();
+    }
+
+    withStore((store) => {
+      expect(store.listWorks()).toHaveLength(2);
+    }, databasePath);
+  });
+
   test('migrates the original works table without losing existing rows', () => {
     const databasePath = makeTemporaryDatabasePath();
     const database = new DatabaseSync(databasePath);

@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
+import type { WorkMode } from '../shared/types';
 import type { Store } from './store';
 
 const execFileAsync = promisify(execFile);
@@ -20,6 +21,32 @@ const ASSET_EXTENSIONS = new Set([
   '.ogg',
   '.m4a',
 ]);
+
+const OUTPUT_RULES: Record<
+  WorkMode,
+  { extensions: ReadonlySet<string>; description: string; mediaType: string }
+> = {
+  text: {
+    extensions: new Set(['.mp4', '.webm']),
+    description: 'an MP4 or WebM video',
+    mediaType: 'video',
+  },
+  audio: {
+    extensions: new Set(['.mp4', '.webm']),
+    description: 'an MP4 or WebM video',
+    mediaType: 'video',
+  },
+  speech: {
+    extensions: new Set(['.wav', '.mp3', '.flac', '.m4a']),
+    description: 'a WAV, MP3, FLAC, or M4A audio file',
+    mediaType: 'audio',
+  },
+  image: {
+    extensions: new Set(['.png', '.jpg', '.jpeg', '.webp']),
+    description: 'a PNG, JPG, JPEG, or WebP image',
+    mediaType: 'image',
+  },
+};
 
 // Deletes files through an open handle so the bytes removed are exactly the
 // file that passed validation, closing the check-to-delete TOCTOU window.
@@ -211,17 +238,18 @@ export class WorkService {
       throw new Error('Only completed or failed works can be deleted');
     }
     if (work.outputPath !== null && work.outputPath.trim().length > 0) {
-      await this.removeOutput(work.id, work.outputPath);
+      await this.removeOutput(work.id, work.mode, work.outputPath);
     }
     this.store.deleteWork(id);
   }
 
-  private async removeOutput(workId: string, filePath: string): Promise<void> {
+  private async removeOutput(workId: string, mode: WorkMode, filePath: string): Promise<void> {
     const root = resolve(this.outputDirectory);
     const candidate = resolve(filePath);
     assertInside(root, candidate);
-    if (!['.mp4', '.webm'].includes(extname(candidate).toLowerCase())) {
-      throw new Error('Work output must be an MP4 or WebM video');
+    const outputRule = OUTPUT_RULES[mode];
+    if (!outputRule.extensions.has(extname(candidate).toLowerCase())) {
+      throw new Error(`Work output must be ${outputRule.description}`);
     }
 
     const directory = dirname(candidate);
@@ -259,7 +287,7 @@ export class WorkService {
       if (!stats.isFile() || stats.isSymbolicLink()) {
         throw new Error(
           isOutput
-            ? 'Work output must be a regular video file'
+            ? `Work output must be a regular ${outputRule.mediaType} file`
             : 'Work output asset must be a regular file, not a symbolic link or directory',
         );
       }

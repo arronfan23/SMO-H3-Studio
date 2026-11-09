@@ -41,6 +41,33 @@ describe('responsive studio CSS contracts', () => {
     expect(mediaRule).not.toContain('var(--radius-control)');
   });
 
+  test('keeps work audio within the available width', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+    const audioRule = css.match(/\.work-item audio\s*\{([^}]*)\}/)?.[1];
+
+    expect(audioRule).toBeDefined();
+    expect(audioRule).toContain('width: 100%');
+    expect(audioRule).toContain('max-width: 100%');
+  });
+
+  test('contains high-resolution and tall work images without overflow', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+    const imageRule = css.match(/\.work-item img\s*\{([^}]*)\}/)?.[1];
+
+    expect(imageRule).toBeDefined();
+    for (const declaration of [
+      'display: block',
+      'width: auto',
+      'max-width: 100%',
+      'height: auto',
+      'max-height: 70vh',
+      'object-fit: contain',
+      'margin-inline: auto',
+    ]) {
+      expect(imageRule).toContain(declaration);
+    }
+  });
+
   test('insets the main-content scrollbar clear of the east resize hot zone', async () => {
     const css = await readFile(stylesUrl, 'utf8');
 

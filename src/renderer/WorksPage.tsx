@@ -1,29 +1,46 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { ExternalLink, FolderOpen, Pencil, Play, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react';
-import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
+import type { Avatar, Work, WorkMode, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { WorkProgressBar } from './WorkProgressBar';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName, formatElapsedDuration, parentPath, readWorkExecution, readWorkProgress } from './ui';
 
-const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
+type WorkFilter = 'all' | WorkMode | Exclude<WorkStatus, 'pending'>;
+
+const FILTERS: { id: WorkFilter; label: string }[] = [
   { id: 'all', label: '全部' },
+  { id: 'speech', label: '语音' },
+  { id: 'image', label: '图像' },
   { id: 'text', label: '文字生视频' },
   { id: 'audio', label: '音频数字人' },
-  { id: 'pending', label: '等待中' },
   { id: 'running', label: '运行中' },
   { id: 'done', label: '已完成' },
   { id: 'failed', label: '失败' },
 ];
 
-function WorkVideo({ work }: { work: Work }) {
+const WORK_MODE_LABELS: Record<WorkMode, string> = {
+  speech: '语音',
+  image: '图像',
+  text: '文字生视频',
+  audio: '音频数字人',
+};
+
+function WorkMedia({ work }: { work: Work }) {
   const { url, error } = useMediaUrl(work.outputPath);
+  const mediaLabel = work.mode === 'speech' ? '语音' : work.mode === 'image' ? '图像' : '视频';
   if (error) {
-    return <p className="form-error" role="alert">视频读取失败：{error}</p>;
+    return <p className="form-error" role="alert">{mediaLabel}读取失败：{error}</p>;
   }
   if (url === null) {
-    return <div className="video-placeholder">正在读取视频…</div>;
+    return <div className="video-placeholder">正在读取{mediaLabel}…</div>;
+  }
+  if (work.mode === 'speech') {
+    return <audio aria-label={`作品语音 ${work.id}`} controls preload="metadata" src={url} />;
+  }
+  if (work.mode === 'image') {
+    return <img aria-label={`作品图像 ${work.id}`} alt={`作品图像 ${work.id}`} src={url} />;
   }
   return <video aria-label={`作品视频 ${work.id}`} controls preload="metadata" src={url} />;
 }
@@ -86,7 +103,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeFilter, setActiveFilter] = useState<'all' | VideoMode | WorkStatus>('all');
+  const [activeFilter, setActiveFilter] = useState<WorkFilter>('all');
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [retryError, setRetryError] = useState<Record<string, string>>({});
   const [deleteTarget, setDeleteTarget] = useState<Work | null>(null);
@@ -147,7 +164,12 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     if (activeFilter === 'all') {
       return works;
     }
-    if (activeFilter === 'text' || activeFilter === 'audio') {
+    if (
+      activeFilter === 'text' ||
+      activeFilter === 'audio' ||
+      activeFilter === 'speech' ||
+      activeFilter === 'image'
+    ) {
       return works.filter((work) => work.mode === activeFilter);
     }
     return works.filter((work) => work.status === activeFilter);
@@ -159,7 +181,31 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   const workTitle = (work: Work): string =>
     work.title !== null && work.title.trim().length > 0
       ? work.title
-      : avatarName(work.avatarId);
+      : work.mode === 'speech'
+        ? '语音作品'
+        : work.mode === 'image'
+          ? '图像作品'
+          : avatarName(work.avatarId);
+
+  const deleteTargetOutputPath = deleteTarget?.outputPath ?? null;
+  const deleteTargetDescription =
+    deleteTarget === null ||
+    deleteTargetOutputPath === null ||
+    deleteTargetOutputPath.trim().length === 0
+      ? null
+      : (() => {
+          const owner =
+            deleteTarget.mode === 'text' || deleteTarget.mode === 'audio'
+              ? `模特“${avatarName(deleteTarget.avatarId)}”的`
+              : '';
+          const mediaType =
+            deleteTarget.mode === 'speech'
+              ? '音频文件'
+              : deleteTarget.mode === 'image'
+                ? '图像文件'
+                : '视频文件';
+          return `确定要删除${owner}作品“${fileName(deleteTargetOutputPath)}”吗？作品记录和${mediaType}将一起删除，此操作不可撤销。`;
+        })();
 
   const retry = async (work: Work): Promise<void> => {
     setRetrying((current) => new Set(current).add(work.id));
@@ -365,6 +411,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
           <button
             key={filter.id}
             type="button"
+            aria-pressed={activeFilter === filter.id}
             className={activeFilter === filter.id ? 'button button-primary' : 'button button-secondary'}
             onClick={() => setActiveFilter(filter.id)}
           >
@@ -386,7 +433,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 <div>
                   <h3>{workTitle(work)}</h3>
                   <p>
-                    {work.mode === 'text' ? '文字生视频' : '音频数字人'} · {new Date(work.createdAt).toLocaleString('zh-CN')}
+                    {WORK_MODE_LABELS[work.mode]} · {new Date(work.createdAt).toLocaleString('zh-CN')}
                     {completion !== null &&
                       ` · 完成于 ${new Date(completion.completedAt).toLocaleString('zh-CN')} · 耗时 ${completion.duration}`}
                   </p>
@@ -405,7 +452,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 <p className="form-error" role="alert">{work.error}</p>
               )}
               {retryError[work.id] && <p className="form-error" role="alert">{retryError[work.id]}</p>}
-              {work.status === 'done' && work.outputPath && <WorkVideo work={work} />}
+              {work.status === 'done' && work.outputPath && <WorkMedia work={work} />}
               <div className="work-actions">
                 <button
                   className="button button-secondary"
@@ -475,9 +522,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
           <div className="modal-card">
             <h3>删除作品</h3>
             {deleteTarget.outputPath !== null && deleteTarget.outputPath.trim().length > 0 ? (
-              <p>
-                {`确定要删除模特“${avatarName(deleteTarget.avatarId)}”的作品“${fileName(deleteTarget.outputPath)}”吗？作品记录和视频文件将一起删除，此操作不可撤销。`}
-              </p>
+              <p>{deleteTargetDescription}</p>
             ) : deleteTarget.status === 'failed' ? (
               <p>这条失败记录将被删除，此操作不可撤销。</p>
             ) : (

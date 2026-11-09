@@ -91,6 +91,47 @@ afterEach(async () => {
 });
 
 describe('WorkService.deleteWork', () => {
+  test.each([
+    { mode: 'speech' as const, extension: 'wav' },
+    { mode: 'speech' as const, extension: 'mp3' },
+    { mode: 'speech' as const, extension: 'flac' },
+    { mode: 'speech' as const, extension: 'm4a' },
+    { mode: 'image' as const, extension: 'png' },
+    { mode: 'image' as const, extension: 'jpg' },
+    { mode: 'image' as const, extension: 'jpeg' },
+    { mode: 'image' as const, extension: 'webp' },
+  ])('deletes a $mode 作品 with .$extension media without touching source files', async ({
+    mode,
+    extension,
+  }) => {
+    const { directory, outputDirectory, store, service } = await createHarness();
+    const workId = `${mode}-${extension}`;
+    const outputPath = join(outputDirectory, `${workId}.${extension}`);
+    const associatedAsset = join(outputDirectory, `${workId}_cover.png`);
+    const referenceMedia = join(directory, `reference.${extension}`);
+    const avatarPhoto = join(directory, 'photo.png');
+    await Promise.all(
+      [outputPath, associatedAsset, referenceMedia, avatarPhoto].map(async (filePath) =>
+        writeFile(filePath, 'media'),
+      ),
+    );
+    store.addWork({
+      id: workId,
+      avatarId: null,
+      mode,
+      outputPath,
+      status: 'done',
+    });
+
+    await service.deleteWork(workId);
+
+    expect(existsSync(outputPath)).toBe(false);
+    expect(existsSync(associatedAsset)).toBe(false);
+    expect(existsSync(referenceMedia)).toBe(true);
+    expect(existsSync(avatarPhoto)).toBe(true);
+    expect(store.getWork(workId)).toBeNull();
+  });
+
   test('deletes a done work record and all associated assets, keeping unrelated files', async () => {
     const { directory, outputDirectory, store, service, avatarId } = await createHarness();
     const workId = 'done-work';
@@ -253,6 +294,36 @@ describe('WorkService.deleteWork', () => {
     expect(store.getWork(done.id)).not.toBeNull();
   });
 
+  test.each([
+    { mode: 'speech' as const, extension: 'wav' },
+    { mode: 'image' as const, extension: 'png' },
+  ])('refuses a symbolic $mode 作品 output without deleting its target', async ({
+    mode,
+    extension,
+  }) => {
+    const { directory, outputDirectory, store, service } = await createHarness();
+    const workId = `linked-${mode}`;
+    const outsideDirectory = join(directory, `${mode}-outside`);
+    const outsideTarget = join(outsideDirectory, `source.${extension}`);
+    const outputPath = join(outputDirectory, `${workId}.${extension}`);
+    await mkdir(outsideDirectory);
+    await writeFile(outsideTarget, 'source');
+    await symlink(
+      outsideDirectory,
+      outputPath,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    store.addWork({ id: workId, avatarId: null, mode, outputPath, status: 'done' });
+
+    await expect(service.deleteWork(workId)).rejects.toThrow(
+      /symbolic link|regular (?:audio|image) file/i,
+    );
+
+    expect(existsSync(outputPath)).toBe(true);
+    expect(existsSync(outsideTarget)).toBe(true);
+    expect(store.getWork(workId)).not.toBeNull();
+  });
+
   test.each(['pending', 'running'] as const)(
     'refuses to delete a %s work and keeps the record and video',
     async (status) => {
@@ -288,6 +359,25 @@ describe('WorkService.deleteWork', () => {
     await expect(service.deleteWork(outsideWork.id)).rejects.toThrow(/output directory/i);
     expect(existsSync(outsideVideo)).toBe(true);
     expect(store.getWork(outsideWork.id)).not.toBeNull();
+  });
+
+  test.each([
+    { mode: 'speech' as const, extension: 'mp3' },
+    { mode: 'image' as const, extension: 'webp' },
+  ])('refuses a $mode 作品 output outside the output directory', async ({
+    mode,
+    extension,
+  }) => {
+    const { directory, store, service } = await createHarness();
+    const workId = `outside-${mode}`;
+    const outputPath = join(directory, `${workId}.${extension}`);
+    await writeFile(outputPath, 'media');
+    store.addWork({ id: workId, avatarId: null, mode, outputPath, status: 'done' });
+
+    await expect(service.deleteWork(workId)).rejects.toThrow(/output directory/i);
+
+    expect(existsSync(outputPath)).toBe(true);
+    expect(store.getWork(workId)).not.toBeNull();
   });
 
   test('refuses to delete an output that escapes through a parent traversal', async () => {
@@ -339,6 +429,25 @@ describe('WorkService.deleteWork', () => {
     await expect(service.deleteWork(textWork.id)).rejects.toThrow(/mp4 or webm/i);
     expect(existsSync(textFile)).toBe(true);
     expect(store.getWork(textWork.id)).not.toBeNull();
+  });
+
+  test.each([
+    { mode: 'speech' as const, filename: 'speech.mp4', message: /audio/i },
+    { mode: 'image' as const, filename: 'image.mp3', message: /image/i },
+  ])('refuses media with the wrong extension for a $mode 作品', async ({
+    mode,
+    filename,
+    message,
+  }) => {
+    const { outputDirectory, store, service } = await createHarness();
+    const outputPath = join(outputDirectory, filename);
+    await writeFile(outputPath, 'wrong media type');
+    store.addWork({ id: mode, avatarId: null, mode, outputPath, status: 'done' });
+
+    await expect(service.deleteWork(mode)).rejects.toThrow(message);
+
+    expect(existsSync(outputPath)).toBe(true);
+    expect(store.getWork(mode)).not.toBeNull();
   });
 
   test('keeps the record and video when the file removal fails', async () => {

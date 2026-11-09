@@ -2141,6 +2141,62 @@ describe('generation options and hardware apply', () => {
 });
 
 describe('works and settings', () => {
+  test('renders speech, image, and video 作品 with accessible media elements', async () => {
+    const speechPath = 'G:\\output\\speech.wav';
+    const imagePath = 'G:\\output\\image.webp';
+    const videoPath = 'G:\\output\\video.mp4';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'speech-work',
+        avatarId: null,
+        mode: 'speech',
+        status: 'done',
+        outputPath: speechPath,
+      }),
+      createWork({
+        id: 'image-work',
+        avatarId: null,
+        mode: 'image',
+        status: 'done',
+        outputPath: imagePath,
+      }),
+      createWork({ id: 'video-work', status: 'done', outputPath: videoPath }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    const audio = await screen.findByLabelText('作品语音 speech-work');
+    const image = await screen.findByRole('img', { name: '作品图像 image-work' });
+    const video = await screen.findByLabelText('作品视频 video-work');
+    expect(audio.tagName).toBe('AUDIO');
+    expect(audio).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(speechPath)}`,
+    );
+    expect(image).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(imagePath)}`,
+    );
+    expect(video.tagName).toBe('VIDEO');
+    expect(video).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(videoPath)}`,
+    );
+  });
+
+  test('uses speech and image 作品 fallback titles without an unknown avatar', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'speech-work', avatarId: null, mode: 'speech' }),
+      createWork({ id: 'image-work', avatarId: null, mode: 'image' }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    expect(await screen.findByRole('heading', { name: '语音作品' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '图像作品' })).toBeInTheDocument();
+    expect(screen.queryByText('未知模特')).not.toBeInTheDocument();
+  });
+
   test('lists real works, plays completed output through controlled media, and shows errors', async () => {
     const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
     smo.works.list.mockResolvedValue([
@@ -2567,25 +2623,83 @@ describe('settings page LLM configuration', () => {
 });
 
 describe('works page actions', () => {
-  test('filters works by mode and status', async () => {
+  test('filters 作品 by speech, image, video mode, and status without a pending filter', async () => {
     smo.works.list.mockResolvedValue([
       createWork({ id: 'text-done', mode: 'text', status: 'done' }),
       createWork({ id: 'audio-failed', mode: 'audio', status: 'failed' }),
+      createWork({ id: 'speech-running', avatarId: null, mode: 'speech', status: 'running' }),
+      createWork({ id: 'image-done', avatarId: null, mode: 'image', status: 'done' }),
+      createWork({ id: 'text-pending', mode: 'text', status: 'pending' }),
     ]);
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
-    await screen.findByText('已完成（done）');
+    await screen.findByText('text-done');
 
-    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
-    expect(screen.getByText('失败（failed）')).toBeInTheDocument();
+    const filters = screen.getByRole('group', { name: '作品筛选' });
+    expect(within(filters).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '全部',
+      '语音',
+      '图像',
+      '文字生视频',
+      '音频数字人',
+      '运行中',
+      '已完成',
+      '失败',
+    ]);
+    expect(within(filters).queryByRole('button', { name: '等待中' })).not.toBeInTheDocument();
+
+    const expectPressedFilter = (label: string) => {
+      for (const button of within(filters).getAllByRole('button')) {
+        expect(button).toHaveAttribute(
+          'aria-pressed',
+          button.textContent === label ? 'true' : 'false',
+        );
+      }
+    };
+    expectPressedFilter('全部');
+
+    const expectOnlyWork = (id: string) => {
+      const cards = screen.getAllByRole('article');
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toHaveTextContent(id);
+    };
+
+    fireEvent.click(screen.getByRole('button', { name: '语音' }));
+    expectPressedFilter('语音');
+    expectOnlyWork('speech-running');
+
+    fireEvent.click(screen.getByRole('button', { name: '图像' }));
+    expectPressedFilter('图像');
+    expectOnlyWork('image-done');
 
     fireEvent.click(screen.getByRole('button', { name: '文字生视频' }));
-    expect(screen.queryByText('失败（failed）')).not.toBeInTheDocument();
-    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+    expectPressedFilter('文字生视频');
+    expect(screen.getByText('text-done')).toBeInTheDocument();
+    expect(screen.getByText('text-pending')).toBeInTheDocument();
+    expect(screen.getAllByRole('article')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: '音频数字人' }));
+    expectPressedFilter('音频数字人');
+    expectOnlyWork('audio-failed');
+
+    fireEvent.click(screen.getByRole('button', { name: '运行中' }));
+    expectPressedFilter('运行中');
+    expectOnlyWork('speech-running');
+
+    fireEvent.click(screen.getByRole('button', { name: '已完成' }));
+    expectPressedFilter('已完成');
+    expect(screen.getByText('text-done')).toBeInTheDocument();
+    expect(screen.getByText('image-done')).toBeInTheDocument();
+    expect(screen.getAllByRole('article')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: '失败' }));
-    expect(screen.queryByText('已完成（done）')).not.toBeInTheDocument();
-    expect(screen.getByText('失败（failed）')).toBeInTheDocument();
+    expectPressedFilter('失败');
+    expectOnlyWork('audio-failed');
+
+    fireEvent.click(screen.getByRole('button', { name: '全部' }));
+    expectPressedFilter('全部');
+    expect(screen.getAllByRole('article')).toHaveLength(5);
+    expect(screen.getByText('text-pending')).toBeInTheDocument();
   });
 
   test('retries a failed work and refreshes the list', async () => {
