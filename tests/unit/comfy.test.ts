@@ -635,7 +635,7 @@ describe('ComfyClient WebSocket completion', () => {
 });
 
 describe('ComfyClient and JobCoordinator cancellation', () => {
-  test('fails promptly on interruption and starts the next job after the cancellation barrier', async () => {
+  test('fails promptly on interruption and accepts a rejected job after the cancellation barrier', async () => {
     let socket: WebSocket | undefined;
     let markConnected!: () => void;
     const connected = new Promise<void>((resolve) => {
@@ -669,6 +669,9 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
     const cancellationBarrier = new Promise<void>((resolve) => {
       releaseCancellation = resolve;
     });
+    const runSecond = async (): Promise<void> => {
+      calls.push('second started');
+    };
 
     const first = coordinator.enqueue({
       id: 'first',
@@ -680,12 +683,11 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
         calls.push('cancel finished');
       },
     });
-    const second = coordinator.enqueue({
+    const rejectedSecond = coordinator.enqueue({
       id: 'second',
-      run: async () => {
-        calls.push('second started');
-      },
+      run: runSecond,
     });
+    await expect(rejectedSecond).rejects.toThrow('Another generation is already running');
 
     await connected;
     const cancellation = coordinator.cancelActive();
@@ -701,7 +703,7 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
     }
 
     await cancellation;
-    await second;
+    await coordinator.enqueue({ id: 'second', run: runSecond });
     if (assertionFailure !== undefined) {
       throw assertionFailure;
     }

@@ -331,6 +331,7 @@ describe('IPC input schema', () => {
 
   test.each([
     'jobs:cancel',
+    'jobs:getState',
     'llm:getProfile',
     'avatars:list',
     'works:list',
@@ -857,6 +858,27 @@ describe('main-process IPC handlers', () => {
     await harness.invoke('jobs:cancel', { id: 'job-1' });
     await completion;
     expect(cancellations).toBe(1);
+  });
+
+  test('returns idle and active job states through jobs:getState', async () => {
+    const harness = await createHarness();
+    let finish!: () => void;
+
+    await expect(harness.invoke('jobs:getState')).resolves.toEqual({ activeId: null });
+    const completion = harness.jobCoordinator.enqueue({
+      id: 'one',
+      run: () => new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    });
+    await expect(harness.invoke('jobs:getState')).resolves.toEqual({ activeId: 'one' });
+
+    finish();
+    await completion;
+    await expect(harness.invoke('jobs:getState')).resolves.toEqual({ activeId: null });
+    await expect(
+      harness.invoke('jobs:getState', { verbose: true }),
+    ).rejects.toThrow();
   });
 
   test('creates managed avatars and dispatches work queries to the real Store', async () => {
@@ -1666,7 +1688,7 @@ describe('preload API', () => {
       'works',
     ]);
     expect(Object.keys(api.avatars).sort()).toEqual(['create', 'delete', 'list', 'update']);
-    expect(Object.keys(api.jobs).sort()).toEqual(['cancel', 'retry', 'start']);
+    expect(Object.keys(api.jobs).sort()).toEqual(['cancel', 'getState', 'retry', 'start']);
     expect(Object.keys(api.llm).sort()).toEqual([
       'getProfile',
       'listModels',
@@ -1742,6 +1764,11 @@ describe('preload API', () => {
       channel: 'jobs:start',
       payload: generationRequest,
       call: (smo: SmoApi) => smo.jobs.start(generationRequest),
+    },
+    {
+      channel: 'jobs:getState',
+      payload: {},
+      call: (smo: SmoApi) => smo.jobs.getState(),
     },
     {
       channel: 'jobs:cancel',

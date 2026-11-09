@@ -4,7 +4,7 @@ import { describe, expect, test, vi } from 'vitest';
 import { JobCoordinator } from '../../src/main/jobs';
 
 describe('JobCoordinator lifecycle', () => {
-  test('close cancels the active job and empties the queue', async () => {
+  test('close cancels the active job', async () => {
     const coordinator = new JobCoordinator();
     const events: string[] = [];
 
@@ -29,7 +29,7 @@ describe('JobCoordinator lifecycle', () => {
     expect(coordinator.activeCount).toBe(0);
   });
 
-  test('close rejects queued jobs', async () => {
+  test('close only settles the active job after a second job was rejected', async () => {
     const coordinator = new JobCoordinator();
 
     const first = coordinator.enqueue({
@@ -39,15 +39,17 @@ describe('JobCoordinator lifecycle', () => {
       },
     });
 
-    const second = coordinator.enqueue({
-      id: 'second',
-      run: async () => undefined,
-    });
+    await expect(
+      coordinator.enqueue({
+        id: 'second',
+        run: async () => undefined,
+      }),
+    ).rejects.toThrow('Another generation is already running');
 
     await coordinator.close();
 
     await expect(first).resolves.toBeUndefined();
-    await expect(second).rejects.toThrow(/JobCoordinator is closed/i);
+    expect(coordinator.activeCount).toBe(0);
   });
 
   test('enqueue after close rejects immediately', async () => {
@@ -97,7 +99,7 @@ describe('JobCoordinator lifecycle', () => {
     vi.useRealTimers();
   });
 
-  test('close times out a non-cancellable active job and rejects queued jobs', async () => {
+  test('close times out a non-cancellable active job', async () => {
     const coordinator = new JobCoordinator({ closeTimeoutMs: 50 });
     const events: string[] = [];
 
@@ -109,18 +111,12 @@ describe('JobCoordinator lifecycle', () => {
       },
     });
 
-    const second = coordinator.enqueue({
-      id: 'second',
-      run: async () => undefined,
-    });
-
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(coordinator.activeCount).toBe(1);
 
     await coordinator.close();
 
     await expect(first).rejects.toThrow(/cancelled|closed/i);
-    await expect(second).rejects.toThrow(/JobCoordinator is closed/i);
     expect(coordinator.activeCount).toBe(0);
     expect(events).toContain('first-run');
   });

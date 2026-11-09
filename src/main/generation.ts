@@ -53,7 +53,7 @@ export interface GenerationHandlerOptions {
     ComfyClient,
     'uploadFile' | 'submit' | 'waitForCompletion' | 'history' | 'cancel'
   >;
-  jobCoordinator: Pick<JobCoordinator, 'enqueue'>;
+  jobCoordinator: Pick<JobCoordinator, 'activeCount' | 'enqueue'>;
   workflowsDirectory: string;
   outputDirectory: string;
   mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
@@ -311,6 +311,9 @@ export function createGenerationHandler(
     if (!avatar) {
       throw new Error(`Avatar not found: ${input.avatarId}`);
     }
+    if (jobCoordinator.activeCount > 0) {
+      throw new Error('Another generation is already running');
+    }
     const request = sanitizeRequest(input);
     const originalRetryOf = input.retryOf;
     const workId = randomUUID();
@@ -397,6 +400,10 @@ export function createGenerationHandler(
       writeState();
     };
 
+    if (jobCoordinator.activeCount > 0) {
+      await cleanupStagedAudio(stagedAudioPath, remove, cleanupErrorReporter);
+      throw new Error('Another generation is already running');
+    }
     store.addWork({
       id: workId,
       avatarId: request.avatarId,
@@ -609,7 +616,7 @@ export function createGenerationHandler(
       }
     };
 
-    // Failures settle in Store and coordinator events; callers receive the queued id immediately.
+    // Failures settle in Store and coordinator events; callers receive the started id immediately.
     void jobCoordinator
       .enqueue({
         id: workId,

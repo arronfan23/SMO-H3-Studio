@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { setTimeout as delay } from 'node:timers/promises';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 
 interface Deferred<T> {
@@ -21,53 +21,38 @@ function deferred<T = void>(): Deferred<T> {
 }
 
 describe('JobCoordinator execution', () => {
-  test('runs jobs in FIFO order with one active job and ordered completions', async () => {
-    const coordinator = new JobCoordinator();
-    const firstGate = deferred();
-    const calls: string[] = [];
+  test('rejects a second job while one is active without emitting pending events', async () => {
+    const events: JobEvent[] = [];
+    const coordinator = new JobCoordinator({ onEvent: (event) => events.push(event) });
+    const first = deferred<void>();
+    const secondRun = vi.fn();
 
-    const first = coordinator.enqueue({
-      id: 'a',
-      run: async () => {
-        calls.push('start a');
-        await firstGate.promise;
-        calls.push('end a');
-      },
-    });
-    const second = coordinator.enqueue({
-      id: 'b',
-      run: async () => {
-        calls.push('start b');
-        calls.push('end b');
-      },
-    });
+    void coordinator.enqueue({ id: 'one', run: () => first.promise });
+    await expect(coordinator.enqueue({ id: 'two', run: secondRun }))
+      .rejects.toThrow('Another generation is already running');
+    expect(coordinator.activeId).toBe('one');
+    expect(events.map((event) => event.status)).not.toContain('pending');
+    expect(secondRun).not.toHaveBeenCalled();
 
-    expect(coordinator.activeCount).toBe(1);
-    expect(calls).toEqual(['start a']);
-
-    firstGate.resolve();
-    await Promise.all([first, second]);
-
-    expect(calls).toEqual(['start a', 'end a', 'start b', 'end b']);
-    expect(coordinator.completedIds).toEqual(['a', 'b']);
+    first.resolve();
+    await vi.waitFor(() => expect(coordinator.activeCount).toBe(0));
+    expect(coordinator.activeId).toBeNull();
+    expect(coordinator.completedIds).toEqual(['one']);
     expect(coordinator.activeCount).toBe(0);
   });
 
-  test('rejects duplicate active, queued, and completed ids', async () => {
+  test('rejects duplicate active and completed ids', async () => {
     const coordinator = new JobCoordinator();
     const firstGate = deferred();
     const first = coordinator.enqueue({ id: 'a', run: () => firstGate.promise });
-    const second = coordinator.enqueue({ id: 'b', run: async () => {} });
 
     await expect(coordinator.enqueue({ id: 'a', run: async () => {} })).rejects.toThrow(
       /duplicate job id/i,
     );
-    await expect(coordinator.enqueue({ id: 'b', run: async () => {} })).rejects.toThrow(
-      /duplicate job id/i,
-    );
 
     firstGate.resolve();
-    await Promise.all([first, second]);
+    await first;
+    await coordinator.enqueue({ id: 'b', run: async () => {} });
 
     await expect(coordinator.enqueue({ id: 'a', run: async () => {} })).rejects.toThrow(
       /duplicate job id/i,
@@ -77,7 +62,7 @@ describe('JobCoordinator execution', () => {
     );
   });
 
-  test('passes a job error to its promise and continues with the next job', async () => {
+  test('passes a job error to its promise and accepts a later job after cleanup', async () => {
     const coordinator = new JobCoordinator();
     const failure = new Error('generation failed');
     const calls: string[] = [];
@@ -88,22 +73,20 @@ describe('JobCoordinator execution', () => {
         throw failure;
       },
     });
-    const second = coordinator.enqueue({
+    await expect(first).rejects.toBe(failure);
+    await coordinator.enqueue({
       id: 'b',
       run: async () => {
         calls.push('b ran');
       },
     });
 
-    await expect(first).rejects.toBe(failure);
-    await second;
-
     expect(calls).toEqual(['b ran']);
     expect(coordinator.completedIds).toEqual(['b']);
     expect(coordinator.activeCount).toBe(0);
   });
 
-  test('emits pending, running, done, and failed events in execution order', async () => {
+  test('emits running, done, and failed events in execution order', async () => {
     const events: JobEvent[] = [];
     const coordinator = new JobCoordinator({ onEvent: (event) => events.push(event) });
     const failure = new Error('failed job');
@@ -119,17 +102,15 @@ describe('JobCoordinator execution', () => {
     ).rejects.toBe(failure);
 
     expect(events.map(({ id, status }) => ({ id, status }))).toEqual([
-      { id: 'done-job', status: 'pending' },
       { id: 'done-job', status: 'running' },
       { id: 'done-job', status: 'done' },
-      { id: 'failed-job', status: 'pending' },
       { id: 'failed-job', status: 'running' },
       { id: 'failed-job', status: 'failed' },
     ]);
     expect(events.at(-1)?.error).toBe(failure);
   });
 
-  test('waits for asynchronous cancellation before starting the next job', async () => {
+  test('waits for asynchronous cancellation before accepting another job', async () => {
     const coordinator = new JobCoordinator();
     const runGate = deferred();
     const cancelGate = deferred();
@@ -145,13 +126,6 @@ describe('JobCoordinator execution', () => {
         return cancelGate.promise;
       },
     });
-    const second = coordinator.enqueue({
-      id: 'b',
-      run: async () => {
-        calls.push('b started');
-      },
-    });
-
     const cancellation = coordinator.cancelActive();
     expect(cancelCalls).toBe(1);
 
@@ -159,16 +133,30 @@ describe('JobCoordinator execution', () => {
     await first;
     expect(calls).toEqual(['cancel started']);
     expect(coordinator.activeCount).toBe(1);
+    const blocked = coordinator.enqueue({
+      id: 'b',
+      run: async () => {
+        calls.push('b started');
+      },
+    });
+    blocked.catch(() => undefined);
+    expect(coordinator.activeId).toBe('a');
 
     cancelGate.resolve();
     await cancellation;
-    await second;
+    await expect(blocked).rejects.toThrow('Another generation is already running');
+    await coordinator.enqueue({
+      id: 'b',
+      run: async () => {
+        calls.push('b started');
+      },
+    });
 
     expect(calls).toEqual(['cancel started', 'b started']);
     expect(coordinator.activeCount).toBe(0);
   });
 
-  test('cancels only the requested queued job', async () => {
+  test('does not retain or cancel a job rejected while another is active', async () => {
     const events: JobEvent[] = [];
     const coordinator = new JobCoordinator({ onEvent: (event) => events.push(event) });
     const firstGate = deferred();
@@ -187,18 +175,19 @@ describe('JobCoordinator execution', () => {
         secondJobRan = true;
       },
     });
-    const secondRejection = expect(second).rejects.toThrow(/cancelled/i);
+    second.catch(() => undefined);
 
     await coordinator.cancel('second');
 
-    await secondRejection;
     expect(firstCancellations).toBe(0);
     expect(secondJobRan).toBe(false);
     expect(coordinator.activeCount).toBe(1);
-    expect(events.at(-1)).toMatchObject({ id: 'second', status: 'failed' });
+    expect(coordinator.activeId).toBe('first');
+    expect(events.some((event) => event.id === 'second')).toBe(false);
 
     firstGate.resolve();
     await first;
+    await expect(second).rejects.toThrow('Another generation is already running');
   });
 
   test('cancels the requested active job without touching a different active id', async () => {
@@ -234,9 +223,10 @@ describe('JobCoordinator execution', () => {
     });
 
     const first = coordinator.enqueue({ id: 'a', run: async () => {} });
-    const second = coordinator.enqueue({ id: 'b', run: async () => {} });
     const outcome = await Promise.race([
-      Promise.all([first, second]).then(() => 'settled'),
+      first
+        .then(() => coordinator.enqueue({ id: 'b', run: async () => {} }))
+        .then(() => 'settled'),
       delay(50).then(() => 'stalled'),
     ]);
 
@@ -244,16 +234,14 @@ describe('JobCoordinator execution', () => {
     expect(coordinator.completedIds).toEqual(['a', 'b']);
     expect(coordinator.activeCount).toBe(0);
     expect(events).toEqual([
-      'a:pending',
       'a:running',
-      'b:pending',
       'a:done',
       'b:running',
       'b:done',
     ]);
   });
 
-  test('reports event listener failures with context and still settles the queue', async () => {
+  test('reports event listener failures with context and still settles each job', async () => {
     const writeFailure = new Error('SQLite work update failed');
     const reports: Array<{ error: unknown; event: JobEvent }> = [];
     const coordinator = new JobCoordinator({
@@ -265,9 +253,8 @@ describe('JobCoordinator execution', () => {
       onEventError: (error, event) => reports.push({ error, event }),
     });
 
-    const first = coordinator.enqueue({ id: 'first', run: async () => {} });
-    const second = coordinator.enqueue({ id: 'second', run: async () => {} });
-    await Promise.all([first, second]);
+    await coordinator.enqueue({ id: 'first', run: async () => {} });
+    await coordinator.enqueue({ id: 'second', run: async () => {} });
 
     expect(reports).toEqual([
       { error: writeFailure, event: { id: 'first', status: 'running' } },

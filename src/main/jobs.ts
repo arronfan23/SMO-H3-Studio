@@ -32,7 +32,7 @@ export interface JobRecoveryRecord {
   status: WorkStatus;
 }
 
-interface QueueItem {
+interface ActiveItem {
   job: Job;
   resolve: () => void;
   reject: (reason?: unknown) => void;
@@ -45,13 +45,12 @@ interface QueueItem {
 const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 
 export class JobCoordinator {
-  private readonly queue: QueueItem[] = [];
   private readonly reservedIds = new Set<string>();
   private readonly completed: string[] = [];
   private readonly onEvent?: (event: JobEvent) => void;
   private readonly onEventError?: JobEventErrorHandler;
   private readonly closeTimeoutMs: number;
-  private active: QueueItem | null = null;
+  private active: ActiveItem | null = null;
   private closed = false;
 
   constructor(options: JobCoordinatorOptions = {}) {
@@ -61,6 +60,10 @@ export class JobCoordinator {
       options.closeTimeoutMs === undefined
         ? DEFAULT_CLOSE_TIMEOUT_MS
         : validateTimeout(options.closeTimeoutMs, 'closeTimeoutMs');
+  }
+
+  get activeId(): string | null {
+    return this.active?.job.id ?? null;
   }
 
   get activeCount(): number {
@@ -81,13 +84,25 @@ export class JobCoordinator {
     if (this.reservedIds.has(job.id)) {
       throw new Error(`Duplicate job id: ${job.id}`);
     }
+    if (this.active !== null) {
+      throw new Error('Another generation is already running');
+    }
     this.reservedIds.add(job.id);
 
-    return new Promise<void>((resolve, reject) => {
-      this.queue.push({ job, resolve, reject });
-      this.emit({ id: job.id, status: 'pending' });
-      void this.pump();
+    let resolveJob!: () => void;
+    let rejectJob!: (reason?: unknown) => void;
+    const completion = new Promise<void>((resolve, reject) => {
+      resolveJob = resolve;
+      rejectJob = reject;
     });
+    const item: ActiveItem = { job, resolve: resolveJob, reject: rejectJob };
+    item.settled = new Promise<void>((resolve) => {
+      item.settle = resolve;
+    });
+    this.active = item;
+    this.emit({ id: job.id, status: 'running' });
+    void this.run(item);
+    return completion;
   }
 
   cancelActive(): Promise<void> {
@@ -107,16 +122,6 @@ export class JobCoordinator {
     if (this.active?.job.id === id) {
       return this.cancelActive();
     }
-
-    const queueIndex = this.queue.findIndex((item) => item.job.id === id);
-    if (queueIndex === -1) {
-      return Promise.resolve();
-    }
-    const [item] = this.queue.splice(queueIndex, 1);
-    const error = new Error('Generation cancelled');
-    this.reservedIds.delete(id);
-    this.emit({ id, status: 'failed', error });
-    item.reject(error);
     return Promise.resolve();
   }
 
@@ -163,15 +168,6 @@ export class JobCoordinator {
         clearTimeout(timeout);
       }
     }
-
-    // Reject all queued jobs.
-    while (this.queue.length > 0) {
-      const item = this.queue.shift()!;
-      const error = new Error('JobCoordinator is closed');
-      this.reservedIds.delete(item.job.id);
-      this.emit({ id: item.job.id, status: 'failed', error });
-      item.reject(error);
-    }
   }
 
   recover(records: readonly JobRecoveryRecord[]): void {
@@ -199,24 +195,12 @@ export class JobCoordinator {
       try {
         this.onEventError?.(error, event);
       } catch {
-        // Neither listener nor reporter failures may interrupt queue cleanup.
+        // Neither listener nor reporter failures may interrupt job cleanup.
       }
     }
   }
 
-  private async pump(): Promise<void> {
-    if (this.active !== null || this.queue.length === 0) {
-      return;
-    }
-
-    const item = this.queue.shift()!;
-    this.active = item;
-    this.emit({ id: item.job.id, status: 'running' });
-
-    item.settled = new Promise<void>((resolve) => {
-      item.settle = resolve;
-    });
-
+  private async run(item: ActiveItem): Promise<void> {
     try {
       await item.job.run();
       if (!item.cancelled) {
@@ -238,11 +222,10 @@ export class JobCoordinator {
           // The cancelActive caller receives the cancellation error.
         }
       }
-      this.active = null;
-      item.settle?.();
-      if (!this.closed) {
-        void this.pump();
+      if (this.active === item) {
+        this.active = null;
       }
+      item.settle?.();
     }
   }
 }

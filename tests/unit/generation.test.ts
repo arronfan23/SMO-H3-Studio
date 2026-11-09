@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdtemp, readFile, readdir, rm, writeFile, type copyFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -655,7 +655,6 @@ describe('GenerationHandler workflows', () => {
       Date.parse(work.createdAt),
     );
     expect(harness.events.map(({ id, status }) => ({ id, status }))).toEqual([
-      { id: result.id, status: 'pending' },
       { id: result.id, status: 'running' },
       { id: result.id, status: 'done' },
     ]);
@@ -857,10 +856,11 @@ describe('GenerationHandler workflows', () => {
     expect(earlyResult).toEqual(result);
   });
 
-  test('creates a unique work id for each request', async () => {
+  test('creates a unique work id for each sequential request', async () => {
     const harness = await createHarness();
 
     const first = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, first.id, 'done');
     const second = await harness.startGeneration(harness.textRequest);
     await Promise.all([
       waitForWork(harness.store, first.id, 'done'),
@@ -871,6 +871,91 @@ describe('GenerationHandler workflows', () => {
     expect(harness.store.listWorks().map((work) => work.id).sort()).toEqual(
       [first.id, second.id].sort(),
     );
+  });
+
+  test('rejects a second start while active without adding another work', async () => {
+    const harness = await createHarness();
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+    const addWork = vi.spyOn(harness.store, 'addWork');
+
+    const firstStart = harness.startGeneration(harness.textRequest);
+    try {
+      const secondStart = harness.startGeneration(harness.textRequest);
+      await expect(secondStart).rejects.toThrow(
+        'Another generation is already running',
+      );
+      const first = await firstStart;
+      expect(addWork).toHaveBeenCalledTimes(1);
+      expect(harness.store.listWorks().map((work) => work.id)).toEqual([first.id]);
+      expect(harness.jobCoordinator.activeId).toBe(first.id);
+      expect(harness.events.map((event) => event.status)).not.toContain('pending');
+    } finally {
+      completionGate.resolve();
+      await vi.waitFor(() => expect(harness.jobCoordinator.activeCount).toBe(0));
+    }
+  });
+
+  test('rejects audio before staging when another generation is already active', async () => {
+    const copy = vi.fn<typeof copyFile>();
+    const durationReader = vi.fn(async () => 60);
+    const harness = await createHarness({ copyFile: copy, durationReader });
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+    const addWork = vi.spyOn(harness.store, 'addWork');
+    const first = await harness.startGeneration(harness.textRequest);
+
+    try {
+      await expect(harness.startGeneration(harness.audioRequest)).rejects.toThrow(
+        'Another generation is already running',
+      );
+
+      expect(copy).not.toHaveBeenCalled();
+      expect(durationReader).not.toHaveBeenCalled();
+      expect(addWork).toHaveBeenCalledTimes(1);
+      expect(harness.store.listWorks().map((work) => work.id)).toEqual([first.id]);
+    } finally {
+      completionGate.resolve();
+      await vi.waitFor(() => expect(harness.jobCoordinator.activeCount).toBe(0));
+    }
+  });
+
+  test('cleans staged audio when another generation becomes active during staging', async () => {
+    const copyStarted = deferred();
+    const copyGate = deferred();
+    const gatedCopy: typeof copyFile = async (source, destination, mode) => {
+      await copyFile(source, destination, mode);
+      copyStarted.resolve();
+      await copyGate.promise;
+    };
+    const harness = await createHarness({ copyFile: gatedCopy });
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+    const addWork = vi.spyOn(harness.store, 'addWork');
+    const audioStart = Promise.resolve(harness.startGeneration(harness.audioRequest));
+    audioStart.catch(() => undefined);
+
+    try {
+      await copyStarted.promise;
+      const stagedFiles = await readdir(harness.uploadsDirectory);
+      expect(stagedFiles).toHaveLength(1);
+      const stagedPath = join(harness.uploadsDirectory, stagedFiles[0]!);
+
+      const occupying = await harness.startGeneration(harness.textRequest);
+      expect(harness.jobCoordinator.activeId).toBe(occupying.id);
+      copyGate.resolve();
+
+      await expect(audioStart).rejects.toThrow('Another generation is already running');
+      expect(addWork).toHaveBeenCalledTimes(1);
+      expect(harness.store.listWorks().map((work) => work.id)).toEqual([occupying.id]);
+      await expect(readFile(stagedPath, 'utf8')).rejects.toThrow();
+      expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+      expect(harness.jobCoordinator.activeId).toBe(occupying.id);
+    } finally {
+      copyGate.resolve();
+      completionGate.resolve();
+      await vi.waitFor(() => expect(harness.jobCoordinator.activeCount).toBe(0));
+    }
   });
 
   test('stores only declared request fields in work metadata', async () => {

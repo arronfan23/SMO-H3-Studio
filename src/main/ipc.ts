@@ -41,7 +41,7 @@ export interface IpcServices {
   startGeneration: GenerationHandler;
   retryWork: (id: string) => Promise<GenerationStartResult>;
   deleteWork: (id: string) => Promise<void>;
-  jobCoordinator: Pick<JobCoordinator, 'cancel' | 'cancelActive'>;
+  jobCoordinator: Pick<JobCoordinator, 'activeId' | 'cancel' | 'cancelActive'>;
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
@@ -96,6 +96,8 @@ async function dispatch(
         await services.jobCoordinator.cancel(request.payload.id);
       }
       return undefined;
+    case 'jobs:getState':
+      return { activeId: services.jobCoordinator.activeId };
     case 'files:selectImage':
       return services.files.selectImage();
     case 'files:selectAudio':

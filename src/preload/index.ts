@@ -15,6 +15,7 @@ const api: SmoApi = {
     start: (request) => ipcRenderer.invoke('jobs:start', request),
     retry: (id) => ipcRenderer.invoke('jobs:retry', { id }),
     cancel: (id) => ipcRenderer.invoke('jobs:cancel', id === undefined ? {} : { id }),
+    getState: () => ipcRenderer.invoke('jobs:getState', {}),
   },
   files: {
     selectImage: () => ipcRenderer.invoke('files:selectImage', {}),

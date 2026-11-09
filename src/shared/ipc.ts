@@ -47,6 +47,7 @@ export const IPC_CHANNELS = [
   'jobs:start',
   'jobs:retry',
   'jobs:cancel',
+  'jobs:getState',
   'files:selectImage',
   'files:selectAudio',
   'files:authorizeDroppedImage',
@@ -272,6 +273,7 @@ export function createIpcSchema() {
       'jobs:cancel',
       z.object({ id: nonEmptyString.optional() }).strict(),
     ),
+    requestSchema('jobs:getState', emptyPayload),
     requestSchema('files:selectImage', emptyPayload),
     requestSchema('files:selectAudio', emptyPayload),
     requestSchema(
@@ -351,6 +353,10 @@ export interface PolishResult {
   attempts: number;
 }
 
+export interface JobState {
+  activeId: string | null;
+}
+
 export interface ComfyHealth {
   system: Record<string, unknown>;
   devices: Record<string, unknown>[];
@@ -371,6 +377,7 @@ export interface SmoApi {
     start(request: GenerationRequest): Promise<GenerationStartResult>;
     retry(id: string): Promise<GenerationStartResult>;
     cancel(id?: string): Promise<void>;
+    getState(): Promise<JobState>;
   };
 
   readonly files: {
