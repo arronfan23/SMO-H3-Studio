@@ -4,6 +4,7 @@ import type { Avatar } from '../shared/types';
 import { AudioDigitalHumanForm } from './AudioDigitalHumanForm';
 import { AvatarImage } from './AvatarImage';
 import { TextToVideoForm } from './TextToVideoForm';
+import { useActiveJob } from './useActiveJob';
 
 export function StudioPage({
   avatar,
@@ -21,6 +22,7 @@ export function StudioPage({
   pageActive?: boolean;
 }) {
   const [mode, setMode] = useState<'text' | 'audio'>('text');
+  const { busy, refresh } = useActiveJob();
 
   if (loading) {
     return <div className="page-state">正在读取数字模特…</div>;
@@ -81,6 +83,8 @@ export function StudioPage({
                 avatarId={avatar.id}
                 modelDirectory={modelDirectory}
                 active={mode === 'text'}
+                busy={busy}
+                onJobStarted={refresh}
               />
             </div>
             <div
@@ -94,6 +98,8 @@ export function StudioPage({
                 modelDirectory={modelDirectory}
                 active={mode === 'audio'}
                 pageActive={pageActive}
+                busy={busy}
+                onJobStarted={refresh}
               />
             </div>
           </section>

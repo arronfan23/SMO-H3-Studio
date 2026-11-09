@@ -505,6 +505,34 @@ body[data-window-maximized='true'] .window-resize-handle {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.step-number-control {
+  display: grid;
+  grid-template-columns: 36px 64px 36px;
+  gap: 6px;
+  align-items: center;
+  width: max-content;
+}
+
+.step-number-control .step-number-button {
+  width: 36px;
+  min-width: 36px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+}
+
+.step-number-control .step-number-input {
+  width: 64px;
+  height: 40px;
+  padding: 9px 6px;
+  text-align: center;
+}
+
+.step-number-field .step-number-hint {
+  min-height: 18px;
+  margin: 0;
+}
+
 .prompt-editor {
   display: grid;
   min-width: 0;

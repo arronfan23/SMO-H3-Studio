@@ -40,7 +40,7 @@ function createSmoMock() {
   return {
     app: { getVersion: vi.fn() },
     avatars: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
-    jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn() },
+    jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn(), getState: vi.fn() },
     files: {
       selectImage: vi.fn(),
       selectAudio: vi.fn(),
@@ -97,6 +97,7 @@ beforeEach(() => {
   smo.jobs.start.mockResolvedValue({ id: 'job-1' });
   smo.jobs.retry.mockRejectedValue(new Error('Unexpected retry'));
   smo.jobs.cancel.mockResolvedValue(undefined);
+  smo.jobs.getState.mockResolvedValue({ activeId: null });
   smo.llm.getProfile.mockResolvedValue(null);
   smo.llm.saveProfile.mockResolvedValue(undefined);
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
@@ -824,6 +825,59 @@ describe('text-to-video studio', () => {
     expect(screen.getByText('等待中（pending）')).toBeInTheDocument();
   });
 
+  test('rejects an explicit 4.5 second text duration without submitting', async () => {
+    await renderStudio();
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: '显式时长必须保持整数约束' },
+    });
+    fireEvent.change(screen.getByLabelText('视频时长（秒）'), {
+      target: { value: '4.5' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    });
+
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('视频时长必须在 4–15 秒之间');
+  });
+
+  test('rejects an explicit 4.5 second text duration without polishing', async () => {
+    await renderStudio();
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: '润色也保持显式整数时长约束' },
+    });
+    fireEvent.change(screen.getByLabelText('视频时长（秒）'), {
+      target: { value: '4.5' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
+    });
+
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('视频时长必须在 4–15 秒之间');
+  });
+
+  test('allows a fractional estimated duration when the text duration is blank', async () => {
+    await renderStudio();
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: '汉'.repeat(10) },
+    });
+    fireEvent.change(screen.getByLabelText('视频时长（秒）'), {
+      target: { value: '' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ duration: 4.5 }),
+      ),
+    );
+  });
+
   test('estimates a blank duration from the original text and reuses it after polishing', async () => {
     const originalText = 'one two three four five six seven eight nine ten';
     const changedOriginalText = '汉'.repeat(100);
@@ -906,6 +960,63 @@ describe('text-to-video studio', () => {
         expect.objectContaining({ prompt: '保留这段原文', mode: 'text' }),
       ),
     );
+  });
+
+  test('blocks text generation entry while a polish request is pending', async () => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderStudio();
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: '润色期间不能生成' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
+
+    const generateButton = screen.getByRole('button', { name: '生成视频' });
+    expect(generateButton).toBeDisabled();
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '互斥测试润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(await screen.findByRole('textbox', { name: '润色结果' })).toBeInTheDocument();
+  });
+
+  test('blocks text polish entry while generation is pending', async () => {
+    let resolveStart: ((value: { id: string }) => void) | undefined;
+    smo.jobs.start.mockImplementation(
+      () =>
+        new Promise<{ id: string }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    await renderStudio();
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: '生成期间不能润色' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    const polishButton = screen.getByRole('button', { name: 'AI 润色' });
+    expect(polishButton).toBeDisabled();
+    fireEvent.click(polishButton);
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveStart?.({ id: 'text-exclusive-job' });
+    });
+    expect(screen.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
   });
 
   test('keeps an unsubmitted text draft when switching production modes', async () => {
@@ -1213,7 +1324,7 @@ describe('audio digital human studio', () => {
     smo.files.selectAudio.mockResolvedValueOnce('G:\\recordings\\second-pending.mp3');
     fireEvent.click(panel.getByRole('button', { name: '选择音频' }));
     expect(await panel.findByText('second-pending.mp3')).toBeInTheDocument();
-    const secondAudio = panel.getByLabelText('所选音频');
+    const secondAudio = await panel.findByLabelText('所选音频');
     Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 8 });
     fireEvent.loadedMetadata(secondAudio);
     expect(panel.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
@@ -1455,6 +1566,52 @@ describe('audio digital human studio', () => {
     expect(smo.jobs.start).not.toHaveBeenCalled();
   });
 
+  test.each([
+    { scenario: 'duration 0.001', trimStart: '0', clipDuration: '0.001' },
+    { scenario: 'duration 0.011 off step', trimStart: '0', clipDuration: '0.011' },
+    { scenario: 'trimStart 0.001', trimStart: '0.001', clipDuration: '6' },
+  ])('rejects $scenario without submitting', async ({ trimStart, clipDuration }) => {
+    await renderLoadedAudio('G:\\recordings\\step-precision.mp3', 12.5);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '保留音频百分秒步进约束' },
+    });
+    fireEvent.change(screen.getByLabelText('起始截取（秒）'), {
+      target: { value: trimStart },
+    });
+    fireEvent.change(screen.getByLabelText('截取时长（秒）'), {
+      target: { value: clipDuration },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    });
+
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/截取|时长/);
+  });
+
+  test('accepts hundredth-aligned audio values with floating-point epsilon', async () => {
+    await renderLoadedAudio('G:\\recordings\\floating-step.mp3', 12.5);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '合法百分秒浮点值' },
+    });
+    fireEvent.change(screen.getByLabelText('起始截取（秒）'), {
+      target: { value: '0.07' },
+    });
+    fireEvent.change(screen.getByLabelText('截取时长（秒）'), {
+      target: { value: '0.29' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ trimStart: 0.07, duration: 0.29 }),
+      ),
+    );
+  });
+
   test('uses the remaining audio seconds when the clip duration is blank', async () => {
     const audioPath = 'G:\\recordings\\remaining.mp3';
     smo.files.selectAudio.mockResolvedValue(audioPath);
@@ -1630,6 +1787,184 @@ describe('audio digital human studio', () => {
     } finally {
       pauseSpy.mockRestore();
     }
+  });
+});
+
+describe('采样步数与 busy', () => {
+  type Mode = 'text' | 'audio';
+
+  function panelFor(mode: Mode): HTMLElement {
+    return screen.getByRole('tabpanel', {
+      name: mode === 'text' ? '文字生视频' : '音频数字人',
+    });
+  }
+
+  async function prepareGeneration(mode: Mode) {
+    if (mode === 'audio') {
+      smo.files.selectAudio.mockResolvedValue('G:\\recordings\\steps.mp3');
+      await renderStudio();
+      fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+      fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+      const audio = await screen.findByLabelText('所选音频');
+      Object.defineProperty(audio, 'duration', { configurable: true, value: 12 });
+      fireEvent.loadedMetadata(audio);
+      fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+        target: { value: '自然说话并轻微点头' },
+      });
+    } else {
+      await renderStudio();
+      fireEvent.change(screen.getByLabelText('原始文字'), {
+        target: { value: '主播转身并挥手' },
+      });
+    }
+    return within(panelFor(mode));
+  }
+
+  test.each([
+    { mode: 'text' as const, defaultSteps: 8 },
+    { mode: 'audio' as const, defaultSteps: 6 },
+  ])('$mode 表单步数支持从默认值逐次增加和减少', async ({ mode, defaultSteps }) => {
+    const panel = await prepareGeneration(mode);
+    const input = panel.getByRole('spinbutton', { name: '采样步数' });
+
+    expect(input).toHaveValue(defaultSteps);
+    fireEvent.click(panel.getByRole('button', { name: '增加步数' }));
+    expect(input).toHaveValue(defaultSteps + 1);
+    expect(panel.getByText('高于推荐值会增加耗时')).toBeInTheDocument();
+
+    fireEvent.click(panel.getByRole('button', { name: '减少步数' }));
+    expect(input).toHaveValue(defaultSteps);
+    expect(panel.queryByText('高于推荐值会增加耗时')).not.toBeInTheDocument();
+    fireEvent.click(panel.getByRole('button', { name: '减少步数' }));
+    expect(input).toHaveValue(defaultSteps - 1);
+  });
+
+  test('步数清空为 NaN 时禁用加减按钮', async () => {
+    const panel = await prepareGeneration('text');
+    fireEvent.change(panel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '' },
+    });
+
+    expect(panel.getByRole('button', { name: '减少步数' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '增加步数' })).toBeDisabled();
+  });
+
+  test('步数推荐和耗时提示使用 aria-live polite', async () => {
+    const panel = await prepareGeneration('text');
+    const hint = document.getElementById('text-steps-hint');
+    expect(hint).toHaveAttribute('aria-live', 'polite');
+
+    fireEvent.click(panel.getByRole('button', { name: '增加步数' }));
+    expect(hint).toHaveTextContent('高于推荐值会增加耗时');
+  });
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单提交直接输入的 12 步',
+    async (mode) => {
+      const panel = await prepareGeneration(mode);
+      fireEvent.change(panel.getByRole('spinbutton', { name: '采样步数' }), {
+        target: { value: '12' },
+      });
+      fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+      await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ mode, steps: 12 }),
+      );
+    },
+  );
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单步数为 0、101 或小数时显示中文错误且不提交',
+    async (mode) => {
+      const panel = await prepareGeneration(mode);
+      const input = panel.getByRole('spinbutton', { name: '采样步数' });
+
+      for (const value of [0, 101, 1.5]) {
+        fireEvent.change(input, { target: { value: String(value) } });
+        fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+        expect(await panel.findByRole('alert')).toHaveTextContent(
+          /采样步数.*1.*100.*整数/,
+        );
+        expect(smo.hardware.apply).not.toHaveBeenCalled();
+        expect(smo.jobs.start).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单生成中不能修改步数',
+    async (mode) => {
+      let resolveStart: ((value: { id: string }) => void) | undefined;
+      smo.jobs.start.mockImplementation(
+        () =>
+          new Promise<{ id: string }>((resolve) => {
+            resolveStart = resolve;
+          }),
+      );
+      const panel = await prepareGeneration(mode);
+      fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+      await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+      expect(panel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+      expect(panel.getByRole('button', { name: '减少步数' })).toBeDisabled();
+      expect(panel.getByRole('button', { name: '增加步数' })).toBeDisabled();
+
+      await act(async () => {
+        resolveStart?.({ id: `${mode}-steps-job` });
+      });
+    },
+  );
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单在 jobs:start 成功后立即刷新 busy',
+    async (mode) => {
+      smo.jobs.getState
+        .mockResolvedValueOnce({ activeId: null })
+        .mockResolvedValue({ activeId: 'job-1' });
+      const panel = await prepareGeneration(mode);
+      await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+      vi.useFakeTimers();
+      const generateButton = panel.getByRole('button', { name: '生成视频' });
+
+      await act(async () => {
+        fireEvent.click(generateButton);
+      });
+
+      expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+      expect(smo.jobs.getState).toHaveBeenCalledTimes(2);
+      expect(generateButton).toBeDisabled();
+    },
+  );
+
+  test('全局 busy 禁用两个表单的生成和操作按钮，但保留纯文本草稿输入', async () => {
+    smo.jobs.getState.mockResolvedValue({ activeId: 'existing-job' });
+    await renderStudio();
+    const textPanel = within(panelFor('text'));
+
+    await waitFor(() =>
+      expect(textPanel.getByRole('button', { name: '生成视频' })).toBeDisabled(),
+    );
+    expect(textPanel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+    fireEvent.change(textPanel.getByLabelText('原始文字'), {
+      target: { value: 'busy 时仍能编辑文字草稿' },
+    });
+    expect(textPanel.getByLabelText('原始文字')).toHaveValue('busy 时仍能编辑文字草稿');
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const audioPanel = within(panelFor('audio'));
+    expect(audioPanel.getByRole('button', { name: '生成视频' })).toBeDisabled();
+    expect(audioPanel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(audioPanel.getByRole('button', { name: '选择音频' })).toBeDisabled();
+    expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+    fireEvent.change(audioPanel.getByLabelText('动作/画面提示词'), {
+      target: { value: 'busy 时仍能编辑音频草稿' },
+    });
+    expect(audioPanel.getByLabelText('动作/画面提示词')).toHaveValue(
+      'busy 时仍能编辑音频草稿',
+    );
   });
 });
 

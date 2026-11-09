@@ -8,6 +8,7 @@ import {
 } from '../shared/generation-options';
 import { GenerationOptions } from './GenerationOptions';
 import { JobStatus } from './JobStatus';
+import { StepNumberField } from './StepNumberField';
 import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName } from './ui';
@@ -27,16 +28,25 @@ interface PendingPolish {
   context: PolishContext;
 }
 
+function isHundredth(value: number): boolean {
+  const hundredths = value * 100;
+  return Math.abs(hundredths - Math.round(hundredths)) <= 1e-7;
+}
+
 export function AudioDigitalHumanForm({
   avatarId,
   modelDirectory,
   active = true,
   pageActive = true,
+  busy = false,
+  onJobStarted,
 }: {
   avatarId: string;
   modelDirectory: string;
   active?: boolean;
   pageActive?: boolean;
+  busy?: boolean;
+  onJobStarted?: () => Promise<void>;
 }) {
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioSeconds, setAudioSeconds] = useState<number | null>(null);
@@ -47,6 +57,7 @@ export function AudioDigitalHumanForm({
   const [trimStart, setTrimStart] = useState(0);
   const [duration, setDuration] = useState<number | ''>(0);
   const [seed, setSeed] = useState(42);
+  const [steps, setSteps] = useState(6);
   const [options, setOptions] = useState<GenerationOptionsValue>(
     DEFAULT_GENERATION_OPTIONS,
   );
@@ -124,6 +135,10 @@ export function AudioDigitalHumanForm({
       setError('截取范围不能超出实际音频时长。');
       return null;
     }
+    if (!isHundredth(trimStart)) {
+      setError('起始截取时间必须按 0.01 秒步进。');
+      return null;
+    }
     const resolvedDuration = duration === '' ? audioSeconds - trimStart : duration;
     if (
       !Number.isFinite(resolvedDuration) ||
@@ -131,6 +146,10 @@ export function AudioDigitalHumanForm({
       trimStart + resolvedDuration > audioSeconds + 0.001
     ) {
       setError('截取范围不能超出实际音频时长。');
+      return null;
+    }
+    if (resolvedDuration < 0.01 || (duration !== '' && !isHundredth(resolvedDuration))) {
+      setError('截取时长必须至少为 0.01 秒，并按 0.01 秒步进。');
       return null;
     }
     return { audioPath, duration: resolvedDuration };
@@ -213,6 +232,10 @@ export function AudioDigitalHumanForm({
     if (clip === null) {
       return;
     }
+    if (!Number.isInteger(steps) || steps < 1 || steps > 100) {
+      setError('采样步数必须是 1–100 之间的整数。');
+      return;
+    }
     if (!Number.isInteger(seed) || seed < 0) {
       setError('随机种子必须是非负整数。');
       return;
@@ -237,9 +260,10 @@ export function AudioDigitalHumanForm({
         trimStart,
         duration: clip.duration,
         seed,
-        steps: 6,
+        steps,
       });
       setJobId(result.id);
+      void onJobStarted?.();
     } catch (startError) {
       setError(errorMessage(startError));
     } finally {
@@ -287,12 +311,13 @@ export function AudioDigitalHumanForm({
   return (
     <form
       className="generation-form"
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
         void startGeneration();
       }}
     >
-      <button className="button button-secondary" type="button" onClick={() => void selectAudio()} disabled={selecting}>
+      <button className="button button-secondary" type="button" onClick={() => void selectAudio()} disabled={selecting || busy}>
         <FileAudio size={16} aria-hidden="true" />
         {selecting ? '正在选择…' : '选择音频'}
       </button>
@@ -457,12 +482,22 @@ export function AudioDigitalHumanForm({
           />
         </div>
       </div>
-      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting}>
+      <StepNumberField
+        id="audio-steps"
+        label="采样步数"
+        value={steps}
+        recommended={6}
+        min={1}
+        max={100}
+        disabled={submitting || busy}
+        onChange={setSteps}
+      />
+      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy}>
         <Sparkles size={16} aria-hidden="true" />
         {polishing ? '正在润色…' : 'AI 润色'}
       </button>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <button className="button button-generate" type="submit" disabled={polishing || submitting}>
+      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy}>
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>

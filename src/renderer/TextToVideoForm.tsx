@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Sparkles, Video } from 'lucide-react';
 import { SKILL_NAMES, type SkillName } from '../shared/skills';
 import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
@@ -9,19 +9,33 @@ import {
 } from '../shared/generation-options';
 import { GenerationOptions } from './GenerationOptions';
 import { JobStatus } from './JobStatus';
+import { StepNumberField } from './StepNumberField';
 import { errorMessage } from './ui';
 import { estimateNarrationDuration } from '../shared/duration';
 
 type PromptTab = 'original' | 'polished';
 
+function isValidTextDuration(value: number, explicit: boolean): boolean {
+  return (
+    Number.isFinite(value) &&
+    value >= 4 &&
+    value <= 15 &&
+    (!explicit || Number.isInteger(value))
+  );
+}
+
 export function TextToVideoForm({
   avatarId,
   modelDirectory,
   active = true,
+  busy = false,
+  onJobStarted,
 }: {
   avatarId: string;
   modelDirectory: string;
   active?: boolean;
+  busy?: boolean;
+  onJobStarted?: () => Promise<void>;
 }) {
   const [originalText, setOriginalText] = useState('');
   const [polishedText, setPolishedText] = useState('');
@@ -30,6 +44,7 @@ export function TextToVideoForm({
   const [duration, setDuration] = useState<number | ''>(8);
   const [polishedAutoDuration, setPolishedAutoDuration] = useState<number | null>(null);
   const [seed, setSeed] = useState(42);
+  const [steps, setSteps] = useState(8);
   const [options, setOptions] = useState<GenerationOptionsValue>(
     DEFAULT_GENERATION_OPTIONS,
   );
@@ -37,6 +52,7 @@ export function TextToVideoForm({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
+  const operationRef = useRef<'polish' | 'generation' | null>(null);
 
   const skillDescription =
     skill === 'auto'
@@ -54,16 +70,20 @@ export function TextToVideoForm({
   };
 
   const polish = async (): Promise<void> => {
+    if (operationRef.current !== null) {
+      return;
+    }
     const text = originalText.trim();
     if (text.length === 0) {
       setError('请先填写原始文字。');
       return;
     }
     const resolvedDuration = resolveDuration(false);
-    if (!Number.isFinite(resolvedDuration) || resolvedDuration < 4 || resolvedDuration > 15) {
+    if (!isValidTextDuration(resolvedDuration, duration !== '')) {
       setError('视频时长必须在 4–15 秒之间。');
       return;
     }
+    operationRef.current = 'polish';
     setPolishing(true);
     setError(null);
     try {
@@ -82,19 +102,29 @@ export function TextToVideoForm({
       setActiveTab('original');
       setError(errorMessage(polishError));
     } finally {
+      if (operationRef.current === 'polish') {
+        operationRef.current = null;
+      }
       setPolishing(false);
     }
   };
 
   const startGeneration = async (): Promise<void> => {
+    if (operationRef.current !== null) {
+      return;
+    }
     const prompt = (activeTab === 'polished' ? polishedText : originalText).trim();
     if (prompt.length === 0) {
       setError('请填写用于生成的文字。');
       return;
     }
     const resolvedDuration = resolveDuration(activeTab === 'polished');
-    if (!Number.isFinite(resolvedDuration) || resolvedDuration < 4 || resolvedDuration > 15) {
+    if (!isValidTextDuration(resolvedDuration, duration !== '')) {
       setError('视频时长必须在 4–15 秒之间。');
+      return;
+    }
+    if (!Number.isInteger(steps) || steps < 1 || steps > 100) {
+      setError('采样步数必须是 1–100 之间的整数。');
       return;
     }
     if (!Number.isInteger(seed) || seed < 0) {
@@ -102,6 +132,7 @@ export function TextToVideoForm({
       return;
     }
 
+    operationRef.current = 'generation';
     setSubmitting(true);
     setError(null);
     setJobId(null);
@@ -118,12 +149,16 @@ export function TextToVideoForm({
         prompt,
         duration: resolvedDuration,
         seed,
-        steps: 8,
+        steps,
       });
       setJobId(result.id);
+      void onJobStarted?.();
     } catch (startError) {
       setError(errorMessage(startError));
     } finally {
+      if (operationRef.current === 'generation') {
+        operationRef.current = null;
+      }
       setSubmitting(false);
     }
   };
@@ -131,6 +166,7 @@ export function TextToVideoForm({
   return (
     <form
       className="generation-form"
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
         void startGeneration();
@@ -193,6 +229,17 @@ export function TextToVideoForm({
         </div>
       </div>
 
+      <StepNumberField
+        id="text-steps"
+        label="采样步数"
+        value={steps}
+        recommended={8}
+        min={1}
+        max={100}
+        disabled={submitting || busy}
+        onChange={setSteps}
+      />
+
       <div className="prompt-editor">
         <div className="tab-list" role="tablist" aria-label="提示词版本">
           <button
@@ -241,12 +288,12 @@ export function TextToVideoForm({
         )}
       </div>
 
-      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing}>
+      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy}>
         <Sparkles size={16} aria-hidden="true" />
         {polishing ? '正在润色…' : 'AI 润色'}
       </button>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <button className="button button-generate" type="submit" disabled={submitting}>
+      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy}>
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>
