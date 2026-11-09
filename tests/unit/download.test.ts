@@ -4,14 +4,15 @@ import { createHash } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { access, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import {
-  createServer,
   type IncomingMessage,
-  type Server,
   type ServerResponse,
 } from 'node:http';
+import { createServer, type Server } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { connect as connectTls, rootCertificates } from 'node:tls';
+import { Agent, fetch as undiciFetch } from 'undici';
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   downloadFile,
   downloadParts,
@@ -21,6 +22,11 @@ import type { EnvironmentArchivePart } from '../../src/shared/environment';
 
 type Fetch = typeof globalThis.fetch;
 type RequestHandler = (request: IncomingMessage, response: ServerResponse) => void;
+const [testCertificate, testPrivateKey] = await Promise.all([
+  readFile(new URL('../fixtures/localhost-test-cert.pem', import.meta.url), 'utf8'),
+  readFile(new URL('../fixtures/localhost-test-key.pem', import.meta.url), 'utf8'),
+]);
+const testTlsDispatcher = new Agent({ connect: { ca: testCertificate } });
 
 let directory: string;
 let server: Server;
@@ -75,23 +81,33 @@ function serveBuffer(
 
 function makePart(path: string, data: Buffer): EnvironmentArchivePart {
   return {
-    url: `https://download.test/${path}`,
+    url: testUrl(`/${path}`),
     path,
     size: data.length,
     sha256: sha256(data),
   };
 }
 
+function testUrl(path: string): string {
+  return new URL(path, localOrigin).href;
+}
+
 const transport: Fetch = (input, init) => {
   const original = new URL(
     typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
   );
-  if (original.protocol !== 'https:' || original.hostname !== 'download.test') {
+  if (original.protocol !== 'https:' || original.hostname !== '127.0.0.1') {
     throw new Error('Test transport received an unexpected URL');
   }
-  const mapped = new URL(`${original.pathname}${original.search}`, localOrigin);
-  return globalThis.fetch(mapped, init);
+  return undiciFetch(original, {
+    ...init,
+    dispatcher: testTlsDispatcher,
+  } as Parameters<typeof undiciFetch>[1]) as unknown as ReturnType<Fetch>;
 };
+
+afterAll(async () => {
+  await testTlsDispatcher.close();
+});
 
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), 'smo-download-'));
@@ -99,12 +115,15 @@ beforeEach(async () => {
     response.writeHead(404);
     response.end();
   };
-  server = createServer((request, response) => handler(request, response));
+  server = createServer(
+    { key: testPrivateKey, cert: testCertificate },
+    (request, response) => handler(request, response),
+  );
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('No test server port');
-  localOrigin = `http://127.0.0.1:${address.port}`;
+  localOrigin = `https://127.0.0.1:${address.port}`;
 });
 
 afterEach(async () => {
@@ -116,6 +135,41 @@ afterEach(async () => {
 });
 
 describe('downloadFile', () => {
+  test('rejects a wrong CA and a mismatched hostname with normal TLS verification', async () => {
+    const wrongCaDispatcher = new Agent({ connect: { ca: [...rootCertificates] } });
+    try {
+      await expect(
+        undiciFetch(testUrl('/model.bin'), {
+          dispatcher: wrongCaDispatcher,
+        } as Parameters<typeof undiciFetch>[1]),
+      ).rejects.toMatchObject({
+        cause: expect.objectContaining({
+          code: expect.stringMatching(/CERT|SELF_SIGNED|UNABLE_TO_VERIFY/i),
+        }),
+      });
+    } finally {
+      await wrongCaDispatcher.close();
+    }
+
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No test server port');
+    await expect(
+      new Promise<void>((resolve, reject) => {
+        const socket = connectTls({
+          host: '127.0.0.1',
+          port: address.port,
+          servername: 'wrong.example',
+          ca: testCertificate,
+        });
+        socket.once('secureConnect', () => {
+          socket.end();
+          resolve();
+        });
+        socket.once('error', reject);
+      }),
+    ).rejects.toThrow(/altname|hostname|certificate/i);
+  });
+
   test('times out when the connection never returns a response', async () => {
     const destination = join(directory, 'unreachable.bin');
     const fetchMock = vi.fn<Fetch>((_input, init) => {
@@ -130,7 +184,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/unreachable.bin',
+        url: testUrl('/unreachable.bin'),
         destination,
         expectedSize: 20,
         expectedSha256: 'a'.repeat(64),
@@ -151,7 +205,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/stalled.bin',
+        url: testUrl('/stalled.bin'),
         destination,
         expectedSize: 20,
         expectedSha256: 'a'.repeat(64),
@@ -167,7 +221,7 @@ describe('downloadFile', () => {
     handler = serveBuffer(payload);
 
     const receipt = await downloadFile({
-      url: 'https://download.test/model.bin',
+      url: testUrl('/model.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -217,7 +271,7 @@ describe('downloadFile', () => {
     };
 
     const receipt = await downloadFile({
-      url: 'https://download.test/parallel.bin',
+      url: testUrl('/parallel.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -261,7 +315,7 @@ describe('downloadFile', () => {
     };
 
     await downloadFile({
-      url: 'https://download.test/legacy-resume.bin',
+      url: testUrl('/legacy-resume.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -286,7 +340,7 @@ describe('downloadFile', () => {
     };
 
     const receipt = await downloadFile({
-      url: 'https://download.test/range-fallback.bin',
+      url: testUrl('/range-fallback.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -341,7 +395,7 @@ describe('downloadFile', () => {
       if (firstAttempt) completedFirstAttempt.add(range);
     };
     const options = {
-      url: 'https://download.test/parallel-resume.bin',
+      url: testUrl('/parallel-resume.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -374,7 +428,7 @@ describe('downloadFile', () => {
     await writeFile(`${destination}.part`, prefix);
 
     const receipt = await downloadFile({
-      url: 'https://download.test/model.bin',
+      url: testUrl('/model.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -415,7 +469,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/model.bin',
+        url: testUrl('/model.bin'),
         destination,
         expectedSize: payload.length,
         expectedSha256: sha256(payload),
@@ -446,7 +500,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/model.bin',
+        url: testUrl('/model.bin'),
         destination,
         expectedSize: payload.length,
         expectedSha256: sha256(payload),
@@ -465,7 +519,7 @@ describe('downloadFile', () => {
     handler = serveBuffer(payload, { ignoreRange: true });
 
     const receipt = await downloadFile({
-      url: 'https://download.test/model.bin',
+      url: testUrl('/model.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -490,7 +544,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/start',
+        url: testUrl('/start'),
         destination,
         expectedSize: payload.length,
         expectedSha256: sha256(payload),
@@ -593,7 +647,7 @@ describe('downloadFile', () => {
       .mockResolvedValueOnce(
         new Response(redirectBody, {
           status: 302,
-          headers: { Location: 'https://download.test/payload' },
+          headers: { Location: testUrl('/payload') },
         }),
       )
       .mockResolvedValueOnce(new Response(payload, { status: 200 }));
@@ -605,7 +659,7 @@ describe('downloadFile', () => {
     try {
       const receipt = await Promise.race([
         downloadFile({
-          url: 'https://download.test/start',
+          url: testUrl('/start'),
           destination,
           expectedSize: payload.length,
           expectedSha256: sha256(payload),
@@ -629,7 +683,7 @@ describe('downloadFile', () => {
     handler = (request, response) => {
       requests.push(request.url ?? '');
       if (request.url === '/start') {
-        response.writeHead(302, { Location: `${localOrigin}/insecure` });
+        response.writeHead(302, { Location: 'http://127.0.0.1/insecure' });
         response.end('discarded redirect body');
         return;
       }
@@ -638,7 +692,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/start',
+        url: testUrl('/start'),
         destination,
         expectedSize: payload.length,
         expectedSha256: sha256(payload),
@@ -676,7 +730,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/start',
+        url: testUrl('/start'),
         destination,
         expectedSize: payload.length,
         expectedSha256: sha256(payload),
@@ -702,7 +756,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/model.bin',
+        url: testUrl('/model.bin'),
         destination,
         expectedSize: payload.length,
         expectedSha256: sha256('different contents'),
@@ -721,7 +775,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/model.bin',
+        url: testUrl('/model.bin'),
         destination,
         expectedSize: payload.length + 1,
         expectedSha256: sha256(payload),
@@ -754,7 +808,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/large.bin',
+        url: testUrl('/large.bin'),
         destination,
         expectedSize: payload.length,
         expectedSha256: sha256(payload),
@@ -776,7 +830,7 @@ describe('downloadFile', () => {
     await rename(probePath, partPath);
 
     const receipt = await downloadFile({
-      url: 'https://download.test/large.bin',
+      url: testUrl('/large.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -795,7 +849,7 @@ describe('downloadFile', () => {
     await writeFile(destination, payload);
 
     const receipt = await downloadFile({
-      url: 'https://download.test/model.bin',
+      url: testUrl('/model.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -817,7 +871,7 @@ describe('downloadFile', () => {
     await writeFile(`${destination}.part`, payload);
 
     const receipt = await downloadFile({
-      url: 'https://download.test/model.bin',
+      url: testUrl('/model.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -837,7 +891,7 @@ describe('downloadFile', () => {
     handler = serveBuffer(payload);
 
     await downloadFile({
-      url: 'https://download.test/model.bin',
+      url: testUrl('/model.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -862,7 +916,7 @@ describe('downloadFile', () => {
     };
 
     await downloadFile({
-      url: 'https://download.test/model.bin',
+      url: testUrl('/model.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -891,7 +945,7 @@ describe('downloadFile', () => {
     };
 
     await downloadFile({
-      url: 'https://download.test/progress.bin',
+      url: testUrl('/progress.bin'),
       destination,
       expectedSize: payload.length,
       expectedSha256: sha256(payload),
@@ -930,7 +984,7 @@ describe('downloadFile', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/model.bin',
+        url: testUrl('/model.bin'),
         destination,
         expectedSize: 20,
         expectedSha256: 'a'.repeat(64),
@@ -976,7 +1030,7 @@ describe('download input validation', () => {
       const fetchMock = vi.fn<Fetch>();
       await expect(
         downloadFile({
-          url: 'https://download.test/model.bin',
+          url: testUrl('/model.bin'),
           destination: join(directory, 'model.bin'),
           expectedSize,
           expectedSha256: 'a'.repeat(64),
@@ -993,7 +1047,7 @@ describe('download input validation', () => {
       const fetchMock = vi.fn<Fetch>();
       await expect(
         downloadFile({
-          url: 'https://download.test/model.bin',
+          url: testUrl('/model.bin'),
           destination: join(directory, 'model.bin'),
           expectedSize: 1,
           expectedSha256,
@@ -1022,7 +1076,7 @@ describe('download input validation', () => {
 
     await expect(
       downloadFile({
-        url: 'https://download.test/model.bin',
+        url: testUrl('/model.bin'),
         destination,
         expectedSize: 1,
         expectedSha256: 'a'.repeat(64),
