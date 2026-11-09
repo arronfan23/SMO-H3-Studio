@@ -386,7 +386,7 @@ npm run test:e2e
 
 预期：除主线程尚未完成的已有环境导入测试外全部通过；若那两项仍未完成，使用 `--grep-invert "imports an existing environment"` 并明确记录，不得把其未提交改动纳入本计划提交。
 
-- [ ] **步骤 2：真实视频回归**
+- [x] **步骤 2：真实视频回归**
 
 使用合成参考图和短音频分别运行 4 秒文字视频与音频数字人，修改步数后从 `/history` 验证调度器和 Spark 步数一致。检查作品可播放、取消后锁释放、删除后实际媒体消失。
 
@@ -404,11 +404,19 @@ Base HEAD：`fe72a0068a942156bcaf9273f00ce6d4571bdea8`。
 - `npx playwright test --grep-invert "imports an existing environment"`：21 个测试，20 通过、1 跳过（`captures README screenshots`）；排除的已有环境导入 E2E 未执行，其余 E2E 全部通过。
 - `SMO_REAL_FFMPEG=1 npx playwright test --config playwright.real.config.ts tests/e2e/real-audio-converter.spec.ts`：1/1 通过。程序生成 1 秒音源，WAV、MP3、FLAC、M4A 均经 ffprobe 验证为预期编码、24000 Hz、单声道且时长非零；时长分别为 1、1.056、1、1 秒。
 
-真实视频回归状态：**BLOCKED**。复用已有健康且空闲的 ComfyUI，仅以程序生成的合成人物 PNG 和 4 秒合成 WAV 作为输入，通过隔离 Electron 数据目录及现有 `window.smo` IPC/真实生成 handler 提交任务；未停止后端，未读取或上传用户素材。
+真实视频回归初次状态：**BLOCKED，后续已修复并完成**。复用已有健康且空闲的 ComfyUI，仅以程序生成的合成人物 PNG 和 4 秒合成 WAV 作为输入，通过隔离 Electron 数据目录及现有 `window.smo` IPC/真实生成 handler 提交任务；未停止后端，未读取或上传用户素材。
 
 - 只提交了一次 4 秒文字视频任务，使用 0.3 MP、1 step；workId `d041edca-188c-47af-b633-73de55899058`，promptId `bb22796b-9827-4dc6-a32b-cc8ca30e6d6f`。
 - `/history` 证明 BasicScheduler `124.inputs.steps = 1` 与 Spark `smo_spark.inputs.steps = 1` 一致，Spark 类型为 `MiniMaxH3SparkAttentionSM120`；但采样器 `269.inputs.transition_step = 6`，后端报错 `selflift-Avatar: transition_step 6 out of range for 1 steps`，history 状态为 `error`，没有输出节点。
 - 按要求未换步数重试，未生成更多任务；4 秒音频数字人未执行。由于没有成功输出，两条链路的可读取/非空/可播放/时长格式验证、成功作品媒体及附属文件删除验证均未执行，音频链路的 history steps 也未验证。
 - 失败任务结束后单任务锁已释放，失败作品记录已删除；文件系统没有该 workId 的媒体或附属文件残留。ComfyUI 队列运行/等待均为 0，关闭隔离应用后健康检查仍为 HTTP 200。
 - 删除前后对比确认输出目录原有 145 个文件均未缺失、大小和修改时间未变，用户原始 `studio.sqlite` 与 `environment.json` 也未变化；临时数据库、合成输入和模特已清理。
+
+低步数问题由提交 `7c9ff4c9c51199a8764321959028a6c06e4b379a` 修复，规格与代码质量审查均通过：
+
+- 节点要求 `1 <= transition_step <= len(sigmas) - 2` 且至少一个高分辨率步。修复保留 Scheduler/Spark 用户步数，低步数缩短 transition，单步通过 Refiner 补出中间 sigma；默认文字 8/6、音频 6/4 不变。
+- 相关生成、工作流、Spark 与 IPC 测试 377/377 通过，类型检查通过；规格审查独立运行 508/508，真实 Scheduler/Refiner 对两种模式全部 1-100 步共 200 组验证无约束失败。
+- 真实文字任务：0.3 MP、1 step，history 无错误，三个步数字段一致；输出 4.458 秒、1,939,205 字节，完整解码通过，任务锁释放。
+- 真实音频任务：相同参数，history 无错误；输出 6.583 秒、3,231,359 字节，完整解码通过，任务锁释放。
+- 测试作品、prompt history、上传媒体和伴随 MP4/PNG 均已删除，复核无残留，ComfyUI 队列为空。
 
