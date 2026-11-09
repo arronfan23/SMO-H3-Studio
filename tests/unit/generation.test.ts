@@ -1904,6 +1904,23 @@ describe('GenerationHandler retry', () => {
 });
 
 describe('GenerationHandler ComfyUI startup', () => {
+  test('marks a new work failed when the coordinator is already closed', async () => {
+    const harness = await createHarness();
+    await harness.jobCoordinator.close();
+
+    await expect(harness.startGeneration(harness.textRequest)).rejects.toThrow(
+      /closed/i,
+    );
+
+    const works = harness.store.listWorks();
+    expect(works).toHaveLength(1);
+    expect(works[0]).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/closed/i),
+      outputPath: null,
+    });
+  });
+
   test('fails the queued work without uploading when ComfyUI startup fails', async () => {
     const ensureReady = vi
       .fn()

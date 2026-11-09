@@ -17,6 +17,17 @@ const api: SmoApi = {
     cancel: (id) => ipcRenderer.invoke('jobs:cancel', id === undefined ? {} : { id }),
     getState: () => ipcRenderer.invoke('jobs:getState', {}),
   },
+  speech: {
+    getCapabilities: (speechMode) =>
+      ipcRenderer.invoke('speech:getCapabilities', { speechMode }),
+  },
+  components: {
+    getState: (id) => ipcRenderer.invoke('components:getState', { id }),
+    install: (id) => ipcRenderer.invoke('components:install', { id }),
+    cancel: async (id) => {
+      await ipcRenderer.invoke('components:cancel', { id });
+    },
+  },
   files: {
     selectImage: () => ipcRenderer.invoke('files:selectImage', {}),
     selectAudio: () => ipcRenderer.invoke('files:selectAudio', {}),

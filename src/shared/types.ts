@@ -1,6 +1,7 @@
 export type VideoMode = 'text' | 'audio';
 export type WorkMode = VideoMode | 'speech' | 'image';
 export type AudioOutputFormat = 'wav' | 'mp3' | 'flac' | 'm4a';
+export type SpeechMode = 'custom' | 'clone';
 
 export interface VideoGenerationRequest {
   mode: VideoMode;
@@ -14,7 +15,27 @@ export interface VideoGenerationRequest {
   retryOf?: string;
 }
 
-export type GenerationRequest = VideoGenerationRequest;
+export interface SpeechGenerationRequest {
+  mode: 'speech';
+  speechMode: SpeechMode;
+  prompt: string;
+  language: string;
+  outputFormat: AudioOutputFormat;
+  speaker?: string;
+  instruct?: string;
+  referenceAudioPath?: string;
+  referenceText?: string;
+  retryOf?: string;
+  /** Legacy video metadata reads can inspect this only as undefined. */
+  steps?: never;
+}
+
+export type GenerationRequest = VideoGenerationRequest | SpeechGenerationRequest;
+
+export interface SpeechCapabilities {
+  speakers: string[];
+  languages: string[];
+}
 
 export interface GenerationStartResult {
   /** Identifies a queued job; generation may still be running. */

@@ -10,6 +10,7 @@ import {
 import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
 import type { Store } from './store';
+import { isSpeechGenerationRequest } from './speech-generation';
 import {
   applySparkAcceleration,
   selectSparkAcceleration,
@@ -20,6 +21,8 @@ import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
 import type {
   GenerationRequest,
   GenerationStartResult,
+  VideoGenerationRequest,
+  VideoMode,
   WorkExecutionState,
   WorkProgress,
   WorkStage,
@@ -58,7 +61,7 @@ export interface GenerationHandlerOptions {
   outputDirectory: string;
   mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
   uploadsDirectory: string;
-  workflowResolver?: (mode: GenerationRequest["mode"]) => string;
+  workflowResolver?: (mode: VideoMode) => string;
   ensureReady?: () => Promise<unknown>;
   acceleration?: SparkAccelerationEnvironment;
   copyFile?: typeof copyFile;
@@ -91,8 +94,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function sanitizeRequest(request: GenerationRequest): GenerationRequest {
-  const sanitized: GenerationRequest = {
+function sanitizeRequest(request: VideoGenerationRequest): VideoGenerationRequest {
+  const sanitized: VideoGenerationRequest = {
     mode: request.mode,
     avatarId: request.avatarId,
     prompt: request.prompt,
@@ -109,7 +112,7 @@ function sanitizeRequest(request: GenerationRequest): GenerationRequest {
   return sanitized;
 }
 
-function validateRequest(request: GenerationRequest): void {
+function validateRequest(request: VideoGenerationRequest): void {
   if (
     typeof request.avatarId !== 'string' ||
     request.avatarId.trim().length === 0
@@ -150,7 +153,7 @@ function validateRequest(request: GenerationRequest): void {
 
 function selectVideoOutput(
   files: ComfyOutputFile[],
-  mode: GenerationRequest['mode'],
+  mode: VideoMode,
 ): ComfyOutputFile {
   const outputNodeId = WORKFLOW_NODES[mode].output;
   const output = files.find(
@@ -262,7 +265,7 @@ async function cleanupStagedAudio(
 }
 
 async function validateStagedAudioDuration(
-  request: GenerationRequest,
+  request: VideoGenerationRequest,
   stagedPath: string,
   readDuration: AudioDurationReader,
 ): Promise<void> {
@@ -304,6 +307,9 @@ export function createGenerationHandler(
   const progressErrorReporter = options.progressErrorReporter ?? reportProgressError;
 
   return async (input, executionOptions = {}) => {
+    if (input.mode === 'speech') {
+      throw new Error('Speech generation requires the speech generation handler');
+    }
     validateRequest(input);
     const avatar = store
       .listAvatars()
@@ -648,18 +654,28 @@ export function createGenerationHandler(
       }
     };
 
-    // Failures settle in Store and coordinator events; callers receive the started id immediately.
-    void jobCoordinator
-      .enqueue({
-        id: workId,
-        run,
-        cancel: async () => {
-          execution.cancelRequested = true;
-          await interruptIfRequested();
-        },
-      })
-      .catch(() => undefined);
-    return { id: workId };
+    try {
+      // Runtime failures settle in Store and coordinator events; callers
+      // receive the started id immediately.
+      void jobCoordinator
+        .enqueue({
+          id: workId,
+          run,
+          cancel: async () => {
+            execution.cancelRequested = true;
+            await interruptIfRequested();
+          },
+        })
+        .catch(() => undefined);
+      return { id: workId };
+    } catch (error) {
+      await cleanupStagedAudio(stagedAudioPath, remove, cleanupErrorReporter);
+      store.updateWork(workId, {
+        status: 'failed',
+        error: errorMessage(error),
+      });
+      throw error;
+    }
   };
 }
 
@@ -669,8 +685,8 @@ export interface RetryHandlerOptions {
   startGeneration: GenerationHandler;
 }
 
-type RetryableRequest = Omit<GenerationRequest, 'steps'> & {
-  steps?: GenerationRequest['steps'];
+type RetryableRequest = Omit<VideoGenerationRequest, 'steps'> & {
+  steps?: VideoGenerationRequest['steps'];
 };
 
 function isRetryableRequest(value: unknown): value is RetryableRequest {
@@ -761,12 +777,34 @@ export function createRetryHandler(
     if (work.status !== 'failed') {
       throw new Error('Only failed works can be retried');
     }
+    if (work.mode === 'speech') {
+      if (!isSpeechGenerationRequest(work.metadata?.request)) {
+        throw new Error('Work metadata is missing a valid speech request');
+      }
+      const storedRequest = work.metadata.request;
+      if (storedRequest.speechMode === 'clone') {
+        const referenceAudioPath = storedRequest.referenceAudioPath!;
+        try {
+          const referenceStats = await stat(referenceAudioPath);
+          if (!referenceStats.isFile()) {
+            throw new Error('Original reference audio is not a file');
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error('Original reference audio is missing');
+          }
+          throw error;
+        }
+        await mediaRegistry.authorizeSelectedFile(referenceAudioPath);
+      }
+      return startGeneration({ ...storedRequest, retryOf: id });
+    }
     if (!isRetryableMetadata(work.metadata)) {
       throw new Error('Work metadata is missing request or workflowVersion');
     }
 
     const storedRequest = work.metadata.request;
-    const request: GenerationRequest = {
+    const request: VideoGenerationRequest = {
       ...storedRequest,
       steps: storedRequest.steps ?? (storedRequest.mode === 'text' ? 8 : 6),
     };

@@ -198,8 +198,13 @@ export class SpeechProcessManager {
   }
 
   close(): Promise<void> {
-    this.closePromise ??= this.performClose();
-    return this.closePromise;
+    if (this.closePromise !== null) return this.closePromise;
+    const pending = this.performClose();
+    this.closePromise = pending;
+    void pending.catch(() => {
+      if (this.closePromise === pending) this.closePromise = null;
+    });
+    return pending;
   }
 
   private async startAndWait(): Promise<void> {
@@ -381,6 +386,7 @@ export class SpeechProcessManager {
 
   private async performClose(): Promise<void> {
     this.closed = true;
+    this.processError = null;
     const child = this.child;
     if (child === null) return;
     if (this.baseUrl !== null && !this.exited) {

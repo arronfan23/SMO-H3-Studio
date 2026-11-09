@@ -159,11 +159,12 @@ describe('production application services', () => {
       id: firstWork.id,
       run: () => firstGate,
     });
-    const rejectedSecond = services.jobCoordinator.enqueue({
-      id: secondWork.id,
-      run: async () => undefined,
-    });
-    await expect(rejectedSecond).rejects.toThrow('Another generation is already running');
+    expect(() =>
+      services.jobCoordinator.enqueue({
+        id: secondWork.id,
+        run: async () => undefined,
+      }),
+    ).toThrow('Another generation is already running');
 
     expect(services.store.listWorks().find((work) => work.id === firstWork.id)?.status).toBe(
       'running',

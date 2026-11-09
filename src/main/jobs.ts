@@ -38,6 +38,7 @@ interface ActiveItem {
   reject: (reason?: unknown) => void;
   cancelPromise?: Promise<void>;
   cancelled?: boolean;
+  terminal?: boolean;
   settled?: Promise<void>;
   settle?: () => void;
 }
@@ -52,6 +53,8 @@ export class JobCoordinator {
   private readonly closeTimeoutMs: number;
   private active: ActiveItem | null = null;
   private closed = false;
+  private closePromise: Promise<void> | null = null;
+  private closingItem: ActiveItem | null = null;
 
   constructor(options: JobCoordinatorOptions = {}) {
     this.onEvent = options.onEvent;
@@ -74,7 +77,7 @@ export class JobCoordinator {
     return [...this.completed];
   }
 
-  async enqueue(job: Job): Promise<void> {
+  enqueue(job: Job): Promise<void> {
     if (job.id.trim().length === 0) {
       throw new Error('Job id must not be empty');
     }
@@ -125,48 +128,75 @@ export class JobCoordinator {
     return Promise.resolve();
   }
 
-  async close(): Promise<void> {
-    if (this.closed) {
-      return;
+  close(): Promise<void> {
+    if (this.closePromise !== null) {
+      return this.closePromise;
     }
     this.closed = true;
+    const item = this.closingItem ?? this.active;
+    if (item === null) {
+      this.closePromise = Promise.resolve();
+      return this.closePromise;
+    }
+    this.closingItem = item;
+    const pending = this.performClose();
+    this.closePromise = pending;
+    void pending.catch(() => {
+      if (this.closePromise === pending) this.closePromise = null;
+    });
+    return pending;
+  }
 
-    if (this.active !== null) {
-      const item = this.active;
-      if (item.job.cancel !== undefined && item.cancelPromise === undefined) {
-        item.cancelPromise = (async () => {
-          await item.job.cancel!();
-        })();
-      }
+  private async performClose(): Promise<void> {
+    const item = this.closingItem!;
+    if (item.job.cancel !== undefined && item.cancelPromise === undefined) {
+      item.cancelPromise = (async () => {
+        await item.job.cancel!();
+      })();
+    }
 
-      if (item.cancelPromise !== undefined) {
-        item.cancelled = true;
-        try {
-          await item.cancelPromise;
-        } catch {
-          // The cancellation itself may fail; the job promise is still rejected as cancelled.
-        }
-        const error = new Error('Generation cancelled');
-        this.reservedIds.delete(item.job.id);
-        this.emit({ id: item.job.id, status: 'failed', error });
-        item.reject(error);
-        this.active = null;
-      } else if (item.settled !== undefined) {
-        const timeout = setTimeout(() => {
-          if (this.active !== item || item.cancelled) {
-            return;
-          }
-          item.cancelled = true;
-          const error = new Error('Generation cancelled');
-          this.reservedIds.delete(item.job.id);
-          this.emit({ id: item.job.id, status: 'failed', error });
-          item.reject(error);
-          this.active = null;
-          item.settle?.();
-        }, this.closeTimeoutMs);
-        await item.settled;
-        clearTimeout(timeout);
-      }
+    if (item.cancelPromise !== undefined) item.cancelled = true;
+    const cancellation = item.cancelPromise?.catch(() => undefined);
+    const cleanup =
+      cancellation === undefined
+        ? item.settled!
+        : Promise.all([cancellation, item.settled!]).then(() => undefined);
+    await this.waitForClose(item, cleanup);
+    if (item.terminal) {
+      this.closingItem = null;
+      return;
+    }
+
+    if (item.cancelPromise !== undefined) {
+      const error = new Error('Generation cancelled');
+      item.terminal = true;
+      this.reservedIds.delete(item.job.id);
+      this.emit({ id: item.job.id, status: 'failed', error });
+      item.reject(error);
+      this.closingItem = null;
+    }
+  }
+
+  private async waitForClose(
+    item: ActiveItem,
+    cleanup: Promise<unknown>,
+  ): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        cleanup,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new Error(
+                `JobCoordinator close timed out waiting for job ${item.job.id} cleanup`,
+              ),
+            );
+          }, this.closeTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -201,18 +231,16 @@ export class JobCoordinator {
   }
 
   private async run(item: ActiveItem): Promise<void> {
+    let outcome: { status: 'done' } | { status: 'failed'; error: unknown } | null =
+      null;
     try {
       await item.job.run();
       if (!item.cancelled) {
-        this.completed.push(item.job.id);
-        this.emit({ id: item.job.id, status: 'done' });
-        item.resolve();
+        outcome = { status: 'done' };
       }
     } catch (error) {
       if (!item.cancelled) {
-        this.reservedIds.delete(item.job.id);
-        this.emit({ id: item.job.id, status: 'failed', error });
-        item.reject(error);
+        outcome = { status: 'failed', error };
       }
     } finally {
       if (item.cancelPromise !== undefined) {
@@ -224,6 +252,17 @@ export class JobCoordinator {
       }
       if (this.active === item) {
         this.active = null;
+      }
+      if (outcome?.status === 'done') {
+        this.completed.push(item.job.id);
+        item.terminal = true;
+        this.emit({ id: item.job.id, status: 'done' });
+        item.resolve();
+      } else if (outcome?.status === 'failed') {
+        this.reservedIds.delete(item.job.id);
+        item.terminal = true;
+        this.emit({ id: item.job.id, status: 'failed', error: outcome.error });
+        item.reject(outcome.error);
       }
       item.settle?.();
     }

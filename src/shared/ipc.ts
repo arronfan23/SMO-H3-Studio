@@ -8,12 +8,20 @@ import { ASPECT_RATIO_OPTIONS, type AspectRatio } from './generation-options';
 import { H3_MODES, type H3Mode } from './prompt-contract';
 import { SKILL_NAMES, type SkillName } from './skills';
 import type {
+  MediaComponentId,
+  MediaComponentState,
+} from './media-components';
+import type {
   Avatar,
   GenerationRequest,
   GenerationStartResult,
   HardwareInfo,
   HardwareProfile,
   HardwareRecommendationInput,
+  SpeechCapabilities,
+  SpeechGenerationRequest,
+  SpeechMode,
+  VideoGenerationRequest,
   VideoMode,
   LlmProfile,
   LlmProfileView,
@@ -48,6 +56,10 @@ export const IPC_CHANNELS = [
   'jobs:retry',
   'jobs:cancel',
   'jobs:getState',
+  'speech:getCapabilities',
+  'components:getState',
+  'components:install',
+  'components:cancel',
   'files:selectImage',
   'files:selectAudio',
   'files:authorizeDroppedImage',
@@ -120,7 +132,7 @@ const httpUrlSchema = z.string().superRefine((value, context) => {
   }
 });
 
-const generationRequestSchema = z
+const videoGenerationRequestSchema = z
   .object({
     mode: z.enum(['text', 'audio']),
     avatarId: nonEmptyString,
@@ -141,7 +153,50 @@ const generationRequestSchema = z
         message: 'audioPath is required for audio generation',
       });
     }
-  }) satisfies z.ZodType<GenerationRequest>;
+  }) satisfies z.ZodType<VideoGenerationRequest>;
+
+const speechGenerationRequestSchema = z
+  .object({
+    mode: z.literal('speech'),
+    speechMode: z.enum(['custom', 'clone']),
+    prompt: nonEmptyString,
+    language: nonEmptyString,
+    outputFormat: z.enum(['wav', 'mp3', 'flac', 'm4a']),
+    speaker: nonEmptyString.optional(),
+    instruct: z.string().optional(),
+    referenceAudioPath: nonEmptyString.optional(),
+    referenceText: z.string().optional(),
+    retryOf: nonEmptyString.optional(),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (request.speechMode === 'custom' && request.speaker === undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['speaker'],
+        message: 'speaker is required for custom speech generation',
+      });
+    }
+    if (
+      request.speechMode === 'clone' &&
+      request.referenceAudioPath === undefined
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['referenceAudioPath'],
+        message: 'referenceAudioPath is required for clone speech generation',
+      });
+    }
+  }) satisfies z.ZodType<SpeechGenerationRequest>;
+
+const generationRequestSchema = z.union([
+  videoGenerationRequestSchema,
+  speechGenerationRequestSchema,
+]) satisfies z.ZodType<GenerationRequest>;
+
+const componentIdSchema = z
+  .enum(['speech', 'image']) satisfies z.ZodType<MediaComponentId>;
+const componentRequestSchema = z.object({ id: componentIdSchema }).strict();
 
 const llmProfileInputSchema = z
   .object({
@@ -277,6 +332,13 @@ export function createIpcSchema() {
       z.object({ id: nonEmptyString.optional() }).strict(),
     ),
     requestSchema('jobs:getState', emptyPayload),
+    requestSchema(
+      'speech:getCapabilities',
+      z.object({ speechMode: z.enum(['custom', 'clone']) }).strict(),
+    ),
+    requestSchema('components:getState', componentRequestSchema),
+    requestSchema('components:install', componentRequestSchema),
+    requestSchema('components:cancel', componentRequestSchema),
     requestSchema('files:selectImage', emptyPayload),
     requestSchema('files:selectAudio', emptyPayload),
     requestSchema(
@@ -398,6 +460,15 @@ export interface SmoApi {
     retry(id: string): Promise<GenerationStartResult>;
     cancel(id?: string): Promise<void>;
     getState(): Promise<JobState>;
+  };
+
+  readonly speech: {
+    getCapabilities(speechMode: SpeechMode): Promise<SpeechCapabilities>;
+  };
+  readonly components: {
+    getState(id: MediaComponentId): Promise<MediaComponentState>;
+    install(id: MediaComponentId): Promise<MediaComponentState>;
+    cancel(id: MediaComponentId): Promise<void>;
   };
 
   readonly files: {

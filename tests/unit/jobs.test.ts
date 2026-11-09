@@ -28,8 +28,9 @@ describe('JobCoordinator execution', () => {
     const secondRun = vi.fn();
 
     void coordinator.enqueue({ id: 'one', run: () => first.promise });
-    await expect(coordinator.enqueue({ id: 'two', run: secondRun }))
-      .rejects.toThrow('Another generation is already running');
+    expect(() => coordinator.enqueue({ id: 'two', run: secondRun })).toThrow(
+      'Another generation is already running',
+    );
     expect(coordinator.activeId).toBe('one');
     expect(events.map((event) => event.status)).not.toContain('pending');
     expect(secondRun).not.toHaveBeenCalled();
@@ -46,7 +47,7 @@ describe('JobCoordinator execution', () => {
     const firstGate = deferred();
     const first = coordinator.enqueue({ id: 'a', run: () => firstGate.promise });
 
-    await expect(coordinator.enqueue({ id: 'a', run: async () => {} })).rejects.toThrow(
+    expect(() => coordinator.enqueue({ id: 'a', run: async () => {} })).toThrow(
       /duplicate job id/i,
     );
 
@@ -54,10 +55,10 @@ describe('JobCoordinator execution', () => {
     await first;
     await coordinator.enqueue({ id: 'b', run: async () => {} });
 
-    await expect(coordinator.enqueue({ id: 'a', run: async () => {} })).rejects.toThrow(
+    expect(() => coordinator.enqueue({ id: 'a', run: async () => {} })).toThrow(
       /duplicate job id/i,
     );
-    await expect(coordinator.enqueue({ id: 'b', run: async () => {} })).rejects.toThrow(
+    expect(() => coordinator.enqueue({ id: 'b', run: async () => {} })).toThrow(
       /duplicate job id/i,
     );
   });
@@ -110,6 +111,47 @@ describe('JobCoordinator execution', () => {
     expect(events.at(-1)?.error).toBe(failure);
   });
 
+  test.each(['done', 'failed'] as const)(
+    'accepts the next job inside the %s callback',
+    async (terminalStatus) => {
+      const failure = new Error('first job failed');
+      let nextCompletion: Promise<void> | undefined;
+      let nextRuns = 0;
+      const coordinator = new JobCoordinator({
+        onEvent: (event) => {
+          if (event.id === 'first' && event.status === terminalStatus) {
+            nextCompletion = coordinator.enqueue({
+              id: 'second',
+              run: async () => {
+                nextRuns += 1;
+              },
+            });
+          }
+        },
+      });
+
+      const first = coordinator.enqueue({
+        id: 'first',
+        run: async () => {
+          if (terminalStatus === 'failed') throw failure;
+        },
+      });
+      if (terminalStatus === 'failed') {
+        await expect(first).rejects.toBe(failure);
+      } else {
+        await first;
+      }
+
+      expect(nextCompletion).toBeDefined();
+      await expect(nextCompletion!).resolves.toBeUndefined();
+      expect(nextRuns).toBe(1);
+      expect(coordinator.completedIds).toEqual(
+        terminalStatus === 'done' ? ['first', 'second'] : ['second'],
+      );
+      expect(coordinator.activeCount).toBe(0);
+    },
+  );
+
   test('waits for asynchronous cancellation before accepting another job', async () => {
     const coordinator = new JobCoordinator();
     const runGate = deferred();
@@ -130,21 +172,22 @@ describe('JobCoordinator execution', () => {
     expect(cancelCalls).toBe(1);
 
     runGate.resolve();
-    await first;
+    await Promise.resolve();
     expect(calls).toEqual(['cancel started']);
     expect(coordinator.activeCount).toBe(1);
-    const blocked = coordinator.enqueue({
-      id: 'b',
-      run: async () => {
-        calls.push('b started');
-      },
-    });
-    blocked.catch(() => undefined);
+    expect(() =>
+      coordinator.enqueue({
+        id: 'b',
+        run: async () => {
+          calls.push('b started');
+        },
+      }),
+    ).toThrow('Another generation is already running');
     expect(coordinator.activeId).toBe('a');
 
     cancelGate.resolve();
     await cancellation;
-    await expect(blocked).rejects.toThrow('Another generation is already running');
+    await first;
     await coordinator.enqueue({
       id: 'b',
       run: async () => {
@@ -169,13 +212,14 @@ describe('JobCoordinator execution', () => {
         firstCancellations += 1;
       },
     });
-    const second = coordinator.enqueue({
-      id: 'second',
-      run: async () => {
-        secondJobRan = true;
-      },
-    });
-    second.catch(() => undefined);
+    expect(() =>
+      coordinator.enqueue({
+        id: 'second',
+        run: async () => {
+          secondJobRan = true;
+        },
+      }),
+    ).toThrow('Another generation is already running');
 
     await coordinator.cancel('second');
 
@@ -187,7 +231,6 @@ describe('JobCoordinator execution', () => {
 
     firstGate.resolve();
     await first;
-    await expect(second).rejects.toThrow('Another generation is already running');
   });
 
   test('cancels the requested active job without touching a different active id', async () => {
@@ -289,14 +332,14 @@ describe('JobCoordinator recovery', () => {
       expect((event.error as Error).message).toMatch(/interrupted.*restart/i);
     }
 
-    await expect(
+    expect(() =>
       coordinator.enqueue({
         id: 'finished',
         run: async () => {
           completedJobRan = true;
         },
       }),
-    ).rejects.toThrow(/duplicate job id/i);
+    ).toThrow(/duplicate job id/i);
     expect(completedJobRan).toBe(false);
   });
 

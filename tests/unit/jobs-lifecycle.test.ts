@@ -3,29 +3,68 @@
 import { describe, expect, test, vi } from 'vitest';
 import { JobCoordinator } from '../../src/main/jobs';
 
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: Deferred<T>['resolve'];
+  let reject!: Deferred<T>['reject'];
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('JobCoordinator lifecycle', () => {
-  test('close cancels the active job', async () => {
-    const coordinator = new JobCoordinator();
+  test('close publishes cancellation only after the active run finally cleanup', async () => {
+    const coordinator = new JobCoordinator({
+      onEvent: (event) => events.push(event.status),
+    });
     const events: string[] = [];
+    const cleanup = deferred<void>();
+    let rejectRun!: (reason: Error) => void;
 
     const first = coordinator.enqueue({
       id: 'first',
       run: async () => {
         events.push('first-run');
-        await new Promise(() => undefined);
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            rejectRun = reject;
+          });
+        } finally {
+          await cleanup.promise;
+          events.push('first-finally');
+        }
       },
       cancel: async () => {
         events.push('first-cancel');
+        rejectRun(new Error('stop active run'));
       },
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(coordinator.activeCount).toBe(1);
 
-    await coordinator.close();
+    const closing = coordinator.close();
+    await vi.waitFor(() => expect(events).toContain('first-cancel'));
+    const eventsBeforeCleanup = [...events];
+    cleanup.resolve();
+    await closing;
 
-    expect(events).toContain('first-cancel');
     await expect(first).rejects.toThrow(/cancelled/i);
+    expect(eventsBeforeCleanup).not.toContain('failed');
+    expect(events).toEqual([
+      'running',
+      'first-run',
+      'first-cancel',
+      'first-finally',
+      'failed',
+    ]);
     expect(coordinator.activeCount).toBe(0);
   });
 
@@ -39,12 +78,12 @@ describe('JobCoordinator lifecycle', () => {
       },
     });
 
-    await expect(
+    expect(() =>
       coordinator.enqueue({
         id: 'second',
         run: async () => undefined,
       }),
-    ).rejects.toThrow('Another generation is already running');
+    ).toThrow('Another generation is already running');
 
     await coordinator.close();
 
@@ -52,16 +91,21 @@ describe('JobCoordinator lifecycle', () => {
     expect(coordinator.activeCount).toBe(0);
   });
 
-  test('enqueue after close rejects immediately', async () => {
+  test('enqueue after close throws synchronously', async () => {
     const coordinator = new JobCoordinator();
     await coordinator.close();
 
-    await expect(
-      coordinator.enqueue({
-        id: 'late',
-        run: async () => undefined,
-      }),
-    ).rejects.toThrow(/closed/i);
+    let result: Promise<void> | undefined;
+    try {
+      expect(() => {
+        result = coordinator.enqueue({
+          id: 'late',
+          run: async () => undefined,
+        });
+      }).toThrow(/closed/i);
+    } finally {
+      await result?.catch(() => undefined);
+    }
   });
 
   test('close can be awaited multiple times', async () => {
@@ -99,25 +143,62 @@ describe('JobCoordinator lifecycle', () => {
     vi.useRealTimers();
   });
 
-  test('close times out a non-cancellable active job', async () => {
-    const coordinator = new JobCoordinator({ closeTimeoutMs: 50 });
+  test('close timeout preserves the active job and can finish cleanup on a later close', async () => {
     const events: string[] = [];
+    const coordinator = new JobCoordinator({
+      closeTimeoutMs: 50,
+      onEvent: (event) => events.push(event.status),
+    });
+    const cleanup = deferred<void>();
+    let rejectRun!: (reason: Error) => void;
 
     const first = coordinator.enqueue({
       id: 'first',
       run: async () => {
         events.push('first-run');
-        await new Promise(() => undefined);
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            rejectRun = reject;
+          });
+        } finally {
+          await cleanup.promise;
+          events.push('first-finally');
+        }
+      },
+      cancel: async () => {
+        rejectRun(new Error('stop active run'));
       },
     });
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(coordinator.activeCount).toBe(1);
 
+    const firstClose = coordinator.close();
+    const concurrentClose = coordinator.close();
+    const concurrentCloseShared = concurrentClose === firstClose;
+    void concurrentClose.catch(() => undefined);
+    const firstCloseResult = await firstClose.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const activeCountAtTimeout = coordinator.activeCount;
+    const eventsAtTimeout = [...events];
+    cleanup.resolve();
+    await vi.waitFor(() => expect(coordinator.activeCount).toBe(0));
+    expect(events).not.toContain('failed');
     await coordinator.close();
 
     await expect(first).rejects.toThrow(/cancelled|closed/i);
+    const successfulClose = coordinator.close();
+    await successfulClose;
+    expect(coordinator.close()).toBe(successfulClose);
+    expect(concurrentCloseShared).toBe(true);
+    expect(firstCloseResult).toBeInstanceOf(Error);
+    expect(String(firstCloseResult)).toMatch(/timed out|timeout/i);
+    expect(activeCountAtTimeout).toBe(1);
+    expect(eventsAtTimeout).not.toContain('failed');
+    expect(events.filter((event) => event === 'failed')).toHaveLength(1);
     expect(coordinator.activeCount).toBe(0);
-    expect(events).toContain('first-run');
+    expect(events).toContain('first-finally');
   });
 });

@@ -672,10 +672,15 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
     const runSecond = async (): Promise<void> => {
       calls.push('second started');
     };
+    const completion = client.waitForCompletion('prompt-1');
+    const completionRejection = expectRejection(
+      completion,
+      /execution interrupted.*node-cancel/i,
+    );
 
     const first = coordinator.enqueue({
       id: 'first',
-      run: () => client.waitForCompletion('prompt-1'),
+      run: () => completion,
       cancel: async () => {
         calls.push('cancel started');
         await client.cancel();
@@ -683,17 +688,22 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
         calls.push('cancel finished');
       },
     });
-    const rejectedSecond = coordinator.enqueue({
-      id: 'second',
-      run: runSecond,
-    });
-    await expect(rejectedSecond).rejects.toThrow('Another generation is already running');
+    expect(() =>
+      coordinator.enqueue({
+        id: 'second',
+        run: runSecond,
+      }),
+    ).toThrow('Another generation is already running');
 
     await connected;
     const cancellation = coordinator.cancelActive();
+    const firstRejection = expectRejection(
+      first,
+      /execution interrupted.*node-cancel/i,
+    );
     let assertionFailure: unknown;
     try {
-      await expectRejection(first, /execution interrupted.*node-cancel/i);
+      await completionRejection;
       expect(calls).toEqual(['cancel started']);
       expect(coordinator.activeCount).toBe(1);
     } catch (error) {
@@ -703,6 +713,7 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
     }
 
     await cancellation;
+    await firstRejection;
     await coordinator.enqueue({ id: 'second', run: runSecond });
     if (assertionFailure !== undefined) {
       throw assertionFailure;

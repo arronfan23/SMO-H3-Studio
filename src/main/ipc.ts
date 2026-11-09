@@ -8,6 +8,7 @@ import type { LlmConfigStore } from './llm-config';
 import type { SkillsService } from './skills';
 import type { RecordingService } from './recordings';
 import type { Store } from './store';
+import type { MediaComponentService } from './media-components';
 import {
   createIpcSchema,
   IPC_CHANNELS,
@@ -27,6 +28,8 @@ import type {
   HardwareInfo,
   HardwareProfile,
   HardwareRecommendationInput,
+  SpeechCapabilities,
+  SpeechMode,
   VideoMode,
 } from '../shared/types';
 
@@ -42,7 +45,14 @@ export interface IpcServices {
   startGeneration: GenerationHandler;
   retryWork: (id: string) => Promise<GenerationStartResult>;
   deleteWork: (id: string) => Promise<void>;
-  jobCoordinator: Pick<JobCoordinator, 'activeId' | 'cancel' | 'cancelActive'>;
+  jobCoordinator: Pick<
+    JobCoordinator,
+    'activeCount' | 'activeId' | 'cancel' | 'cancelActive'
+  >;
+  speech: {
+    getCapabilities: (speechMode: SpeechMode) => Promise<SpeechCapabilities>;
+  };
+  components: Pick<MediaComponentService, 'getState' | 'install' | 'cancel'>;
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
@@ -105,6 +115,20 @@ async function dispatch(
       return undefined;
     case 'jobs:getState':
       return { activeId: services.jobCoordinator.activeId };
+    case 'speech:getCapabilities':
+      return services.speech.getCapabilities(request.payload.speechMode);
+    case 'components:getState':
+      return services.components.getState(request.payload.id);
+    case 'components:install':
+      if (services.jobCoordinator.activeCount > 0) {
+        throw new Error(
+          'Cannot install a component while another generation is running',
+        );
+      }
+      return services.components.install(request.payload.id);
+    case 'components:cancel':
+      services.components.cancel(request.payload.id);
+      return undefined;
     case 'files:selectImage':
       return services.files.selectImage();
     case 'files:selectAudio':

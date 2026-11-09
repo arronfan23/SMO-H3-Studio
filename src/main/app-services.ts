@@ -23,6 +23,10 @@ import {
 import { EnvironmentStore, resolveEnvironmentPaths } from './environment-store';
 import { FileService, type FileDialog } from './files';
 import { createGenerationHandler, createRetryHandler } from './generation';
+import { createSpeechGenerationHandler } from './speech-generation';
+import { SpeechProcessManager } from './speech-process';
+import { SpeechRuntime } from './speech-runtime';
+import { MediaComponentService } from './media-components';
 import type { AudioConverter } from './audio-converter';
 import { RecordingService } from './recordings';
 import { detectHardware, recommendHardware } from './hardware';
@@ -65,10 +69,14 @@ export interface AppServicesOptions {
   outputDirectory?: string;
   comfyBaseUrl?: string;
   generationHandler?: GenerationHandler;
+  videoGenerationHandler?: GenerationHandler;
   errorReporter?: JobEventErrorHandler;
   fileDialog?: FileDialog;
   mediaProtocol?: MediaProtocolRegistrar;
   recordingConverter?: AudioConverter;
+  speechConverter?: AudioConverter;
+  speechDurationReader?: AudioDurationReader;
+  speechProcessFactory?: () => SpeechProcessManager;
 }
 
 export function resolveStringOption(
@@ -113,6 +121,19 @@ function environmentManifestPath(): string {
   return fileURLToPath(
     new URL('../../resources/environment/selflift-spark.json', import.meta.url),
   );
+}
+
+function speechProjectDirectory(): string {
+  const resourcesPath = (
+    process as NodeJS.Process & { resourcesPath?: string }
+  ).resourcesPath;
+  if (resourcesPath) {
+    const packaged = join(resourcesPath, 'resources', 'speech');
+    if (existsSync(join(packaged, 'qwen_tts_service.py'))) {
+      return packaged;
+    }
+  }
+  return fileURLToPath(new URL('../../resources/speech/', import.meta.url));
 }
 
 /**
@@ -509,6 +530,8 @@ export async function createAppServices(
   let jobCoordinator: JobCoordinator | undefined;
   let environmentSetup: EnvironmentSetupService | undefined;
   let recordings: RecordingService | undefined;
+  let mediaComponents: MediaComponentService | undefined;
+  let speechProcess: SpeechProcessManager | undefined;
   const activeEnvironmentPaths: EnvironmentPaths = { ...environmentPaths };
 
   try {
@@ -581,29 +604,30 @@ export async function createAppServices(
         ),
       })(filePath);
     };
+    const ffmpegPath = (): string => {
+      if (process.env.SMO_FFMPEG_PATH) {
+        return process.env.SMO_FFMPEG_PATH;
+      }
+      if (process.env.SMO_FFPROBE_PATH) {
+        const ffmpegPath = process.env.SMO_FFPROBE_PATH.replace(
+          /ffprobe\.exe$/i,
+          'ffmpeg.exe',
+        );
+        if (ffmpegPath !== process.env.SMO_FFPROBE_PATH) {
+          return ffmpegPath;
+        }
+      }
+      return join(
+        activeEnvironmentPaths.runtimeRoot,
+        'tools',
+        'ffmpeg',
+        'ffmpeg.exe',
+      );
+    };
     recordings = new RecordingService({
       recordingsDirectory,
       mediaRegistry,
-      ffmpegPath: () => {
-        if (process.env.SMO_FFMPEG_PATH) {
-          return process.env.SMO_FFMPEG_PATH;
-        }
-        if (process.env.SMO_FFPROBE_PATH) {
-          const ffmpegPath = process.env.SMO_FFPROBE_PATH.replace(
-            /ffprobe\.exe$/i,
-            'ffmpeg.exe',
-          );
-          if (ffmpegPath !== process.env.SMO_FFPROBE_PATH) {
-            return ffmpegPath;
-          }
-        }
-        return join(
-          activeEnvironmentPaths.runtimeRoot,
-          'tools',
-          'ffmpeg',
-          'ffmpeg.exe',
-        );
-      },
+      ffmpegPath,
       ...(options.recordingConverter === undefined
         ? {}
         : { converter: options.recordingConverter }),
@@ -620,8 +644,8 @@ export async function createAppServices(
       onEventError: options.errorReporter ?? defaultErrorReporter,
     });
     jobCoordinator.recover(store.listWorks());
-    const startGeneration =
-      options.generationHandler ??
+    const startVideoGeneration =
+      options.videoGenerationHandler ??
       createGenerationHandler({
         store,
         comfy,
@@ -636,6 +660,95 @@ export async function createAppServices(
         durationReader,
       });
 
+    const speechModelDirectory = join(
+      dataDirectory,
+      'components',
+      'speech',
+      'models',
+    );
+    const speechRuntimeDirectory = join(
+      dataDirectory,
+      'components',
+      'speech',
+      'runtime',
+    );
+    const speechProject = speechProjectDirectory();
+    mediaComponents = new MediaComponentService({ dataDirectory });
+    const speechRuntime = new SpeechRuntime({
+      modelDirectory: speechModelDirectory,
+      runtimeDirectory: speechRuntimeDirectory,
+      projectDirectory: speechProject,
+    });
+    const createSpeechProcess = (): SpeechProcessManager =>
+      options.speechProcessFactory?.() ??
+      new SpeechProcessManager({
+        pythonPath: join(
+          speechRuntimeDirectory,
+          'venv',
+          'Scripts',
+          'python.exe',
+        ),
+        serviceScript: join(speechProject, 'qwen_tts_service.py'),
+        modelDirectory: speechModelDirectory,
+      });
+    speechProcess = createSpeechProcess();
+    const getSpeechProcess = (): SpeechProcessManager => {
+      speechProcess ??= createSpeechProcess();
+      return speechProcess;
+    };
+    const closeSpeechProcess = async (
+      current = speechProcess,
+    ): Promise<void> => {
+      if (current === undefined) return;
+      await current.close();
+      if (speechProcess === current) speechProcess = undefined;
+    };
+    const callSpeechProcess = async <T>(
+      operation: (process: SpeechProcessManager) => Promise<T>,
+    ): Promise<T> => {
+      const current = getSpeechProcess();
+      try {
+        return await operation(current);
+      } catch (error) {
+        await closeSpeechProcess(current).catch(() => undefined);
+        throw error;
+      }
+    };
+    const requireSpeechComponent = (): void => {
+      if (mediaComponents!.getState('speech').status !== 'ready') {
+        throw new Error('Speech component must be installed and ready');
+      }
+    };
+    const prepareSpeechRuntime = async (): Promise<void> => {
+      requireSpeechComponent();
+      await speechRuntime.prepare();
+    };
+    const startSpeechGeneration = createSpeechGenerationHandler({
+      store,
+      speech: {
+        generate: (request) =>
+          callSpeechProcess((process) => process.generate(request)),
+        close: closeSpeechProcess,
+      },
+      mediaComponents,
+      mediaRegistry,
+      jobCoordinator,
+      outputDirectory,
+      temporaryDirectory: join(dataDirectory, 'speech-tmp'),
+      ffmpegPath,
+      ensureReady: prepareSpeechRuntime,
+      ...(options.speechConverter === undefined
+        ? {}
+        : { converter: options.speechConverter }),
+      durationReader: options.speechDurationReader ?? durationReader,
+    });
+    const startGeneration: GenerationHandler =
+      options.generationHandler ??
+      ((request, executionOptions) =>
+        request.mode === 'speech'
+          ? startSpeechGeneration(request)
+          : startVideoGeneration(request, executionOptions));
+
     const retryWork = createRetryHandler({
       store,
       mediaRegistry,
@@ -647,6 +760,7 @@ export async function createAppServices(
     };
 
     let closed = false;
+    let closePromise: Promise<void> | null = null;
     return {
       startGeneration,
       retryWork,
@@ -658,6 +772,13 @@ export async function createAppServices(
       avatars,
       files,
       recordings,
+      speech: {
+        getCapabilities: async (speechMode) => {
+          await prepareSpeechRuntime();
+          return callSpeechProcess((process) => process.capabilities(speechMode));
+        },
+      },
+      components: mediaComponents,
       store,
       comfy,
       openComfy,
@@ -686,25 +807,44 @@ export async function createAppServices(
         reset: (mode) =>
           hardwareWorkflows.reset(mode),
       },
-      close: async () => {
+      close: () => {
         if (closed) {
-          return;
+          return closePromise ?? Promise.resolve();
         }
-        closed = true;
-        await recordings!.close();
-        await setup.cancel();
-        await jobCoordinator!.close();
-        await activeComfyProcess!.close();
-        await Promise.allSettled([
-          comfy!.close(),
-          (async () => store!.close())(),
-        ]);
+        if (closePromise !== null) return closePromise;
+        const pending = (async () => {
+          await recordings!.close();
+          await setup.cancel();
+          await jobCoordinator!.close();
+          await closeSpeechProcess();
+          mediaComponents!.cancel('speech');
+          mediaComponents!.cancel('image');
+          await activeComfyProcess!.close();
+          await Promise.allSettled([
+            comfy!.close(),
+            (async () => store!.close())(),
+          ]);
+        })();
+        closePromise = pending;
+        pending.then(
+          () => {
+            closed = true;
+          },
+          () => {
+            closed = false;
+            closePromise = null;
+          },
+        );
+        return pending;
       },
     };
   } catch (error) {
     await recordings?.close();
     await environmentSetup?.cancel().catch(() => undefined);
     await jobCoordinator?.close();
+    await speechProcess?.close().catch(() => undefined);
+    mediaComponents?.cancel('speech');
+    mediaComponents?.cancel('image');
     await activeComfyProcess?.close();
     await Promise.allSettled([
       comfy?.close() ?? Promise.resolve(),

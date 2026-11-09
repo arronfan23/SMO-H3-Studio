@@ -473,7 +473,7 @@ describe('SpeechProcessManager', () => {
     expect((manager as unknown as { exited: boolean }).exited).toBe(true);
   });
 
-  test('close rejects a clear timeout when the killed child never exits', async () => {
+  test('close retries termination after a timeout and succeeds on the second kill', async () => {
     const { manager, child } = createSpeech({
       fetchHandler: (url) => {
         if (url.pathname === '/health') return Response.json({ ok: true });
@@ -482,10 +482,16 @@ describe('SpeechProcessManager', () => {
       overrides: { shutdownTimeoutMs: 10 },
     });
     await manager.start();
-    child.kill.mockImplementation(() => {
-      child.killed = true;
-      return true;
-    });
+    child.kill
+      .mockImplementationOnce(() => {
+        child.killed = true;
+        return true;
+      })
+      .mockImplementationOnce(() => {
+        child.killed = true;
+        child.emitExit(0);
+        return true;
+      });
 
     const started = Date.now();
     await expect(settleWithin(manager.close(), 250)).rejects.toThrow(
@@ -494,12 +500,15 @@ describe('SpeechProcessManager', () => {
 
     expect(Date.now() - started).toBeLessThan(250);
     expect(child.kill).toHaveBeenCalledTimes(1);
-    await expect(manager.close()).rejects.toThrow(/did not exit|timed out/i);
-    expect(child.kill).toHaveBeenCalledTimes(1);
+    await expect(manager.close()).resolves.toBeUndefined();
+    expect(child.kill).toHaveBeenCalledTimes(2);
+    expect(child.exitCode).toBe(0);
+    await manager.close();
+    expect(child.kill).toHaveBeenCalledTimes(2);
   });
 
-  test('startup error rejects without marking the process as exited', async () => {
-    const { manager } = createSpeech({
+  test('startup error permits cleanup and later close remains idempotent', async () => {
+    const { manager, child } = createSpeech({
       startupError: new Error('injected startup error'),
       overrides: { shutdownTimeoutMs: 10 },
     });
@@ -509,12 +518,13 @@ describe('SpeechProcessManager', () => {
       /startup|failed to start/i,
     );
 
-    expect(state.exited).toBe(false);
-    await expect(manager.close()).rejects.toThrow(/error|exit/i);
-    expect(state.exited).toBe(false);
+    expect(state.exited).toBe(true);
+    await expect(manager.close()).resolves.toBeUndefined();
+    expect(state.exited).toBe(true);
+    expect(child.kill).toHaveBeenCalledTimes(1);
   });
 
-  test('kill error rejects close and a later real exit cannot erase that failure', async () => {
+  test('kill error can be retried and a real exit makes later close idempotent', async () => {
     const { manager, child } = createSpeech({
       fetchHandler: (url) => {
         if (url.pathname === '/health') return Response.json({ ok: true });
@@ -539,6 +549,8 @@ describe('SpeechProcessManager', () => {
 
     child.emitExit(0);
     expect(state.exited).toBe(true);
-    await expect(manager.close()).rejects.toThrow(/process.*error|failed|kill/i);
+    await expect(manager.close()).resolves.toBeUndefined();
+    await manager.close();
+    expect(child.kill).toHaveBeenCalledTimes(1);
   });
 });

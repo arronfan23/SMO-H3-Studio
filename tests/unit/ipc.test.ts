@@ -32,7 +32,12 @@ import {
   type SmoApi,
 } from '../../src/shared/ipc';
 import { ASPECT_RATIO_OPTIONS } from '../../src/shared/generation-options';
-import type { Avatar, HardwareInfo, Work } from '../../src/shared/types';
+import type {
+  Avatar,
+  HardwareInfo,
+  SpeechGenerationRequest,
+  Work,
+} from '../../src/shared/types';
 import {
   startLlmUpstream,
   type LocalLlmUpstream,
@@ -81,6 +86,16 @@ const generationRequest = {
   steps: 12,
 } as const;
 
+const speechGenerationRequest: SpeechGenerationRequest = {
+  mode: 'speech',
+  speechMode: 'custom',
+  prompt: '本地语音 IPC 测试',
+  language: 'Chinese',
+  outputFormat: 'mp3',
+  speaker: 'Vivian',
+  instruct: '自然地说',
+};
+
 const polishRequest = {
   text: 'Animate this presenter photo.',
   duration: 8,
@@ -120,6 +135,16 @@ const environmentState = {
   error: null,
   active: false,
   healthy: false,
+} as const;
+
+const speechComponentState = {
+  id: 'speech',
+  status: 'ready',
+  downloadedBytes: 100,
+  totalBytes: 100,
+  currentFile: null,
+  error: null,
+  active: false,
 } as const;
 
 class TestIpcRegistry implements IpcHandlerRegistry {
@@ -171,6 +196,17 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
   });
   const services: IpcServices = {
     startGeneration: async () => ({ id: 'injected-job' }),
+    speech: {
+      getCapabilities: async () => ({
+        speakers: ['Vivian'],
+        languages: ['Auto', 'Chinese'],
+      }),
+    },
+    components: {
+      getState: () => ({ ...speechComponentState }),
+      install: async () => ({ ...speechComponentState }),
+      cancel: () => undefined,
+    },
     retryWork: async () => ({ id: 'injected-retry' }),
     deleteWork: async () => {
       throw new Error('Unexpected deleteWork call');
@@ -332,6 +368,87 @@ describe('IPC input schema', () => {
     };
 
     expect(schema.parse(request)).toEqual(request);
+  });
+
+  test.each(['wav', 'mp3', 'flac', 'm4a'] as const)(
+    'speech accepts the %s output format with a strict custom request',
+    (outputFormat) => {
+      const request = {
+        channel: 'jobs:start',
+        payload: { ...speechGenerationRequest, outputFormat },
+      };
+
+      expect(createIpcSchema().parse(request)).toEqual(request);
+    },
+  );
+
+  test('speech accepts clone requests with blank reference text', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: {
+        mode: 'speech',
+        speechMode: 'clone',
+        prompt: '克隆语音',
+        language: 'Auto',
+        outputFormat: 'wav',
+        referenceAudioPath: 'G:\\audio\\reference.wav',
+        referenceText: '  ',
+      },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([
+    { speaker: undefined },
+    { speaker: '' },
+    { language: '' },
+    { prompt: '  ' },
+    { outputFormat: 'ogg' },
+    { avatarId: 'must-not-be-accepted' },
+  ])('speech rejects an invalid custom request: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...speechGenerationRequest, ...override },
+      }),
+    ).toThrow();
+  });
+
+  test('speech rejects clone requests without an authorized-audio path field', () => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: {
+          mode: 'speech',
+          speechMode: 'clone',
+          prompt: '克隆语音',
+          language: 'Auto',
+          outputFormat: 'wav',
+        },
+      }),
+    ).toThrow(/referenceAudioPath/i);
+  });
+
+  test.each([
+    { channel: 'speech:getCapabilities', payload: {} },
+    { channel: 'speech:getCapabilities', payload: { speechMode: 'other' } },
+    { channel: 'speech:getCapabilities', payload: { speechMode: 'custom', extra: true } },
+    { channel: 'components:getState', payload: {} },
+    { channel: 'components:getState', payload: { id: 'other' } },
+    { channel: 'components:install', payload: { id: 'speech', extra: true } },
+    { channel: 'components:cancel', payload: { id: 'image', force: true } },
+  ])('speech component IPC rejects a non-strict payload: %j', (request) => {
+    expect(() => createIpcSchema().parse(request)).toThrow();
+  });
+
+  test.each([
+    { channel: 'speech:getCapabilities', payload: { speechMode: 'custom' } },
+    { channel: 'components:getState', payload: { id: 'speech' } },
+    { channel: 'components:install', payload: { id: 'image' } },
+    { channel: 'components:cancel', payload: { id: 'speech' } },
+  ])('speech component IPC accepts a controlled payload: %j', (request) => {
+    expect(createIpcSchema().parse(request)).toEqual(request);
   });
 
   test.each([
@@ -816,6 +933,70 @@ describe('main-process IPC handlers', () => {
       status: 'pending',
     });
     expect(received).toEqual(generationRequest);
+  });
+
+  test('forwards a speech generation request through jobs:start', async () => {
+    const startGeneration = vi.fn(async () => ({ id: 'speech-job' }));
+    const harness = await createHarness({ startGeneration });
+
+    await expect(
+      harness.invoke('jobs:start', speechGenerationRequest),
+    ).resolves.toEqual({ id: 'speech-job' });
+    expect(startGeneration).toHaveBeenCalledWith(speechGenerationRequest);
+  });
+
+  test('dispatches speech capabilities and component state, install, and cancel', async () => {
+    const getCapabilities = vi.fn(async () => ({
+      speakers: ['Vivian'],
+      languages: ['Chinese'],
+    }));
+    const getState = vi.fn(() => ({ ...speechComponentState }));
+    const install = vi.fn(async () => ({ ...speechComponentState }));
+    const cancel = vi.fn(() => undefined);
+    const harness = await createHarness({
+      speech: { getCapabilities },
+      components: { getState, install, cancel },
+    });
+
+    await expect(
+      harness.invoke('speech:getCapabilities', { speechMode: 'custom' }),
+    ).resolves.toEqual({ speakers: ['Vivian'], languages: ['Chinese'] });
+    expect(getCapabilities).toHaveBeenCalledWith('custom');
+    await expect(
+      harness.invoke('components:getState', { id: 'speech' }),
+    ).resolves.toEqual(speechComponentState);
+    expect(getState).toHaveBeenCalledWith('speech');
+    await expect(
+      harness.invoke('components:install', { id: 'image' }),
+    ).resolves.toEqual(speechComponentState);
+    expect(install).toHaveBeenCalledWith('image');
+    await harness.invoke('components:cancel', { id: 'speech' });
+    expect(cancel).toHaveBeenCalledWith('speech');
+  });
+
+  test('speech refuses a new component runtime install while any generation is active', async () => {
+    const install = vi.fn(async () => ({ ...speechComponentState }));
+    const harness = await createHarness({
+      components: {
+        getState: () => ({ ...speechComponentState }),
+        install,
+        cancel: () => undefined,
+      },
+    });
+    let finish = (): void => undefined;
+    const active = harness.jobCoordinator.enqueue({
+      id: 'active-video',
+      run: () => new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    });
+
+    await expect(
+      harness.invoke('components:install', { id: 'speech' }),
+    ).rejects.toThrow(/generation.*running|active generation/i);
+    expect(install).not.toHaveBeenCalled();
+    finish();
+    await active;
   });
 
   test('accepts video steps and forwards the request unchanged', async () => {
@@ -1731,12 +1912,14 @@ describe('preload API', () => {
       'app',
       'avatars',
       'comfy',
+      'components',
       'environment',
       'files',
       'hardware',
       'jobs',
       'llm',
       'recordings',
+      'speech',
       'window',
       'works',
     ]);
@@ -1750,6 +1933,12 @@ describe('preload API', () => {
       'testModel',
     ]);
     expect(Object.keys(api.comfy)).toEqual(['health', 'start', 'open']);
+    expect(Object.keys(api.speech)).toEqual(['getCapabilities']);
+    expect(Object.keys(api.components).sort()).toEqual([
+      'cancel',
+      'getState',
+      'install',
+    ]);
     expect(Object.keys(api.environment).sort()).toEqual([
       'cancel',
       'detect',
@@ -1819,6 +2008,31 @@ describe('preload API', () => {
       channel: 'jobs:start',
       payload: generationRequest,
       call: (smo: SmoApi) => smo.jobs.start(generationRequest),
+    },
+    {
+      channel: 'jobs:start',
+      payload: speechGenerationRequest,
+      call: (smo: SmoApi) => smo.jobs.start(speechGenerationRequest),
+    },
+    {
+      channel: 'speech:getCapabilities',
+      payload: { speechMode: 'custom' },
+      call: (smo: SmoApi) => smo.speech.getCapabilities('custom'),
+    },
+    {
+      channel: 'components:getState',
+      payload: { id: 'speech' },
+      call: (smo: SmoApi) => smo.components.getState('speech'),
+    },
+    {
+      channel: 'components:install',
+      payload: { id: 'image' },
+      call: (smo: SmoApi) => smo.components.install('image'),
+    },
+    {
+      channel: 'components:cancel',
+      payload: { id: 'speech' },
+      call: (smo: SmoApi) => smo.components.cancel('speech'),
     },
     {
       channel: 'jobs:getState',
