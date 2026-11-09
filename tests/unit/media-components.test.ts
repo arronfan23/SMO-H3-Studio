@@ -43,6 +43,9 @@ type EditableManifest = any;
 const FIRST_REPOSITORY = 'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice';
 const SECOND_REPOSITORY = 'Qwen/Qwen3-TTS-12Hz-0.6B-Base';
 const TOKENIZER_REPOSITORY = 'Qwen/Qwen3-TTS-Tokenizer-12Hz';
+const UV_REPOSITORY = 'astral-sh/uv';
+const UV_VERSION = '0.11.13';
+const UV_ASSET_NAME = 'uv-x86_64-pc-windows-msvc.zip';
 const [testCertificate, testPrivateKey] = await Promise.all([
   readFile(new URL('../fixtures/localhost-test-cert.pem', import.meta.url), 'utf8'),
   readFile(new URL('../fixtures/localhost-test-key.pem', import.meta.url), 'utf8'),
@@ -224,10 +227,10 @@ describe('media component manifest', () => {
     expect(files.length).toBeGreaterThan(0);
     expect(manifest.components.image).toBeUndefined();
     expect(new Set(files.map((file) => file.source))).toEqual(
-      new Set([FIRST_REPOSITORY, SECOND_REPOSITORY, TOKENIZER_REPOSITORY]),
+      new Set([FIRST_REPOSITORY, SECOND_REPOSITORY, TOKENIZER_REPOSITORY, UV_REPOSITORY]),
     );
     expect(Object.keys(revisions).sort()).toEqual(
-      [FIRST_REPOSITORY, SECOND_REPOSITORY, TOKENIZER_REPOSITORY].sort(),
+      [FIRST_REPOSITORY, SECOND_REPOSITORY, TOKENIZER_REPOSITORY, UV_REPOSITORY].sort(),
     );
     for (const revision of Object.values(revisions)) {
       expect(revision).toMatch(/^[a-f0-9]{40}$/);
@@ -236,8 +239,14 @@ describe('media component manifest', () => {
       files.reduce((total, file) => total + file.size, 0),
     ).toBe(manifest.components.speech?.totalBytes);
     for (const file of files) {
-      expect(file.url).toMatch(/^https:\/\/huggingface\.co\//);
-      expect(file.url).toContain(`/resolve/${revisions[file.source]}/`);
+      if (file.source === UV_REPOSITORY) {
+        expect(file.url).toBe(
+          `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ASSET_NAME}`,
+        );
+      } else {
+        expect(file.url).toMatch(/^https:\/\/huggingface\.co\//);
+        expect(file.url).toContain(`/resolve/${revisions[file.source]}/`);
+      }
       expect(file.sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(file.path).not.toMatch(/README|\.gguf$|\.(?:png|jpe?g|webp|gif)$/i);
     }
@@ -718,7 +727,7 @@ describe('media component manifest generator', () => {
     options: { failure?: Failure; hangingCancel?: boolean; status?: number } = {},
   ) {
     const revisions = Object.fromEntries(
-      repositories.map((repository) => [
+      [...repositories, UV_REPOSITORY].map((repository) => [
         repository,
         sha256(`revision:${repository}`).slice(0, 40),
       ]),
@@ -784,6 +793,29 @@ describe('media component manifest generator', () => {
             : input.url,
       );
       requestedUrls.push(url.href);
+      if (
+        url.href ===
+        `https://api.github.com/repos/astral-sh/uv/releases/tags/${UV_VERSION}`
+      ) {
+        return Response.json({
+          tag_name: UV_VERSION,
+          assets: [
+            {
+              name: UV_ASSET_NAME,
+              size: 23_354_520,
+              digest: `sha256:${sha256('official uv archive')}`,
+              browser_download_url:
+                `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ASSET_NAME}`,
+            },
+          ],
+        });
+      }
+      if (
+        url.href ===
+        `https://api.github.com/repos/astral-sh/uv/git/ref/tags/${UV_VERSION}`
+      ) {
+        return Response.json({ object: { sha: revisions[UV_REPOSITORY] } });
+      }
       for (const repository of repositories) {
         const revision = revisions[repository];
         if (url.href === `https://huggingface.co/api/models/${repository}`) {
@@ -892,7 +924,14 @@ describe('media component manifest generator', () => {
     expect(second).toEqual(first);
     expect(first.components.speech?.revisions).toEqual(harness.revisions);
     const files = first.components.speech?.files ?? [];
-    expect(files).toHaveLength(7);
+    expect(files).toHaveLength(8);
+    expect(files.find((file) => file.source === UV_REPOSITORY)).toMatchObject({
+      path: `runtime/uv-${UV_VERSION}-x86_64-pc-windows-msvc.zip`,
+      size: 23_354_520,
+      sha256: sha256('official uv archive'),
+      url:
+        `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ASSET_NAME}`,
+    });
     expect(files.some((file) => file.path.endsWith('/LICENSE'))).toBe(true);
     expect(files.some((file) => /README|\.png$|\.gguf$/i.test(file.path))).toBe(false);
     for (const repository of repositories) {
@@ -926,7 +965,7 @@ describe('media component manifest generator', () => {
 
       const manifest = await generate(harness.fetchMock);
 
-      expect(manifest.components.speech?.files).toHaveLength(7);
+      expect(manifest.components.speech?.files).toHaveLength(8);
       expect(
         harness.requestedUrls.filter((url) => url.includes('/resolve/')).length,
       ).toBeGreaterThan(4);
@@ -938,7 +977,7 @@ describe('media component manifest generator', () => {
 
     const manifest = await bounded(generate(harness.fetchMock));
 
-    expect(manifest.components.speech?.files).toHaveLength(7);
+    expect(manifest.components.speech?.files).toHaveLength(8);
   });
 
   test.each([403, 404])('does not retry non-transient HTTP %s', async (status) => {

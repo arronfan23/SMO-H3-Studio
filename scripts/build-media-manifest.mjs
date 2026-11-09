@@ -8,6 +8,11 @@ const SPEECH_REPOSITORIES = [
   'Qwen/Qwen3-TTS-12Hz-0.6B-Base',
   'Qwen/Qwen3-TTS-Tokenizer-12Hz',
 ];
+const UV_REPOSITORY = 'astral-sh/uv';
+const UV_VERSION = '0.11.13';
+const UV_ASSET_NAME = 'uv-x86_64-pc-windows-msvc.zip';
+const UV_DOWNLOAD_URL =
+  `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ASSET_NAME}`;
 const RUNTIME_EXTENSIONS = [
   '.safetensors',
   '.json',
@@ -227,6 +232,51 @@ async function buildFile(repository, revision, entry, fetchImpl) {
   };
 }
 
+async function fetchJson(url, fetchImpl, label) {
+  const response = await fetchImpl(url, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`${label} failed: HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function buildUvRuntime(fetchImpl) {
+  const releaseUrl =
+    `https://api.github.com/repos/astral-sh/uv/releases/tags/${UV_VERSION}`;
+  const revisionUrl =
+    `https://api.github.com/repos/astral-sh/uv/git/ref/tags/${UV_VERSION}`;
+  const [release, reference] = await Promise.all([
+    fetchJson(releaseUrl, fetchImpl, 'Astral uv release request'),
+    fetchJson(revisionUrl, fetchImpl, 'Astral uv tag request'),
+  ]);
+  if (release?.tag_name !== UV_VERSION) {
+    throw new Error('Astral uv release has an unexpected version');
+  }
+  if (typeof reference?.object?.sha !== 'string' || !REVISION_PATTERN.test(reference.object.sha)) {
+    throw new Error('Astral uv tag has no full commit SHA');
+  }
+  const asset = Array.isArray(release.assets)
+    ? release.assets.find((candidate) => candidate?.name === UV_ASSET_NAME)
+    : undefined;
+  if (!asset || asset.browser_download_url !== UV_DOWNLOAD_URL) {
+    throw new Error('Astral uv release has no official Windows x64 archive');
+  }
+  assertPositiveSafeInteger(asset.size, 'Astral uv archive size');
+  const digest = /^sha256:([a-f0-9]{64})$/.exec(asset.digest ?? '');
+  if (!digest) throw new Error('Astral uv archive has no SHA256 digest');
+  return {
+    revision: reference.object.sha,
+    file: {
+      url: UV_DOWNLOAD_URL,
+      path: `runtime/uv-${UV_VERSION}-x86_64-pc-windows-msvc.zip`,
+      size: asset.size,
+      sha256: digest[1],
+      source: UV_REPOSITORY,
+    },
+  };
+}
+
 export async function buildMediaComponentManifest({ component, fetchImpl = fetch }) {
   if (component !== 'speech') {
     throw new Error('Only the speech media component has a manifest generator');
@@ -245,6 +295,9 @@ export async function buildMediaComponentManifest({ component, fetchImpl = fetch
       files.push(await buildFile(repository, revision, entry, fetchImpl));
     }
   }
+  const uv = await buildUvRuntime(fetchImpl);
+  revisions[UV_REPOSITORY] = uv.revision;
+  files.push(uv.file);
   if (files.length === 0) throw new Error('The speech component has no runtime files');
 
   files.sort((a, b) => a.path.localeCompare(b.path, 'en'));

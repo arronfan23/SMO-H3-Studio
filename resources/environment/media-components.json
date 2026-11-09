@@ -6,7 +6,8 @@
       "revisions": {
         "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice": "85e237c12c027371202489a0ec509ded67b5e4b5",
         "Qwen/Qwen3-TTS-12Hz-0.6B-Base": "5d83992436eae1d760afd27aff78a71d676296fc",
-        "Qwen/Qwen3-TTS-Tokenizer-12Hz": "7dd38ad4e9bad454aae9cd937d0cd577604fe229"
+        "Qwen/Qwen3-TTS-Tokenizer-12Hz": "7dd38ad4e9bad454aae9cd937d0cd577604fe229",
+        "astral-sh/uv": "4512a39319dbd9ad96e0b0a22223eb263dbf5d16"
       },
       "files": [
         {
@@ -190,9 +191,16 @@
           "size": 234,
           "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
           "source": "Qwen/Qwen3-TTS-Tokenizer-12Hz"
+        },
+        {
+          "url": "https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip",
+          "path": "runtime/uv-0.11.13-x86_64-pc-windows-msvc.zip",
+          "size": 23354520,
+          "sha256": "0953ac2ef4fbe47ad469bfa80b658a577a02c4d73a2fb9c4c7c70dda432efded",
+          "source": "astral-sh/uv"
         }
       ],
-      "totalBytes": 5696780240
+      "totalBytes": 5720134760
     }
   }
 }

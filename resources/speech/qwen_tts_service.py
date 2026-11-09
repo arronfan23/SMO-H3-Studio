@@ -1,0 +1,266 @@
+import argparse
+import gc
+import io
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+
+MAXIMUM_REQUEST_BYTES = 64 * 1024
+MODEL_DIRECTORIES = {
+    "custom": "Qwen3-TTS-12Hz-0.6B-CustomVoice",
+    "clone": "Qwen3-TTS-12Hz-0.6B-Base",
+}
+
+
+class RequestError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class ModelRegistry:
+    def __init__(self, model_root):
+        self.model_root = Path(model_root)
+        self.model = None
+        self.mode = None
+        self.torch = None
+        self.lock = threading.RLock()
+
+    def capabilities(self, mode):
+        self.validate_mode(mode)
+        with self.lock:
+            model = self.load_locked(mode)
+            speakers = (
+                list(model.get_supported_speakers()) if mode == "custom" else []
+            )
+            return {
+                "speakers": speakers,
+                "languages": list(model.get_supported_languages()),
+            }
+
+    def generate(self, payload):
+        mode = self.validate_generate_payload(payload)
+        with self.lock:
+            model = self.load_locked(mode)
+            if mode == "custom":
+                wavs, sample_rate = model.generate_custom_voice(
+                    text=payload["text"],
+                    language=payload["language"],
+                    speaker=payload["speaker"],
+                    instruct=payload.get("instruct", ""),
+                )
+            else:
+                wavs, sample_rate = model.generate_voice_clone(
+                    text=payload["text"],
+                    language=payload["language"],
+                    ref_audio=payload["ref_audio"],
+                    ref_text=payload.get("ref_text", ""),
+                    x_vector_only_mode=payload["x_vector_only_mode"],
+                )
+
+            import soundfile as sf
+
+            output = io.BytesIO()
+            sf.write(output, wavs[0], sample_rate, format="WAV")
+            return output.getvalue()
+
+    def close(self):
+        with self.lock:
+            self.release_locked()
+
+    @staticmethod
+    def validate_mode(mode):
+        if mode not in MODEL_DIRECTORIES:
+            raise RequestError(400, "voiceMode must be custom or clone")
+
+    @staticmethod
+    def validate_generate_payload(payload):
+        if not isinstance(payload, dict):
+            raise RequestError(400, "The JSON body must be an object")
+        mode = payload.get("voice_mode")
+        ModelRegistry.validate_mode(mode)
+        common_fields = {"voice_mode", "text", "language"}
+        mode_fields = (
+            {"speaker", "instruct"}
+            if mode == "custom"
+            else {"ref_audio", "ref_text", "x_vector_only_mode"}
+        )
+        if set(payload) != common_fields | mode_fields:
+            raise RequestError(400, "The request contains missing or unsupported fields")
+        for field in ("text", "language"):
+            if not isinstance(payload.get(field), str) or not payload[field].strip():
+                raise RequestError(400, f"{field} must be a non-empty string")
+        if mode == "custom":
+            if not isinstance(payload.get("speaker"), str) or not payload["speaker"].strip():
+                raise RequestError(400, "speaker must be a non-empty string")
+            if not isinstance(payload.get("instruct"), str):
+                raise RequestError(400, "instruct must be a string")
+        else:
+            reference_audio = payload.get("ref_audio")
+            if not isinstance(reference_audio, str) or not Path(reference_audio).is_absolute():
+                raise RequestError(400, "ref_audio must be an absolute local path")
+            if not Path(reference_audio).is_file():
+                raise RequestError(400, "ref_audio must name an existing audio file")
+            if not isinstance(payload.get("ref_text"), str):
+                raise RequestError(400, "ref_text must be a string")
+            if not isinstance(payload.get("x_vector_only_mode"), bool):
+                raise RequestError(400, "x_vector_only_mode must be a boolean")
+        return mode
+
+    def load_locked(self, mode):
+        if self.model is not None and self.mode == mode:
+            return self.model
+        self.release_locked()
+        try:
+            import torch
+            from qwen_tts import Qwen3TTSModel
+
+            model_path = self.model_root / MODEL_DIRECTORIES[mode]
+            if not model_path.is_dir():
+                raise FileNotFoundError("The selected speech model is not installed")
+            self.torch = torch
+            self.model = Qwen3TTSModel.from_pretrained(
+                str(model_path),
+                device_map="cuda:0",
+                dtype=torch.bfloat16,
+                local_files_only=True,
+            )
+            self.mode = mode
+            return self.model
+        except Exception:
+            self.model = None
+            self.mode = None
+            self.collect_cuda_garbage()
+            raise
+
+    def release_locked(self):
+        previous = self.model
+        self.model = None
+        self.mode = None
+        del previous
+        self.collect_cuda_garbage()
+
+    def collect_cuda_garbage(self):
+        gc.collect()
+        if self.torch is not None and self.torch.cuda.is_available():
+            self.torch.cuda.empty_cache()
+
+
+class SpeechHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, registry):
+        self.registry = registry
+        super().__init__(("127.0.0.1", 0), SpeechRequestHandler)
+
+
+class SpeechRequestHandler(BaseHTTPRequestHandler):
+    server_version = "SMOSpeech/1.0"
+    sys_version = ""
+
+    def log_message(self, format, *args):
+        # Request bodies and model errors can contain private narration text.
+        return
+
+    def do_GET(self):
+        try:
+            parsed = urlsplit(self.path)
+            if parsed.path == "/health" and not parsed.query:
+                self.send_json(200, {"ok": True})
+                return
+            if parsed.path == "/capabilities":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query) != {"voiceMode"} or len(query["voiceMode"]) != 1:
+                    raise RequestError(400, "capabilities requires one voiceMode")
+                capabilities = self.server.registry.capabilities(query["voiceMode"][0])
+                self.send_json(200, capabilities)
+                return
+            raise RequestError(404, "Not found")
+        except RequestError as error:
+            self.send_json(error.status, {"error": error.message})
+        except Exception:
+            self.send_json(500, {"error": "Speech capability query failed"})
+
+    def do_POST(self):
+        try:
+            parsed = urlsplit(self.path)
+            if parsed.path == "/shutdown" and not parsed.query:
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            if parsed.path != "/generate" or parsed.query:
+                raise RequestError(404, "Not found")
+            payload = self.read_json_body()
+            audio = self.server.registry.generate(payload)
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(audio)))
+            self.end_headers()
+            self.wfile.write(audio)
+        except RequestError as error:
+            self.send_json(error.status, {"error": error.message})
+        except Exception:
+            self.send_json(500, {"error": "Speech generation failed"})
+
+    def read_json_body(self):
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
+        if content_type.lower() != "application/json":
+            raise RequestError(415, "Content-Type must be application/json")
+        if self.headers.get("Transfer-Encoding") is not None:
+            raise RequestError(400, "Transfer-Encoding is not supported")
+        content_length = self.headers.get("Content-Length")
+        if content_length is None:
+            raise RequestError(411, "Content-Length is required")
+        try:
+            size = int(content_length)
+        except ValueError:
+            raise RequestError(400, "Content-Length is invalid") from None
+        if size < 0:
+            raise RequestError(400, "Content-Length is invalid")
+        if size > MAXIMUM_REQUEST_BYTES:
+            raise RequestError(413, "The request body is too large")
+        body = self.rfile.read(size)
+        if len(body) != size:
+            raise RequestError(400, "The request body is incomplete")
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RequestError(400, "The request body must be valid JSON") from None
+        if not isinstance(payload, dict):
+            raise RequestError(400, "The JSON body must be an object")
+        return payload
+
+    def send_json(self, status, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-root", required=True)
+    arguments = parser.parse_args()
+    registry = ModelRegistry(arguments.model_root)
+    server = SpeechHTTPServer(registry)
+    print(
+        f"SMO_SPEECH_URL=http://127.0.0.1:{server.server_address[1]}",
+        flush=True,
+    )
+    try:
+        server.serve_forever(poll_interval=0.1)
+    finally:
+        server.server_close()
+        registry.close()
+
+
+if __name__ == "__main__":
+    main()
