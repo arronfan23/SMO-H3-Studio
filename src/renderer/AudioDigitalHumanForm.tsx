@@ -7,6 +7,7 @@ import {
   type GenerationOptionsValue,
 } from '../shared/generation-options';
 import { GenerationOptions } from './GenerationOptions';
+import type { StudioIntent } from './App';
 import { AudioInput } from './AudioInput';
 import { AudioRecorder } from './AudioRecorder';
 import { JobStatus } from './JobStatus';
@@ -42,6 +43,7 @@ export function AudioDigitalHumanForm({
   pageActive = true,
   busy = false,
   onJobStarted,
+  intent = null,
 }: {
   avatarId: string;
   modelDirectory: string;
@@ -49,10 +51,12 @@ export function AudioDigitalHumanForm({
   pageActive?: boolean;
   busy?: boolean;
   onJobStarted?: () => Promise<void>;
+  intent?: StudioIntent | null;
 }) {
   const [audioPath, setAudioPath] = useState<string | null>(null);
   const [audioSeconds, setAudioSeconds] = useState<number | null>(null);
   const [audioRevision, setAudioRevision] = useState(0);
+  const [audioIntentToken, setAudioIntentToken] = useState<number | null>(null);
   const [originalText, setOriginalText] = useState('');
   const [polishedText, setPolishedText] = useState('');
   const [activeTab, setActiveTab] = useState<PromptTab>('original');
@@ -69,9 +73,11 @@ export function AudioDigitalHumanForm({
   const [recordingBusy, setRecordingBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
-  const { url: audioUrl, error: mediaError } = useMediaUrl(audioPath);
+  const { url: audioUrl, error: mediaError } = useMediaUrl(audioPath, audioRevision);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioRevisionRef = useRef(0);
+  const audioIntentTokenRef = useRef<number | null>(null);
+  const handledIntentTokenRef = useRef<number | null>(null);
   const originalTabRef = useRef<HTMLButtonElement | null>(null);
   const polishedTabRef = useRef<HTMLButtonElement | null>(null);
   const operationRef = useRef<'polish' | 'generation' | null>(null);
@@ -98,10 +104,12 @@ export function AudioDigitalHumanForm({
       ? AUTO_SKILL_OPTION.description
       : SKILL_OPTIONS[skill].description;
 
-  const handleAudioSelected = (selected: string | null): void => {
+  const handleAudioSelected = (selected: string | null, intentToken: number | null = null): void => {
     // The same path may be chosen again; invalidate its old element and events.
     audioRevisionRef.current += 1;
+    audioIntentTokenRef.current = intentToken;
     setAudioRevision(audioRevisionRef.current);
+    setAudioIntentToken(intentToken);
     polishRequestIdRef.current += 1;
     pendingPolishRef.current = null;
     if (operationRef.current === 'polish') {
@@ -113,6 +121,23 @@ export function AudioDigitalHumanForm({
     setDuration(0);
     setTrimStart(0);
   };
+
+  useEffect(() => {
+    if (intent === null) {
+      return;
+    }
+    const handledToken = handledIntentTokenRef.current;
+    if (handledToken !== null && intent.token <= handledToken) {
+      return;
+    }
+    handledIntentTokenRef.current = intent.token;
+    if (busy || submitting || recordingBusy || operationRef.current === 'generation') {
+      setError('生成任务进行中，完成后才能更换语音作品。');
+      return;
+    }
+    setError(null);
+    handleAudioSelected(intent.audioPath, intent.token);
+  }, [busy, intent, recordingBusy, submitting]);
 
   const resolveValidClip = (text: string): { audioPath: string; duration: number } | null => {
     if (audioPath === null || audioSeconds === null) {
@@ -314,6 +339,7 @@ export function AudioDigitalHumanForm({
       }}
     >
       <AudioInput
+        key={audioIntentToken ?? 'manual'}
         path={audioPath}
         disabled={submitting || busy || recordingBusy}
         onSelected={handleAudioSelected}
@@ -340,7 +366,10 @@ export function AudioDigitalHumanForm({
           preload="metadata"
           src={audioUrl}
           onLoadedMetadata={(event) => {
-            if (audioRevision !== audioRevisionRef.current) {
+            if (
+              audioRevision !== audioRevisionRef.current ||
+              audioIntentToken !== audioIntentTokenRef.current
+            ) {
               return;
             }
             const seconds = event.currentTarget.duration;

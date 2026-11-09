@@ -11,6 +11,8 @@ import { startComfyMock } from '../fixtures/mock-comfy';
 import { startLlmMock } from '../fixtures/mock-llm';
 import { writeReadyEnvironment } from '../fixtures/ready-environment';
 import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
+import { Store } from '../../src/main/store';
+import { convertAudio } from '../../src/main/audio-converter';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -336,6 +338,29 @@ async function createAvatar(page: Page, name: string): Promise<void> {
   await expect(avatar.getByRole('button', { name: '当前模特' })).toBeDisabled();
 }
 
+function seedSpeechWork(options: {
+  dataDirectory: string;
+  id: string;
+  outputPath: string;
+}): void {
+  const store = new Store(join(options.dataDirectory, 'studio.sqlite'));
+  try {
+    store.addWork({
+      id: options.id,
+      avatarId: null,
+      mode: 'speech',
+      outputPath: options.outputPath,
+      status: 'done',
+      title: '模拟语音作品',
+      completedAt: new Date().toISOString(),
+      metadata: null,
+      error: null,
+    });
+  } finally {
+    store.close();
+  }
+}
+
 async function saveLlmProfile(page: Page, baseUrl: string): Promise<void> {
   await page.click('nav[aria-label="主导航"] button:has-text("设置")');
   await expect(page.locator('#llm-base-url')).toBeVisible();
@@ -525,7 +550,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.fill('#polished-text', 'Edited text video polished draft.');
 
     await page!.click('#audio-mode-tab');
-    await page!.click('button:has-text("选择音频")');
+    await page!.click('#audio-mode-panel button:has-text("选择音频")');
     await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
     await page!.waitForFunction(() => {
       const audio = document.querySelector<HTMLAudioElement>('#audio-mode-panel audio');
@@ -580,6 +605,84 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page!.locator('#audio-prompt')).toHaveValue('Original audio video draft.');
   });
 
+  for (const format of ['wav', 'mp3', 'flac', 'm4a'] as const) {
+    test(`用于音频数字人 ${format} 真实音频可预览并提交生成`, async () => {
+      const avatarName = `E2E Speech Work ${format}`;
+      await createAvatar(page!, avatarName);
+      await openStudio(page!, avatarName);
+      await page!.fill('#original-text', 'Keep text video draft.');
+      await page!.fill('#text-steps', '13');
+      await page!.click('#audio-mode-tab');
+      await page!.fill('#audio-prompt', 'Keep audio video draft.');
+      await page!.fill('#audio-steps', '17');
+      await page!.click('#speech-main-tab');
+      await page!.fill('#custom-speech-prompt', 'Keep speech draft.');
+      await page!.fill('#custom-speech-instruct', 'Calm and warm.');
+
+      const speechDirectory = join(outputDirectory, 'SMO-Speech');
+      const speechPath = join(speechDirectory, `mock-speech.${format}`);
+      await mkdir(speechDirectory, { recursive: true });
+      await convertAudio({
+        ffmpegPath: FFMPEG_PATH,
+        sourcePath: launchOptions.fileDialogPaths[2],
+        destinationPath: speechPath,
+        format,
+      });
+      const workId = `mock-speech-work-${format}`;
+      seedSpeechWork({ dataDirectory, id: workId, outputPath: speechPath });
+      const submittedBefore = comfyMock.submittedPromptIds.length;
+
+      await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+      const work = page!.locator('.works-list article').filter({ hasText: workId });
+      await expect(work).toBeVisible();
+      await work.getByRole('button', { name: `用于音频数字人 ${workId}` }).click();
+
+      await expect(page!.locator('#video-main-tab')).toHaveAttribute('aria-selected', 'true');
+      await expect(page!.locator('#audio-mode-tab')).toHaveAttribute('aria-selected', 'true');
+      await expect(page!.locator('#audio-mode-tab')).toBeFocused();
+      await expect(page!.locator('#audio-mode-panel')).toBeVisible();
+      await expect(page!.locator('.audio-file')).toContainText(`mock-speech.${format}`);
+      const selectedAudio = page!.locator('#audio-mode-panel audio[aria-label="所选音频"]');
+      await expect(selectedAudio).toHaveAttribute('src', /^smo-media:\/\//);
+      await expect
+        .poll(() =>
+          selectedAudio.evaluate((element) => (element as HTMLAudioElement).duration),
+        )
+        .toBeGreaterThan(0);
+      const seconds = await selectedAudio.evaluate(
+        (element) => (element as HTMLAudioElement).duration,
+      );
+      expect(Number.isFinite(seconds)).toBe(true);
+      expect(seconds).toBeGreaterThan(7.5);
+      expect(seconds).toBeLessThan(8.5);
+      expect(Number(await page!.locator('#audio-duration').inputValue())).toBeCloseTo(seconds, 5);
+      await expect(page!.locator('#audio-prompt')).toHaveValue('Keep audio video draft.');
+      await expect(page!.locator('#audio-steps')).toHaveValue('17');
+
+      await page!.click('#text-mode-tab');
+      await expect(page!.locator('#original-text')).toHaveValue('Keep text video draft.');
+      await expect(page!.locator('#text-steps')).toHaveValue('13');
+      await page!.click('#speech-main-tab');
+      await expect(page!.locator('#custom-speech-prompt')).toHaveValue('Keep speech draft.');
+      await expect(page!.locator('#custom-speech-instruct')).toHaveValue('Calm and warm.');
+      expect(comfyMock.submittedPromptIds).toHaveLength(submittedBefore);
+
+      await page!.click('#video-main-tab');
+      await page!.click('#audio-mode-tab');
+      await page!.click('#audio-mode-panel button:has-text("生成视频")');
+      const jobLocator = page!.locator(
+        '#audio-mode-panel section[aria-label="任务状态"]:visible code',
+      );
+      await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
+      const jobId = (await jobLocator.textContent())!;
+      await waitForStableStatus(page!, jobId, 'done');
+      expect(comfyMock.submittedPromptIds).toHaveLength(submittedBefore + 1);
+      const submitted = comfyMock.submittedPrompts[submittedBefore];
+      const promptNode = submitted.prompt['42'] as { inputs: { prompt: string } };
+      expect(promptNode.inputs.prompt).toBe('Keep audio video draft.');
+    });
+  }
+
   test('configures LLM profile and tests the model', async () => {
     await saveLlmProfile(page!, llmMock.baseUrl);
     await page!.click('button:has-text("获取模型")');
@@ -631,7 +734,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!, avatarName);
     await page!.click('#audio-mode-tab');
-    await page!.click('button:has-text("选择音频")');
+    await page!.click('#audio-mode-panel button:has-text("选择音频")');
     await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
     await expect(page!.locator('audio[src^="smo-media://"]')).toBeVisible();
     await page!.waitForFunction(() => {

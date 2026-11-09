@@ -1,6 +1,7 @@
-import { type KeyboardEvent, useRef, useState } from 'react';
+import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Mic, UserPlus, Video } from 'lucide-react';
 import type { Avatar } from '../shared/types';
+import type { StudioIntent } from './App';
 import { AudioDigitalHumanForm } from './AudioDigitalHumanForm';
 import { AvatarImage } from './AvatarImage';
 import { SpeechForm } from './SpeechForm';
@@ -17,6 +18,7 @@ export function StudioPage({
   modelDirectory,
   onCreateAvatar,
   pageActive = true,
+  intent = null,
 }: {
   avatar: Avatar | null;
   loading: boolean;
@@ -24,6 +26,7 @@ export function StudioPage({
   modelDirectory: string;
   onCreateAvatar: () => void;
   pageActive?: boolean;
+  intent?: StudioIntent | null;
 }) {
   const [mode, setMode] = useState<StudioMode>('video');
   const [videoMode, setVideoMode] = useState<'text' | 'audio'>('text');
@@ -31,7 +34,40 @@ export function StudioPage({
   const videoModeTabRef = useRef<HTMLButtonElement | null>(null);
   const textModeTabRef = useRef<HTMLButtonElement | null>(null);
   const audioModeTabRef = useRef<HTMLButtonElement | null>(null);
+  const handledIntentTokenRef = useRef<number | null>(null);
+  const pendingIntentFocusTokenRef = useRef<number | null>(null);
   const { busy, refresh } = useActiveJob();
+
+  useEffect(() => {
+    if (intent === null) {
+      return;
+    }
+    const handledToken = handledIntentTokenRef.current;
+    if (handledToken !== null && intent.token <= handledToken) {
+      return;
+    }
+    handledIntentTokenRef.current = intent.token;
+    pendingIntentFocusTokenRef.current = intent.token;
+    setMode(intent.mode);
+    setVideoMode(intent.videoMode);
+  }, [intent]);
+
+  useEffect(() => {
+    if (
+      intent === null ||
+      pendingIntentFocusTokenRef.current !== intent.token ||
+      mode !== intent.mode ||
+      videoMode !== intent.videoMode
+    ) {
+      return;
+    }
+    const audioTab = audioModeTabRef.current;
+    if (audioTab === null) {
+      return;
+    }
+    audioTab.focus();
+    pendingIntentFocusTokenRef.current = null;
+  }, [avatar, loading, intent, mode, videoMode]);
 
   const focusMode = (nextMode: VisibleStudioMode): void => {
     setMode(nextMode);
@@ -229,6 +265,7 @@ export function StudioPage({
                   pageActive={pageActive && mode === 'video'}
                   busy={busy}
                   onJobStarted={refresh}
+                  intent={intent}
                 />
               </div>
             </section>

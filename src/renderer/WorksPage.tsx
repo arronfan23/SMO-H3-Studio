@@ -99,7 +99,13 @@ function trapDialogTabKeyDown(
   }
 }
 
-export function WorksPage({ avatars }: { avatars: Avatar[] }) {
+export function WorksPage({
+  avatars,
+  onUseSpeech,
+}: {
+  avatars: Avatar[];
+  onUseSpeech?: (audioPath: string) => void;
+}) {
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -474,6 +480,20 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                     {retrying.has(work.id) ? '正在重试…' : '重试'}
                   </button>
                 )}
+                {onUseSpeech !== undefined &&
+                  work.mode === 'speech' &&
+                  work.status === 'done' &&
+                  work.outputPath && (
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      aria-label={`用于音频数字人 ${work.id}`}
+                      onClick={() => onUseSpeech(work.outputPath!)}
+                    >
+                      <Play size={16} aria-hidden="true" />
+                      用于音频数字人
+                    </button>
+                  )}
                 {work.status === 'done' && work.outputPath && (
                   <>
                     <button

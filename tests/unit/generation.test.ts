@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -803,6 +803,30 @@ describe('GenerationHandler workflows', () => {
     expect(harness.store.listWorks()).toEqual([]);
     expect(harness.comfy.uploads).toEqual([]);
     await expect(readdir(harness.uploadsDirectory)).rejects.toThrow();
+  });
+
+  test('submits audio from a managed speech output without explicit file selection', async () => {
+    const harness = await createHarness();
+    const speechDirectory = join(harness.outputDirectory, 'SMO-Speech');
+    const speechPath = join(speechDirectory, 'existing-speech.wav');
+    await mkdir(speechDirectory, { recursive: true });
+    await writeFile(speechPath, 'managed-speech-audio');
+    harness.comfy.outputs = [
+      outputFile({ nodeId: '65', filename: 'audio-result.mp4' }),
+    ];
+
+    const result = await harness.startGeneration({
+      ...harness.audioRequest,
+      audioPath: speechPath,
+    });
+    await waitForWork(harness.store, result.id, 'done');
+
+    expect(harness.comfy.uploadedAudioContents).toEqual(['managed-speech-audio']);
+    expect(harness.comfy.submissions).toHaveLength(1);
+    expect(harness.store.getWork(result.id)?.metadata?.request).toMatchObject({
+      mode: 'audio',
+      audioPath: speechPath,
+    });
   });
 
   test('removes a partial audio copy when staging fails before pending work', async () => {

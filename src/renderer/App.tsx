@@ -20,6 +20,13 @@ const NAVIGATION = [
 
 type PageId = (typeof NAVIGATION)[number]['id'];
 
+export type StudioIntent = {
+  token: number;
+  mode: 'video';
+  videoMode: 'audio';
+  audioPath: string;
+};
+
 interface StudioApplicationProps {
   initialModelDirectory: string;
 }
@@ -31,6 +38,8 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
   const [avatarsLoading, setAvatarsLoading] = useState(true);
   const [avatarsError, setAvatarsError] = useState<string | null>(null);
   const [modelDirectory, setModelDirectory] = useState(initialModelDirectory);
+  const [studioIntent, setStudioIntent] = useState<StudioIntent | null>(null);
+  const studioIntentTokenRef = useRef(0);
   const mountedRef = useRef(true);
 
   const refreshAvatars = useCallback(async (preferredId?: string): Promise<void> => {
@@ -77,6 +86,12 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
 
   const selectedAvatar = avatars.find((avatar) => avatar.id === selectedAvatarId) ?? null;
 
+  const useSpeechInAudioDigitalHuman = (audioPath: string): void => {
+    const token = ++studioIntentTokenRef.current;
+    setStudioIntent({ token, mode: 'video', videoMode: 'audio', audioPath });
+    setPage('studio');
+  };
+
   return (
     <div className="app-frame">
       <WindowTitlebar />
@@ -114,6 +129,7 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
               modelDirectory={modelDirectory}
               onCreateAvatar={() => setPage('avatars')}
               pageActive={page === 'studio'}
+              intent={studioIntent}
             />
           </div>
           {page === 'avatars' && (
@@ -126,7 +142,9 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
               onChanged={refreshAvatars}
             />
           )}
-          {page === 'works' && <WorksPage avatars={avatars} />}
+          {page === 'works' && (
+            <WorksPage avatars={avatars} onUseSpeech={useSpeechInAudioDigitalHuman} />
+          )}
           {page === 'settings' && (
             <SettingsPage
               modelDirectory={modelDirectory}

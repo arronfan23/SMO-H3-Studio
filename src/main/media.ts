@@ -76,7 +76,8 @@ export class MediaRegistry {
 
   async isSelectedFile(filePath: string): Promise<boolean> {
     try {
-      return this.selectedFiles.has(await this.realMediaFile(filePath));
+      const canonicalPath = await this.realMediaFile(filePath);
+      return this.selectedFiles.has(canonicalPath) || (await this.isManaged(canonicalPath));
     } catch {
       return false;
     }

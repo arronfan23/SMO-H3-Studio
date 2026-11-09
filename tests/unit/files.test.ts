@@ -93,6 +93,23 @@ describe('controlled media access', () => {
     expect(registry.resolveMediaUrl(url)).toBe(await realpath(audioPath));
   });
 
+  test('accepts managed speech output for generation without weakening outside rejection', async () => {
+    const speechDirectory = join(outputDirectory, 'SMO-Speech');
+    const speechPath = join(speechDirectory, 'legacy-speech.wav');
+    const outsidePath = join(outsideDirectory, 'outside-speech.wav');
+    await mkdir(speechDirectory, { recursive: true });
+    await Promise.all([
+      writeFile(speechPath, 'managed speech'),
+      writeFile(outsidePath, 'outside speech'),
+    ]);
+
+    await expect(registry.isSelectedFile(speechPath)).resolves.toBe(true);
+    await expect(registry.isSelectedFile(outsidePath)).resolves.toBe(false);
+
+    await registry.authorizeSelectedFile(outsidePath);
+    await expect(registry.isSelectedFile(outsidePath)).resolves.toBe(true);
+  });
+
   test('rejects traversal and unsupported files even inside an allowed root', async () => {
     const privateVideo = join(outsideDirectory, 'private.mp4');
     const notes = join(outputDirectory, 'notes.txt');

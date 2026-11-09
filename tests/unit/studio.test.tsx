@@ -1368,6 +1368,338 @@ describe('text-to-video studio', () => {
   });
 });
 
+describe('用于音频数字人', () => {
+  function doneSpeechWork(id: string, outputPath: string): Work {
+    return createWork({
+      id,
+      avatarId: null,
+      mode: 'speech',
+      status: 'done',
+      outputPath,
+      title: id,
+    });
+  }
+
+  async function openWorksWith(works: Work[]): Promise<void> {
+    smo.works.list.mockResolvedValue(works);
+    await renderStudio();
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByRole('heading', { name: '我的作品' });
+  }
+
+  async function useSpeechWork(id: string) {
+    fireEvent.click(
+      await screen.findByRole('button', { name: `用于音频数字人 ${id}` }),
+    );
+    const panel = await screen.findByRole('tabpanel', { name: '音频数字人' });
+    await waitFor(() => expect(panel).toBeVisible());
+    return within(panel);
+  }
+
+  function loadDuration(audio: HTMLElement, seconds: number): void {
+    Object.defineProperty(audio, 'duration', { configurable: true, value: seconds });
+    fireEvent.loadedMetadata(audio);
+  }
+
+  test('仅为已完成且有输出路径的语音作品显示操作', async () => {
+    await openWorksWith([
+      doneSpeechWork('speech-ready', 'G:\\output\\SMO-Speech\\ready.wav'),
+      createWork({
+        id: 'speech-running',
+        avatarId: null,
+        mode: 'speech',
+        status: 'running',
+        outputPath: 'G:\\output\\SMO-Speech\\running.wav',
+      }),
+      createWork({
+        id: 'speech-failed',
+        avatarId: null,
+        mode: 'speech',
+        status: 'failed',
+        outputPath: 'G:\\output\\SMO-Speech\\failed.wav',
+      }),
+      createWork({
+        id: 'speech-no-output',
+        avatarId: null,
+        mode: 'speech',
+        status: 'done',
+        outputPath: null,
+      }),
+      createWork({
+        id: 'video-ready',
+        mode: 'text',
+        status: 'done',
+        outputPath: 'G:\\output\\SMO-H3\\video.mp4',
+      }),
+    ]);
+
+    expect(
+      await screen.findByRole('button', { name: '用于音频数字人 speech-ready' }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^用于音频数字人 / })).toHaveLength(1);
+  });
+
+  test.each(['wav', 'mp3', 'flac', 'm4a'])(
+    '选择 %s 语音作品后进入视频音频数字人并直接读取预览和时长',
+    async (extension) => {
+      const id = `speech-${extension}`;
+      const audioPath = `G:\\output\\SMO-Speech\\voice.${extension}`;
+      await openWorksWith([doneSpeechWork(id, audioPath)]);
+
+      const panel = await useSpeechWork(id);
+
+      expect(screen.getByRole('tab', { name: '视频', exact: true })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      expect(screen.getByRole('tab', { name: '视频', exact: true })).toHaveAttribute(
+        'tabindex',
+        '0',
+      );
+      expect(screen.getByRole('tab', { name: '语音', exact: true })).toHaveAttribute(
+        'aria-selected',
+        'false',
+      );
+      expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveAttribute(
+        'tabindex',
+        '0',
+      );
+      expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveFocus();
+      expect(screen.getByRole('tab', { name: '文字生视频' })).toHaveAttribute(
+        'aria-selected',
+        'false',
+      );
+      expect(panel.getByText(`voice.${extension}`)).toBeInTheDocument();
+      const audio = await panel.findByLabelText('所选音频');
+      expect(audio).toHaveAttribute(
+        'src',
+        `smo-media://media/${encodeURIComponent(audioPath)}`,
+      );
+      expect(smo.files.mediaUrl).toHaveBeenCalledWith(audioPath);
+      expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+      expect(smo.files.selectAudio).not.toHaveBeenCalled();
+
+      loadDuration(audio, 4.25 + ['wav', 'mp3', 'flac', 'm4a'].indexOf(extension));
+      expect(panel.getByText(/音频时长：/)).toHaveTextContent(
+        `音频时长：${(4.25 + ['wav', 'mp3', 'flac', 'm4a'].indexOf(extension)).toFixed(2)} 秒`,
+      );
+      expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(
+        4.25 + ['wav', 'mp3', 'flac', 'm4a'].indexOf(extension),
+      );
+    },
+  );
+
+  test('选择语音作品后保留现有语音、文字视频和音频视频草稿及步数', async () => {
+    const audioPath = 'G:\\output\\SMO-Speech\\drafts.wav';
+    smo.works.list.mockResolvedValue([doneSpeechWork('speech-drafts', audioPath)]);
+    await renderStudio();
+
+    const textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    fireEvent.change(textPanel.getByLabelText('原始文字'), {
+      target: { value: '保留文字视频草稿' },
+    });
+    fireEvent.change(textPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '13' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    let audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+    fireEvent.change(audioPanel.getByLabelText('动作/画面提示词'), {
+      target: { value: '保留音频视频草稿' },
+    });
+    fireEvent.change(audioPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '17' },
+    });
+    fireEvent.change(audioPanel.getByLabelText('起始截取（秒）'), {
+      target: { value: '2' },
+    });
+    fireEvent.change(audioPanel.getByLabelText('截取时长（秒）'), {
+      target: { value: '3' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '语音', exact: true }));
+    fireEvent.change(studioSpeechField('口播文字'), {
+      target: { value: '保留语音作品草稿' },
+    });
+    fireEvent.change(studioSpeechField('情绪/语气'), {
+      target: { value: '温和坚定' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    audioPanel = await useSpeechWork('speech-drafts');
+
+    expect(audioPanel.getByLabelText('动作/画面提示词')).toHaveValue('保留音频视频草稿');
+    expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(17);
+    expect(audioPanel.getByLabelText('起始截取（秒）')).toHaveValue(0);
+    expect(audioPanel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    loadDuration(await audioPanel.findByLabelText('所选音频'), 8.5);
+    expect(audioPanel.getByLabelText('截取时长（秒）')).toHaveValue(8.5);
+
+    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    expect(screen.getByLabelText('原始文字')).toHaveValue('保留文字视频草稿');
+    expect(
+      within(screen.getByRole('tabpanel', { name: '文字生视频' })).getByRole('spinbutton', {
+        name: '采样步数',
+      }),
+    ).toHaveValue(13);
+
+    fireEvent.click(screen.getByRole('tab', { name: '语音', exact: true }));
+    expect(studioSpeechField('口播文字')).toHaveValue('保留语音作品草稿');
+    expect(studioSpeechField('情绪/语气')).toHaveValue('温和坚定');
+  });
+
+  test('返回作品页换选和重选同一路径时忽略旧 metadata 并重新读取', async () => {
+    const firstPath = 'G:\\output\\SMO-Speech\\first.mp3';
+    const secondPath = 'G:\\output\\SMO-Speech\\second.flac';
+    await openWorksWith([
+      doneSpeechWork('speech-first', firstPath),
+      doneSpeechWork('speech-second', secondPath),
+    ]);
+
+    let panel = await useSpeechWork('speech-first');
+    const firstAudio = await panel.findByLabelText('所选音频');
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+
+    panel = await useSpeechWork('speech-second');
+    const secondAudio = await panel.findByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+    expect(panel.getByText('second.flac')).toBeInTheDocument();
+    expect(panel.queryByText('first.mp3')).not.toBeInTheDocument();
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+
+    loadDuration(secondAudio, 6.5);
+    loadDuration(firstAudio, 99);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6.5);
+    expect(panel.getByText('音频时长：6.50 秒')).toBeInTheDocument();
+    expect(panel.queryByText('音频时长：99.00 秒')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    panel = await useSpeechWork('speech-second');
+    const repeatedAudio = await panel.findByLabelText('所选音频');
+    expect(repeatedAudio).not.toBe(secondAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：6.50 秒')).not.toBeInTheDocument();
+
+    loadDuration(secondAudio, 88);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    loadDuration(repeatedAudio, 7.25);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(7.25);
+    expect(panel.getByText('音频时长：7.25 秒')).toBeInTheDocument();
+  });
+
+  test('首次 mediaUrl 失败后同路径新 revision 会重新 IPC 并恢复预览', async () => {
+    const audioPath = 'G:\\output\\SMO-Speech\\retry-media.wav';
+    await openWorksWith([doneSpeechWork('speech-retry-media', audioPath)]);
+    expect(
+      await screen.findByLabelText('作品语音 speech-retry-media'),
+    ).toBeInTheDocument();
+    smo.files.mediaUrl.mockRejectedValueOnce(new Error('首次媒体读取失败'));
+
+    let panel = await useSpeechWork('speech-retry-media');
+    expect(await panel.findByRole('alert')).toHaveTextContent('首次媒体读取失败');
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+    const callsBeforeRetry = smo.files.mediaUrl.mock.calls.filter(
+      ([path]) => path === audioPath,
+    ).length;
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    panel = await useSpeechWork('speech-retry-media');
+
+    const audio = await panel.findByLabelText('所选音频');
+    expect(audio).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(audioPath)}`,
+    );
+    const callsAfterRetry = smo.files.mediaUrl.mock.calls.filter(
+      ([path]) => path === audioPath,
+    ).length;
+    expect(callsAfterRetry).toBeGreaterThan(callsBeforeRetry);
+    expect(panel.queryByRole('alert')).not.toBeInTheDocument();
+    loadDuration(audio, 5.75);
+    expect(panel.getByText('音频时长：5.75 秒')).toBeInTheDocument();
+  });
+
+  test('新语音作品使进行中的旧润色失效', async () => {
+    const pending = deferred<PolishResult>();
+    smo.llm.polish.mockImplementationOnce(() => pending.promise);
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\polish-original.wav');
+    smo.works.list.mockResolvedValue([
+      doneSpeechWork('speech-polish', 'G:\\output\\SMO-Speech\\polish-new.wav'),
+    ]);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const originalAudio = await screen.findByLabelText('所选音频');
+    loadDuration(originalAudio, 8);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '旧音频润色草稿' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
+    await waitFor(() => expect(smo.llm.polish).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    const panel = await useSpeechWork('speech-polish');
+    expect(panel.getByText('polish-new.wav')).toBeInTheDocument();
+
+    await act(async () => {
+      pending.resolve({
+        text: '过期润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+      await pending.promise;
+    });
+
+    expect(panel.getByText('polish-new.wav')).toBeInTheDocument();
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByDisplayValue('过期润色结果')).not.toBeInTheDocument();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test('生成提交中拒绝替换并提示，主进程不收到额外任务', async () => {
+    const pending = deferred<{ id: string }>();
+    smo.jobs.start.mockImplementationOnce(() => pending.promise);
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\busy-original.wav');
+    smo.works.list.mockResolvedValue([
+      doneSpeechWork('speech-busy', 'G:\\output\\SMO-Speech\\busy-new.mp3'),
+    ]);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const originalAudio = await screen.findByLabelText('所选音频');
+    loadDuration(originalAudio, 8);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '正在提交的生成草稿' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    const panel = await useSpeechWork('speech-busy');
+
+    expect(await panel.findByRole('alert')).toHaveTextContent(
+      '生成任务进行中，完成后才能更换语音作品。',
+    );
+    expect(panel.getByText('busy-original.wav')).toBeInTheDocument();
+    expect(panel.queryByText('busy-new.mp3')).not.toBeInTheDocument();
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({ id: 'existing-generation' });
+      await pending.promise;
+    });
+    expect(panel.getByText('busy-original.wav')).toBeInTheDocument();
+    expect(panel.queryByText('busy-new.mp3')).not.toBeInTheDocument();
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('录音', () => {
   class MockMediaRecorder {
     static instances: MockMediaRecorder[] = [];
