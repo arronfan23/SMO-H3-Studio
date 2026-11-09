@@ -354,6 +354,169 @@ describe('media component manifest', () => {
 });
 
 describe('MediaComponentService', () => {
+  test('falls back from the Hugging Face mirror without changing verified downloads', async () => {
+    const manifest = makeManifest();
+    const originalUrl =
+      'https://huggingface.co/Qwen/Qwen3-TTS/resolve/main/config.json?download=true';
+    const mirrorUrl =
+      'https://hf-mirror.com/Qwen/Qwen3-TTS/resolve/main/config.json?download=true';
+    const nonHuggingFaceUrl = 'https://models.test/image/config.json?original=true';
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    manifest.components.image = {
+      id: 'image',
+      revisions: revisionsFor(SECOND_REPOSITORY),
+      files: [
+        {
+          ...makeFile('Image/config.json', secondData, SECOND_REPOSITORY),
+          url: nonHuggingFaceUrl,
+        },
+      ],
+      totalBytes: secondData.length,
+    };
+    const observedBytes: number[] = [];
+    let service: MediaComponentService;
+    const download = vi.fn<DownloadFile>(async (options) => {
+      const isSpeech = options.destination === destination(speechFile.path);
+      const report = (downloadedBytes: number) => {
+        options.onProgress?.({
+          downloadedBytes,
+          totalBytes: options.expectedSize,
+          path: options.destination,
+        });
+        if (isSpeech) observedBytes.push(service.getState('speech').downloadedBytes);
+      };
+      if (options.url === mirrorUrl) {
+        report(4);
+        throw new Error('mirror connect timeout');
+      }
+      report(1);
+      report(options.expectedSize);
+      return {
+        resumed: false,
+        bytes: options.expectedSize,
+        sha256: options.expectedSha256,
+      };
+    });
+    ({ service } = makeService(manifest, download));
+
+    await Promise.all([service.install('speech'), service.install('image')]);
+
+    const calls = download.mock.calls.map(([options]) => options);
+    const speechCalls = calls.filter(
+      (options) => options.destination === destination(speechFile.path),
+    );
+    const imageCalls = calls.filter(
+      (options) => options.destination === destination('Image/config.json', 'image'),
+    );
+    expect(speechCalls.map((options) => options.url)).toEqual([mirrorUrl, originalUrl]);
+    expect(speechCalls).toHaveLength(2);
+    for (const options of speechCalls) {
+      expect(options).toMatchObject({
+        destination: destination(speechFile.path),
+        expectedSize: speechFile.size,
+        expectedSha256: speechFile.sha256,
+      });
+    }
+    expect(imageCalls).toHaveLength(1);
+    expect(imageCalls[0]).toMatchObject({
+      url: nonHuggingFaceUrl,
+      destination: destination('Image/config.json', 'image'),
+      expectedSize: secondData.length,
+    });
+    expect(observedBytes.length).toBeGreaterThanOrEqual(3);
+    for (let index = 1; index < observedBytes.length; index += 1) {
+      expect(observedBytes[index]).toBeGreaterThanOrEqual(observedBytes[index - 1]);
+    }
+    expect(service.getState('speech')).toMatchObject({
+      status: 'ready',
+      downloadedBytes: speechFile.size,
+      active: false,
+    });
+    expect(service.getState('image')).toMatchObject({
+      status: 'ready',
+      downloadedBytes: secondData.length,
+      active: false,
+    });
+  });
+
+  test('stops before the official URL when a mirror download is cancelled', async () => {
+    const manifest = makeManifest();
+    const originalUrl = 'https://huggingface.co/Qwen/Qwen3-TTS/resolve/main/model.bin';
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    let notifyStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const download = vi.fn<DownloadFile>(async (options) => {
+      notifyStarted?.();
+      return new Promise((resolve, reject) => {
+        const rejectAbort = () => reject(options.signal?.reason);
+        if (options.signal?.aborted) rejectAbort();
+        options.signal?.addEventListener('abort', rejectAbort, { once: true });
+      });
+    });
+    const { service } = makeService(manifest, download);
+
+    const installing = service.install('speech');
+    await started;
+    service.cancel('speech');
+
+    await expect(installing).rejects.toThrow(/cancel|abort/i);
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(download.mock.calls[0][0].url).toBe(
+      'https://hf-mirror.com/Qwen/Qwen3-TTS/resolve/main/model.bin',
+    );
+    expect(service.getState('speech')).toMatchObject({
+      status: 'missing',
+      active: false,
+      error: null,
+    });
+  });
+
+  test('preserves the official source error after the mirror also fails', async () => {
+    const manifest = makeManifest();
+    const originalUrl = 'https://huggingface.co/Qwen/Qwen3-TTS/resolve/main/model.bin';
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    const mirrorError = new Error('mirror unavailable');
+    const officialError = new Error('official source root cause');
+    const download = vi.fn<DownloadFile>(async (options) => {
+      throw new URL(options.url).hostname === 'hf-mirror.com'
+        ? mirrorError
+        : officialError;
+    });
+    const { service } = makeService(manifest, download);
+
+    let rejection: unknown;
+    try {
+      await service.install('speech');
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(download.mock.calls.map(([options]) => options.url)).toEqual([
+      'https://hf-mirror.com/Qwen/Qwen3-TTS/resolve/main/model.bin',
+      originalUrl,
+    ]);
+    expect(rejection).toBe(officialError);
+    expect(service.getState('speech')).toMatchObject({
+      status: 'failed',
+      error: officialError.message,
+      active: false,
+    });
+  });
+
   test('installs two files with aggregate progress and verified download arguments', async () => {
     const observed: MediaComponentState[] = [];
     let service: MediaComponentService;

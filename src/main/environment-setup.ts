@@ -8,6 +8,7 @@ import { parse as parseYaml } from 'yaml';
 import {
   downloadFile as defaultDownloadFile,
   downloadParts as defaultDownloadParts,
+  modelDownloadUrls,
 } from './download';
 import {
   selectEnvironmentProfile,
@@ -28,6 +29,8 @@ import type {
 } from '../shared/environment';
 import type { HardwareInfo } from '../shared/types';
 import { selectSparkAcceleration } from './spark-acceleration';
+
+export { modelDownloadUrls } from './download';
 
 export const REQUIRED_COMFY_NODES = [
   'SelfLiftH3Sampler',
@@ -573,19 +576,6 @@ async function writeExtraModelPaths(
     lines.join('\n'),
     'utf8',
   );
-}
-
-/**
- * Hugging Face is unreachable on some networks where its community mirror is
- * reachable. SHA256 verification still protects every downloaded byte.
- */
-export function modelDownloadUrls(model: EnvironmentModelFile): string[] {
-  const source = new URL(model.url);
-  if (source.hostname !== 'huggingface.co') return [model.url];
-  return [
-    `https://hf-mirror.com${source.pathname}${source.search}`,
-    model.url,
-  ];
 }
 
 /** GitHub is preferred; the mirror is a fallback and SHA256 verifies every byte. */

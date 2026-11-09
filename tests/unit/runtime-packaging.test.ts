@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import rawManifest from '../../resources/environment/selflift-spark.json';
 import { parseEnvironmentManifest } from '../../src/main/environment-manifest';
 
@@ -51,6 +52,14 @@ interface BuilderModule {
     sourceManifest: unknown;
     fetchImpl?: typeof fetch;
   }): Promise<unknown>;
+}
+
+interface ElectronBuilderConfig {
+  extraResources?: Array<{
+    from: string;
+    to: string;
+    filter?: string[];
+  }>;
 }
 
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'smo-runtime-packaging-'));
@@ -224,6 +233,27 @@ beforeAll(() => {
 
 afterAll(() => {
   rmSync(temporaryRoot, { recursive: true, force: true });
+});
+
+describe('electron-builder.yml', () => {
+  test('packages the complete speech runtime project without environment artifacts', () => {
+    const config = parseYaml(
+      readFileSync(join(projectRoot, 'electron-builder.yml'), 'utf8'),
+    ) as ElectronBuilderConfig;
+    const speech = config.extraResources?.find(
+      (resource) => resource.from === 'resources/speech',
+    );
+    const projectFiles = ['pyproject.toml', 'qwen_tts_service.py', 'uv.lock'];
+
+    expect(speech).toMatchObject({
+      from: 'resources/speech',
+      to: 'resources/speech',
+    });
+    expect([...(speech?.filter ?? [])].sort()).toEqual([...projectFiles].sort());
+    for (const file of projectFiles) {
+      expect(statSync(join(projectRoot, 'resources', 'speech', file)).isFile()).toBe(true);
+    }
+  });
 });
 
 describe('package-runtime.ps1', () => {

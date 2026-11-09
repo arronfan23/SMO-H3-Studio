@@ -31,7 +31,7 @@ import type {
   IncomingMessage as ElectronIncomingMessage,
   Net,
 } from 'electron';
-import type { EnvironmentArchivePart } from '../shared/environment';
+import type { EnvironmentArchivePart, EnvironmentModelFile } from '../shared/environment';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -48,6 +48,19 @@ export interface DownloadReceipt {
 export type DownloadFetch = typeof globalThis.fetch;
 export type DownloadProgressCallback = (progress: DownloadProgress) => void;
 const requireElectron = createRequire(import.meta.url);
+
+/**
+ * Hugging Face is unreachable on some networks where its community mirror is
+ * reachable. SHA256 verification still protects every downloaded byte.
+ */
+export function modelDownloadUrls(model: EnvironmentModelFile): string[] {
+  const source = new URL(model.url);
+  if (source.hostname !== 'huggingface.co') return [model.url];
+  return [
+    `https://hf-mirror.com${source.pathname}${source.search}`,
+    model.url,
+  ];
+}
 
 function electronResponseHeaders(
   input: Record<string, string | string[]>,

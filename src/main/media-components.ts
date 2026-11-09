@@ -8,7 +8,11 @@ import type {
   MediaComponentManifest,
   MediaComponentState,
 } from '../shared/media-components';
-import { downloadFile as defaultDownloadFile } from './download';
+import {
+  downloadFile as defaultDownloadFile,
+  type DownloadReceipt,
+  modelDownloadUrls,
+} from './download';
 
 const WINDOWS_DEVICE_NAME_PATTERN =
   /^(?:CONIN\$|CONOUT\$|CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])(?:[ .]|$)/i;
@@ -322,24 +326,35 @@ export class MediaComponentService {
       signal.throwIfAborted();
       const destination = this.destination(id, file);
       this.setState(id, { currentFile: file.path });
-      const receipt = await (this.options.downloadFile ?? defaultDownloadFile)({
-        url: file.url,
-        destination,
-        expectedSize: file.size,
-        expectedSha256: file.sha256,
-        signal,
-        onProgress: (progress) => {
-          displayedBytes = Math.max(
-            displayedBytes,
-            Math.min(totalBytes, completedBytes + progress.downloadedBytes),
-          );
-          this.setState(id, {
-            downloadedBytes: displayedBytes,
-            totalBytes,
-            currentFile: file.path,
+      const sources = modelDownloadUrls(file);
+      let receipt: DownloadReceipt | undefined;
+      for (const [sourceIndex, url] of sources.entries()) {
+        signal.throwIfAborted();
+        try {
+          receipt = await (this.options.downloadFile ?? defaultDownloadFile)({
+            url,
+            destination,
+            expectedSize: file.size,
+            expectedSha256: file.sha256,
+            signal,
+            onProgress: (progress) => {
+              displayedBytes = Math.max(
+                displayedBytes,
+                Math.min(totalBytes, completedBytes + progress.downloadedBytes),
+              );
+              this.setState(id, {
+                downloadedBytes: displayedBytes,
+                totalBytes,
+                currentFile: file.path,
+              });
+            },
           });
-        },
-      });
+          break;
+        } catch (error) {
+          if (signal.aborted || sourceIndex === sources.length - 1) throw error;
+        }
+      }
+      if (!receipt) throw new Error(`No download source available for ${file.path}`);
       completedBytes += receipt.bytes;
       displayedBytes = Math.max(displayedBytes, Math.min(totalBytes, completedBytes));
       this.setState(id, {
