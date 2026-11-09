@@ -508,6 +508,7 @@ describe('generated API workflows', () => {
         duration: 'PrimitiveFloat',
         seed: 'SelfLiftAvatarH3Sampler',
         steps: 'BasicScheduler',
+        sigmaRefiner: 'H3SigmaRefiner',
         output: 'VHS_VideoCombine',
       },
     },

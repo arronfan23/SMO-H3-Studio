@@ -5,6 +5,7 @@ export const WORKFLOW_NODES = {
     duration: '132',
     seed: '269',
     steps: '124',
+    sigmaRefiner: '147',
     output: '180',
   },
   audio: {
@@ -25,6 +26,8 @@ export const WORKFLOW_PATHS = {
     duration: `${WORKFLOW_NODES.text.duration}.inputs.value`,
     seed: `${WORKFLOW_NODES.text.seed}.inputs.seed`,
     steps: `${WORKFLOW_NODES.text.steps}.inputs.steps`,
+    transitionStep: `${WORKFLOW_NODES.text.seed}.inputs.transition_step`,
+    sigmaRefinerStart: `${WORKFLOW_NODES.text.sigmaRefiner}.inputs.start_at_sigma`,
     output: `${WORKFLOW_NODES.text.output}.inputs.filename_prefix`,
   },
   audio: {
@@ -35,6 +38,7 @@ export const WORKFLOW_PATHS = {
     trimDuration: `${WORKFLOW_NODES.audio.trim}.inputs.duration`,
     seed: `${WORKFLOW_NODES.audio.seed}.inputs.seed`,
     steps: `${WORKFLOW_NODES.audio.steps}.inputs.steps`,
+    transitionStep: `${WORKFLOW_NODES.audio.seed}.inputs.transition_step`,
     output: `${WORKFLOW_NODES.audio.output}.inputs.filename_prefix`,
   },
 } as const;

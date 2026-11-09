@@ -983,6 +983,75 @@ describe('GenerationHandler Spark acceleration', () => {
     hardwareFingerprint: { cudaComputeCapability: '12.0' },
   };
 
+  test.each(
+    (['text', 'audio'] as const).flatMap((mode) =>
+      [1, 2, 3, mode === 'text' ? 8 : 6, 100].map((steps) => ({ mode, steps })),
+    ),
+  )(
+    'keeps Scheduler, Spark, and SelfLift transitions valid for $mode steps=$steps',
+    async ({ mode, steps }) => {
+      const harness = await createHarness({ acceleration: sm120 });
+      const filename = mode === 'text' ? 'text-ref2va.json' : 'audio-digital-human.json';
+      const workflowPath = join(workflowsDirectory, filename);
+      const frozenSource = await readFile(workflowPath, 'utf8');
+      if (mode === 'audio') {
+        harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'low-steps.mp4' })];
+      }
+      const source = mode === 'text' ? harness.textRequest : harness.audioRequest;
+
+      const result = await harness.startGeneration({ ...source, steps });
+      await waitForWork(harness.store, result.id, 'done');
+
+      const graph = harness.comfy.submissions[0] as Record<
+        string,
+        { class_type: string; inputs: Record<string, unknown> }
+      >;
+      const schedulerId = mode === 'text' ? '124' : '51';
+      const samplerId = mode === 'text' ? '269' : '86';
+      const defaultTransition = mode === 'text' ? 6 : 4;
+      const expectedTransition = Math.min(defaultTransition, Math.max(1, steps - 1));
+      const transition = graph[samplerId].inputs.transition_step;
+
+      expect(graph[schedulerId].inputs.steps).toBe(steps);
+      expect(graph.smo_spark.inputs.steps).toBe(steps);
+      expect(transition).toBe(expectedTransition);
+      // selflift-Avatar/nodes.py:_validate_schedule requires
+      // 1 <= transition_step <= len(sigmas) - 2. For steps >= 2 the
+      // unrefined BasicScheduler already provides this bound; steps=1 needs
+      // one explicit refiner step so low- and high-resolution each get one NFE.
+      expect(transition).toBeGreaterThanOrEqual(1);
+      expect(transition).toBeLessThanOrEqual(Math.max(1, steps - 1));
+
+      if (steps === 1 && mode === 'text') {
+        expect(graph['147'].inputs).toMatchObject({
+          extra_steps: 1,
+          start_at_sigma: 20,
+        });
+        expect(graph[samplerId].inputs.sigmas).toEqual(['147', 0]);
+      } else if (steps === 1) {
+        const refiner = Object.entries(graph).find(
+          ([, node]) => node.class_type === 'H3SigmaRefiner',
+        );
+        expect(refiner?.[1].inputs).toMatchObject({
+          extra_steps: 1,
+          start_at_sigma: 20,
+          end_at_sigma: 0,
+          sigmas: ['51', 0],
+        });
+        expect(graph[samplerId].inputs.sigmas).toEqual([refiner?.[0], 0]);
+      } else {
+        if (mode === 'text') {
+          expect(graph['147'].inputs.start_at_sigma).toBe(0.7);
+        } else {
+          expect(
+            Object.values(graph).some((node) => node.class_type === 'H3SigmaRefiner'),
+          ).toBe(false);
+        }
+      }
+      expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
+    },
+  );
+
   test('submits the accelerated text graph with twelve scheduler steps and records Spark metadata', async () => {
     const harness = await createHarness({ acceleration: sm120 });
 

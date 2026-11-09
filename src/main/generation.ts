@@ -535,6 +535,17 @@ export function createGenerationHandler(
           await readFile(workflowPath, 'utf8'),
         ) as WorkflowGraph;
         throwIfCancelled();
+        const configuredTransition =
+          frozen[WORKFLOW_NODES[request.mode].seed].inputs.transition_step;
+        if (!Number.isSafeInteger(configuredTransition) || (configuredTransition as number) < 1) {
+          throw new Error('SelfLift transition_step must be a positive integer');
+        }
+        // SelfLift reuses the final low-resolution prediction at the lift and
+        // therefore needs at least one subsequent high-resolution evaluation.
+        const transitionStep = Math.min(
+          configuredTransition as number,
+          Math.max(1, request.steps - 1),
+        );
         const changes: Record<string, unknown> =
           request.mode === 'text'
             ? {
@@ -555,8 +566,29 @@ export function createGenerationHandler(
                 [WORKFLOW_PATHS.audio.steps]: request.steps,
                 [WORKFLOW_PATHS.audio.output]: `SMO-H3/${workId}`,
               };
+        changes[WORKFLOW_PATHS[request.mode].transitionStep] = transitionStep;
+        if (request.mode === 'text' && request.steps === 1) {
+          changes[WORKFLOW_PATHS.text.sigmaRefinerStart] = 20;
+        }
+        const patched = patchWorkflow(frozen, changes);
+        if (request.mode === 'audio' && request.steps === 1) {
+          // A one-step BasicScheduler is [sigma, 0]. Force one intermediate
+          // sigma so SelfLift can run one low- and one high-resolution NFE.
+          const refinerId = 'smo_low_step_sigma_refiner';
+          patched[refinerId] = {
+            class_type: 'H3SigmaRefiner',
+            inputs: {
+              extra_steps: 1,
+              start_at_sigma: 20,
+              end_at_sigma: 0,
+              spacing: 'cosine',
+              sigmas: [WORKFLOW_NODES.audio.steps, 0],
+            },
+          };
+          patched[WORKFLOW_NODES.audio.seed].inputs.sigmas = [refinerId, 0];
+        }
         const workflow = applySparkAcceleration(
-          patchWorkflow(frozen, changes),
+          patched,
           acceleration,
         );
         throwIfCancelled();
