@@ -851,6 +851,26 @@ body[data-window-maximized='true'] .window-resize-handle {
   height: 40px;
 }
 
+.audio-recorder {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+
+.audio-recorder-time {
+  display: inline-block;
+  width: 8ch;
+  color: #344139;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.audio-recorder-status {
+  color: #68746c;
+  font-size: 13px;
+}
+
 .page-header {
   display: flex;
   align-items: center;

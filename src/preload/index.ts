@@ -37,6 +37,14 @@ const api: SmoApi = {
     mediaUrl: (path) => ipcRenderer.invoke('files:mediaUrl', { path }),
     openFolder: (path) => ipcRenderer.invoke('files:openFolder', { path }),
   },
+  recordings: {
+    save: async (blob) =>
+      ipcRenderer.invoke('recordings:save', {
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        mimeType: blob.type,
+      }),
+    discard: (path) => ipcRenderer.invoke('recordings:discard', { path }),
+  },
   llm: {
     saveProfile: (input) => ipcRenderer.invoke('llm:saveProfile', input),
     getProfile: () => ipcRenderer.invoke('llm:getProfile', {}),

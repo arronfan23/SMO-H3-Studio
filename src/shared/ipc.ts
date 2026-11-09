@@ -54,6 +54,8 @@ export const IPC_CHANNELS = [
   'files:authorizeDroppedAudio',
   'files:mediaUrl',
   'files:openFolder',
+  'recordings:save',
+  'recordings:discard',
   'llm:saveProfile',
   'llm:getProfile',
   'llm:listModels',
@@ -293,6 +295,19 @@ export function createIpcSchema() {
       'files:openFolder',
       z.object({ path: nonEmptyString }).strict(),
     ),
+    requestSchema(
+      'recordings:save',
+      z
+        .object({
+          bytes: z.instanceof(Uint8Array),
+          mimeType: nonEmptyString,
+        })
+        .strict(),
+    ),
+    requestSchema(
+      'recordings:discard',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
     requestSchema('llm:saveProfile', llmProfileInputSchema),
     requestSchema('llm:getProfile', emptyPayload),
     requestSchema('llm:listModels', llmDiscoveryInputSchema),
@@ -396,6 +411,10 @@ export interface SmoApi {
     authorizeDroppedAudio(file: unknown): Promise<string>;
     mediaUrl(path: string): Promise<string>;
     openFolder(path: string): Promise<void>;
+  };
+  readonly recordings: {
+    save(blob: Blob): Promise<string>;
+    discard(path: string): Promise<void>;
   };
   readonly llm: {
     saveProfile(input: LlmProfile & { apiKey?: string }): Promise<void>;

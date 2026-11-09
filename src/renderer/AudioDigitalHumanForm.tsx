@@ -8,6 +8,7 @@ import {
 } from '../shared/generation-options';
 import { GenerationOptions } from './GenerationOptions';
 import { AudioInput } from './AudioInput';
+import { AudioRecorder } from './AudioRecorder';
 import { JobStatus } from './JobStatus';
 import { StepNumberField } from './StepNumberField';
 import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
@@ -65,6 +66,7 @@ export function AudioDigitalHumanForm({
   );
   const [polishing, setPolishing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [recordingBusy, setRecordingBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const { url: audioUrl, error: mediaError } = useMediaUrl(audioPath);
@@ -313,8 +315,16 @@ export function AudioDigitalHumanForm({
     >
       <AudioInput
         path={audioPath}
-        disabled={submitting || busy}
+        disabled={submitting || busy || recordingBusy}
         onSelected={handleAudioSelected}
+        onError={setError}
+      />
+      <AudioRecorder
+        active={active && pageActive}
+        disabled={submitting || busy}
+        hasAudio={audioPath !== null}
+        onBusyChange={setRecordingBusy}
+        onRecorded={handleAudioSelected}
         onError={setError}
       />
       {audioPath && audioSeconds !== null && (
@@ -486,15 +496,15 @@ export function AudioDigitalHumanForm({
         recommended={6}
         min={1}
         max={100}
-        disabled={submitting || busy}
+        disabled={submitting || busy || recordingBusy}
         onChange={setSteps}
       />
-      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy}>
+      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy || recordingBusy}>
         <Sparkles size={16} aria-hidden="true" />
         {polishing ? '正在润色…' : 'AI 润色'}
       </button>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy}>
+      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy || recordingBusy}>
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>

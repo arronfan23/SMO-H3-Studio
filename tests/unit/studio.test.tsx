@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
 import { AudioDigitalHumanForm } from '../../src/renderer/AudioDigitalHumanForm';
+import { AudioRecorder } from '../../src/renderer/AudioRecorder';
 import { SKILL_NAMES } from '../../src/shared/skills';
 import {
   AUTO_SKILL_OPTION,
@@ -42,6 +43,7 @@ function createSmoMock() {
     app: { getVersion: vi.fn() },
     avatars: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
     jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn(), getState: vi.fn() },
+    recordings: { save: vi.fn(), discard: vi.fn() },
     files: {
       selectImage: vi.fn(),
       selectAudio: vi.fn(),
@@ -97,6 +99,8 @@ beforeEach(() => {
   smo.files.authorizeDroppedAudio.mockImplementation(
     async (file: { name: string }) => `G:\\dropped\\${file.name}`,
   );
+  smo.recordings.save.mockResolvedValue('G:\\data\\recordings\\recorded.wav');
+  smo.recordings.discard.mockResolvedValue(undefined);
   smo.works.list.mockResolvedValue([]);
   smo.works.rename.mockRejectedValue(new Error('Unexpected work rename'));
   smo.jobs.start.mockResolvedValue({ id: 'job-1' });
@@ -1053,6 +1057,434 @@ describe('text-to-video studio', () => {
       createWork({ id: 'job-real', status: 'done', outputPath: 'G:\\output\\real.mp4' }),
     ]);
     expect(await screen.findByText('已完成（done）', {}, { timeout: 2500 })).toBeInTheDocument();
+  });
+});
+
+describe('录音', () => {
+  class MockMediaRecorder {
+    static instances: MockMediaRecorder[] = [];
+    readonly stream: MediaStream;
+    readonly mimeType = 'audio/webm';
+    emitStopEvents = true;
+    state: RecordingState = 'inactive';
+    ondataavailable: ((event: BlobEvent) => void) | null = null;
+    onstop: ((event: Event) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+
+    constructor(stream: MediaStream) {
+      this.stream = stream;
+      MockMediaRecorder.instances.push(this);
+    }
+
+    start(): void {
+      this.state = 'recording';
+    }
+
+    stop(): void {
+      if (this.state === 'inactive') {
+        return;
+      }
+      this.state = 'inactive';
+      if (!this.emitStopEvents) {
+        return;
+      }
+      this.ondataavailable?.({
+        data: new Blob(['recorded audio'], { type: this.mimeType }),
+      } as BlobEvent);
+      this.onstop?.(new Event('stop'));
+    }
+  }
+
+  const originalMediaDevices = Object.getOwnPropertyDescriptor(
+    navigator,
+    'mediaDevices',
+  );
+  let getUserMedia: ReturnType<typeof vi.fn>;
+  let tracks: Array<{ stop: ReturnType<typeof vi.fn> }>;
+
+  beforeEach(() => {
+    tracks = [];
+    MockMediaRecorder.instances = [];
+    getUserMedia = vi.fn(async () => {
+      const track = { stop: vi.fn() };
+      tracks.push(track);
+      return { getTracks: () => [track] } as unknown as MediaStream;
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    vi.stubGlobal('MediaRecorder', MockMediaRecorder);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalMediaDevices === undefined) {
+      Reflect.deleteProperty(navigator, 'mediaDevices');
+    } else {
+      Object.defineProperty(navigator, 'mediaDevices', originalMediaDevices);
+    }
+  });
+
+  function renderRecorder() {
+    const onRecorded = vi.fn();
+    const onError = vi.fn();
+    const view = render(
+      <AudioRecorder onRecorded={onRecorded} onError={onError} />,
+    );
+    return { onError, onRecorded, view };
+  }
+
+  test('录音只在点击后申请麦克风，停止后保存字节并回调输出路径', async () => {
+    const { onRecorded } = renderRecorder();
+
+    expect(getUserMedia).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    const stop = await screen.findByRole('button', { name: '停止录音' });
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
+    expect(MockMediaRecorder.instances[0]?.state).toBe('recording');
+
+    fireEvent.click(stop);
+
+    await waitFor(() =>
+      expect(onRecorded).toHaveBeenCalledWith('G:\\data\\recordings\\recorded.wav'),
+    );
+    expect(tracks[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(smo.recordings.save).toHaveBeenCalledTimes(1);
+    const blob = smo.recordings.save.mock.calls[0]?.[0] as Blob;
+    expect(blob).toBeInstanceOf(Blob);
+    expect(blob.type).toBe('audio/webm');
+    expect(await blob.text()).toBe('recorded audio');
+  });
+
+  test('录音计时使用固定的分秒显示', async () => {
+    vi.useFakeTimers();
+    const { view } = renderRecorder();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    });
+
+    expect(screen.getByRole('timer', { name: '录音计时' })).toHaveTextContent(
+      '00:00',
+    );
+    act(() => {
+      vi.advanceTimersByTime(2_100);
+    });
+    expect(screen.getByRole('timer', { name: '录音计时' })).toHaveTextContent(
+      '00:02',
+    );
+    expect(screen.getByRole('timer', { name: '录音计时' })).toHaveClass(
+      'audio-recorder-time',
+    );
+    view.unmount();
+  });
+
+  test('录音保存后可试听并通过重录更新同一音频状态', async () => {
+    smo.recordings.save
+      .mockResolvedValueOnce('G:\\data\\recordings\\one.wav')
+      .mockResolvedValueOnce('G:\\data\\recordings\\two.wav');
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    const firstAudio = await screen.findByLabelText('所选音频');
+    expect(screen.getByText('one.wav')).toBeInTheDocument();
+    Object.defineProperty(firstAudio, 'duration', { configurable: true, value: 4.5 });
+    fireEvent.loadedMetadata(firstAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(4.5);
+
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await screen.findByText('two.wav');
+    const secondAudio = await screen.findByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 2.75 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(2.75);
+    expect(smo.recordings.save).toHaveBeenCalledTimes(2);
+  });
+
+  test('录音保存中隐藏仍接受迟到路径并在返回面板后保留录音', async () => {
+    let resolveSave!: (path: string) => void;
+    smo.recordings.save.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await waitFor(() => expect(smo.recordings.save).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    await act(async () => {
+      resolveSave('G:\\data\\recordings\\hidden-save.wav');
+    });
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+
+    expect(await screen.findByText('hidden-save.wav')).toBeInTheDocument();
+    expect(await screen.findByLabelText('所选音频')).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\data\\recordings\\hidden-save.wav')}`,
+    );
+    expect(smo.recordings.discard).not.toHaveBeenCalled();
+  });
+
+  test('录音保存中 busy 仍更新同一音频状态', async () => {
+    let resolveSave!: (path: string) => void;
+    smo.recordings.save.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const form = (
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />
+    );
+    const view = render(form);
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await waitFor(() => expect(smo.recordings.save).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        busy
+      />,
+    );
+    await act(async () => {
+      resolveSave('G:\\data\\recordings\\busy-save.wav');
+    });
+
+    expect(await screen.findByText('busy-save.wav')).toBeInTheDocument();
+    expect(await screen.findByLabelText('所选音频')).toBeInTheDocument();
+    expect(smo.recordings.discard).not.toHaveBeenCalled();
+  });
+
+  test('录音保存中卸载会 discard 迟到路径且不回调', async () => {
+    let resolveSave!: (path: string) => void;
+    smo.recordings.save.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const { onRecorded, view } = renderRecorder();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await waitFor(() => expect(smo.recordings.save).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    await act(async () => {
+      resolveSave('G:\\data\\recordings\\unmounted-save.wav');
+    });
+
+    await waitFor(() =>
+      expect(smo.recordings.discard).toHaveBeenCalledWith(
+        'G:\\data\\recordings\\unmounted-save.wav',
+      ),
+    );
+    expect(onRecorded).not.toHaveBeenCalled();
+  });
+
+  test('录音 onerror 后到达的 dataavailable/stop 不保存也不替换已有音频', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original.mp3');
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const originalAudio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(originalAudio, 'duration', {
+      configurable: true,
+      value: 8,
+    });
+    fireEvent.loadedMetadata(originalAudio);
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+    const stopButton = await screen.findByRole('button', { name: '停止录音' });
+    const recorder = MockMediaRecorder.instances[0]!;
+    recorder.emitStopEvents = false;
+    const queuedDataAvailable = recorder.ondataavailable;
+    const queuedStop = recorder.onstop;
+    fireEvent.click(stopButton);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+
+    await act(async () => {
+      recorder.onerror?.(new Event('error'));
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent('录音失败');
+
+    await act(async () => {
+      queuedDataAvailable?.({
+        data: new Blob(['late audio'], { type: 'audio/webm' }),
+      } as BlobEvent);
+      queuedStop?.(new Event('stop'));
+      await Promise.resolve();
+    });
+
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+    expect(screen.getByText('original.mp3')).toBeInTheDocument();
+    expect(screen.getByLabelText('所选音频')).toBe(originalAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(8);
+    expect(screen.queryByText('recorded.wav')).not.toBeInTheDocument();
+  });
+
+  test('录音权限拒绝时保留已有音频', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original.mp3');
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(audio);
+    getUserMedia.mockRejectedValue(new DOMException('Denied', 'NotAllowedError'));
+
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('麦克风权限被拒绝');
+    expect(screen.getByText('original.mp3')).toBeInTheDocument();
+    expect(screen.getByLabelText('所选音频')).toBe(audio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(8);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+  });
+
+  test('录音转换失败时保留已有音频并显示中文错误', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original.mp3');
+    smo.recordings.save.mockRejectedValue(new Error('FFmpeg failed'));
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(audio);
+
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('录音保存失败');
+    expect(screen.getByText('original.mp3')).toBeInTheDocument();
+    expect(screen.getByLabelText('所选音频')).toBe(audio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(8);
+  });
+
+  test('录音找不到麦克风时显示中文错误且不保存', async () => {
+    const { onError, onRecorded } = renderRecorder();
+    getUserMedia.mockRejectedValue(new DOMException('Missing', 'NotFoundError'));
+
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.stringContaining('未检测到可用的麦克风'),
+      ),
+    );
+    expect(onRecorded).not.toHaveBeenCalled();
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '开始录音' })).toBeEnabled();
+  });
+
+  test('录音没有媒体设备 API 时也报告无麦克风', async () => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: undefined,
+    });
+    const { onError } = renderRecorder();
+
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.stringContaining('未检测到可用的麦克风'),
+      ),
+    );
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+  });
+
+  test('录音在隐藏和卸载时停止所有 track 且不保存', async () => {
+    const { view } = renderRecorder();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    await screen.findByRole('button', { name: '停止录音' });
+
+    view.rerender(
+      <AudioRecorder active={false} onRecorded={vi.fn()} onError={vi.fn()} />,
+    );
+    expect(tracks[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+
+    view.rerender(<AudioRecorder active onRecorded={vi.fn()} onError={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    await screen.findByRole('button', { name: '停止录音' });
+    view.unmount();
+    expect(tracks[1]?.stop).toHaveBeenCalledTimes(1);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+  });
+
+  test('录音 busy 时禁止开始录音或替换音频', () => {
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        busy
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: '开始录音' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '选择音频' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  test('录音等待权限时进入 busy 会取消启动并关闭返回的 track', async () => {
+    let resolveStream!: (stream: MediaStream) => void;
+    const track = { stop: vi.fn() };
+    tracks.push(track);
+    getUserMedia.mockImplementation(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveStream = resolve;
+        }),
+    );
+    const onRecorded = vi.fn();
+    const onError = vi.fn();
+    const view = render(
+      <AudioRecorder onRecorded={onRecorded} onError={onError} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+
+    view.rerender(
+      <AudioRecorder disabled onRecorded={onRecorded} onError={onError} />,
+    );
+    await act(async () => {
+      resolveStream({ getTracks: () => [track] } as unknown as MediaStream);
+    });
+
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(MockMediaRecorder.instances).toHaveLength(0);
+    expect(onRecorded).not.toHaveBeenCalled();
+    expect(smo.recordings.save).not.toHaveBeenCalled();
   });
 });
 

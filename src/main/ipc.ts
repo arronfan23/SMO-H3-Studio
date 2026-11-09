@@ -6,6 +6,7 @@ import type { JobCoordinator } from './jobs';
 import type { LlmService } from './llm';
 import type { LlmConfigStore } from './llm-config';
 import type { SkillsService } from './skills';
+import type { RecordingService } from './recordings';
 import type { Store } from './store';
 import {
   createIpcSchema,
@@ -56,6 +57,7 @@ export interface IpcServices {
     | 'mediaUrl'
     | 'openFolder'
   >;
+  recordings: Pick<RecordingService, 'save' | 'discard'>;
   comfy: Pick<ComfyClient, 'health'>;
   startComfy: () => Promise<ComfySystemStats>;
   openComfy: () => Promise<void>;
@@ -115,6 +117,11 @@ async function dispatch(
       return services.files.mediaUrl(request.payload.path);
     case 'files:openFolder':
       await services.files.openFolder(request.payload.path);
+      return undefined;
+    case 'recordings:save':
+      return services.recordings.save(request.payload);
+    case 'recordings:discard':
+      await services.recordings.discard(request.payload.path);
       return undefined;
     case 'llm:saveProfile':
       await services.llmConfig.saveProfile(request.payload);

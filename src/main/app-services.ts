@@ -23,6 +23,8 @@ import {
 import { EnvironmentStore, resolveEnvironmentPaths } from './environment-store';
 import { FileService, type FileDialog } from './files';
 import { createGenerationHandler, createRetryHandler } from './generation';
+import type { AudioConverter } from './audio-converter';
+import { RecordingService } from './recordings';
 import { detectHardware, recommendHardware } from './hardware';
 import { HardwareWorkflowStore } from "./hardware-workflows";
 import { defaultWorkflowsDirectory } from './paths';
@@ -54,6 +56,7 @@ export interface AppServices extends IpcServices {
   skills: SkillsService;
   comfy: ComfyClient;
   jobCoordinator: JobCoordinator;
+  recordings: RecordingService;
   close(): Promise<void>;
 }
 
@@ -65,6 +68,7 @@ export interface AppServicesOptions {
   errorReporter?: JobEventErrorHandler;
   fileDialog?: FileDialog;
   mediaProtocol?: MediaProtocolRegistrar;
+  recordingConverter?: AudioConverter;
 }
 
 export function resolveStringOption(
@@ -489,6 +493,7 @@ export async function createAppServices(
   // Resolved once here so every consumer (setup, media, files, works,
   // generation) shares the same fixed output directory.
   const outputDirectory = environmentPaths.outputDirectory;
+  const recordingsDirectory = join(dataDirectory, 'recordings');
 
   const environmentManifest = parseEnvironmentManifest(
     JSON.parse(await readFile(environmentManifestPath(), 'utf8')),
@@ -503,6 +508,7 @@ export async function createAppServices(
   let activeComfyProcess: ComfyProcessManager | undefined;
   let jobCoordinator: JobCoordinator | undefined;
   let environmentSetup: EnvironmentSetupService | undefined;
+  let recordings: RecordingService | undefined;
   const activeEnvironmentPaths: EnvironmentPaths = { ...environmentPaths };
 
   try {
@@ -511,6 +517,7 @@ export async function createAppServices(
     const mediaRegistry = new MediaRegistry({
       avatarsDirectory: join(dataDirectory, 'avatars'),
       outputDirectory,
+      recordingsDirectory,
     });
     registerMediaProtocol(mediaRegistry, options.mediaProtocol ?? protocol);
 
@@ -574,6 +581,33 @@ export async function createAppServices(
         ),
       })(filePath);
     };
+    recordings = new RecordingService({
+      recordingsDirectory,
+      mediaRegistry,
+      ffmpegPath: () => {
+        if (process.env.SMO_FFMPEG_PATH) {
+          return process.env.SMO_FFMPEG_PATH;
+        }
+        if (process.env.SMO_FFPROBE_PATH) {
+          const ffmpegPath = process.env.SMO_FFPROBE_PATH.replace(
+            /ffprobe\.exe$/i,
+            'ffmpeg.exe',
+          );
+          if (ffmpegPath !== process.env.SMO_FFPROBE_PATH) {
+            return ffmpegPath;
+          }
+        }
+        return join(
+          activeEnvironmentPaths.runtimeRoot,
+          'tools',
+          'ffmpeg',
+          'ffmpeg.exe',
+        );
+      },
+      ...(options.recordingConverter === undefined
+        ? {}
+        : { converter: options.recordingConverter }),
+    });
     jobCoordinator = new JobCoordinator({
       onEvent: (event) => {
         store!.updateWork(event.id, {
@@ -623,6 +657,7 @@ export async function createAppServices(
       llmConfig,
       avatars,
       files,
+      recordings,
       store,
       comfy,
       openComfy,
@@ -656,6 +691,7 @@ export async function createAppServices(
           return;
         }
         closed = true;
+        await recordings!.close();
         await setup.cancel();
         await jobCoordinator!.close();
         await activeComfyProcess!.close();
@@ -666,6 +702,7 @@ export async function createAppServices(
       },
     };
   } catch (error) {
+    await recordings?.close();
     await environmentSetup?.cancel().catch(() => undefined);
     await jobCoordinator?.close();
     await activeComfyProcess?.close();

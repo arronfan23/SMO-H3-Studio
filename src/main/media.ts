@@ -22,6 +22,7 @@ const MEDIA_EXTENSIONS = new Set([
 export interface MediaRegistryOptions {
   avatarsDirectory: string;
   outputDirectory: string;
+  recordingsDirectory?: string;
 }
 
 export type MediaProtocolRegistrar = Pick<Protocol, 'registerFileProtocol'>;
@@ -49,7 +50,10 @@ export class MediaRegistry {
     this.roots = [
       options.avatarsDirectory,
       options.outputDirectory,
-    ].map((path) => resolve(path));
+      options.recordingsDirectory,
+    ]
+      .filter((path): path is string => path !== undefined)
+      .map((path) => resolve(path));
   }
 
   async authorizeSelectedFile(filePath: string): Promise<void> {
@@ -75,6 +79,16 @@ export class MediaRegistry {
       return this.selectedFiles.has(await this.realMediaFile(filePath));
     } catch {
       return false;
+    }
+  }
+
+  revokeFile(filePath: string): void {
+    this.selectedFiles.delete(filePath);
+    this.selectedImages.delete(filePath);
+    const token = this.tokensByPath.get(filePath);
+    if (token !== undefined) {
+      this.tokensByPath.delete(filePath);
+      this.pathsByToken.delete(token);
     }
   }
 

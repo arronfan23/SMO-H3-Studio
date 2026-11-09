@@ -197,6 +197,10 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
       mediaRegistry,
     }),
     files: new FileService({ mediaRegistry, dialog: { showOpenDialog }, outputDirectory: join(directory, 'output'), dataDirectory: directory }),
+    recordings: {
+      save: async () => join(directory, 'recordings', 'recorded.wav'),
+      discard: async () => undefined,
+    },
     comfy: {
       health: async () => ({ system: {}, devices: [] }),
     },
@@ -1732,6 +1736,7 @@ describe('preload API', () => {
       'hardware',
       'jobs',
       'llm',
+      'recordings',
       'window',
       'works',
     ]);
@@ -1765,6 +1770,7 @@ describe('preload API', () => {
       'selectAudio',
       'selectImage',
     ]);
+    expect(Object.keys(api.recordings).sort()).toEqual(['discard', 'save']);
     expect(Object.keys(api.window).sort()).toEqual([
       'beginResize',
       'close',
