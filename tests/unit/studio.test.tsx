@@ -12,7 +12,7 @@ import {
 import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 import type { PolishResult, SmoApi } from '../../src/shared/ipc';
 import type { EnvironmentState } from '../../src/shared/environment';
-import type { Avatar, Work } from '../../src/shared/types';
+import type { Avatar, SpeechCapabilities, Work } from '../../src/shared/types';
 
 const avatar: Avatar = {
   id: 'avatar-1',
@@ -38,11 +38,23 @@ function createWork(overrides: Partial<Work>): Work {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function createSmoMock() {
   return {
     app: { getVersion: vi.fn() },
     avatars: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
     jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn(), getState: vi.fn() },
+    speech: { getCapabilities: vi.fn() },
+    components: { getState: vi.fn(), install: vi.fn(), cancel: vi.fn() },
     recordings: { save: vi.fn(), discard: vi.fn() },
     files: {
       selectImage: vi.fn(),
@@ -80,6 +92,13 @@ async function renderStudio() {
   await screen.findByRole('heading', { name: avatar.name });
 }
 
+function studioSpeechField(label: string, mode: 'custom' | 'clone' = 'custom') {
+  const panel = screen.getByRole('tabpanel', {
+    name: mode === 'custom' ? '固定音色' : '声音克隆',
+  });
+  return within(panel).getByLabelText(label);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   window.smo = smo as unknown as SmoApi;
@@ -107,6 +126,29 @@ beforeEach(() => {
   smo.jobs.retry.mockRejectedValue(new Error('Unexpected retry'));
   smo.jobs.cancel.mockResolvedValue(undefined);
   smo.jobs.getState.mockResolvedValue({ activeId: null });
+  smo.speech.getCapabilities.mockImplementation(async (mode: 'custom' | 'clone') => ({
+    speakers: mode === 'custom' ? ['Vivian', 'Ryan'] : [],
+    languages: ['Auto', 'Chinese', 'English'],
+  }));
+  smo.components.getState.mockResolvedValue({
+    id: 'speech',
+    status: 'ready',
+    downloadedBytes: 1024,
+    totalBytes: 1024,
+    currentFile: null,
+    error: null,
+    active: false,
+  });
+  smo.components.install.mockResolvedValue({
+    id: 'speech',
+    status: 'ready',
+    downloadedBytes: 1024,
+    totalBytes: 1024,
+    currentFile: null,
+    error: null,
+    active: false,
+  });
+  smo.components.cancel.mockResolvedValue(undefined);
   smo.llm.getProfile.mockResolvedValue(null);
   smo.llm.saveProfile.mockResolvedValue(undefined);
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
@@ -777,8 +819,19 @@ describe('SMO.H3 Studio navigation and avatars', () => {
 });
 
 describe('text-to-video studio', () => {
-  test('视频子模式具有清晰的面板与 tab ARIA 关系，且不提前加入语音或图像主 tab', async () => {
+  test('语音主 tab 已加入，视频子模式保持清晰的面板与 tab ARIA 关系', async () => {
     await renderStudio();
+
+    const mainTabs = screen.getByRole('tablist', { name: '主制作模式' });
+    expect(within(mainTabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      '语音',
+      '视频',
+    ]);
+    expect(screen.queryByRole('tab', { name: '图像' })).not.toBeInTheDocument();
+    expect(within(mainTabs).getByRole('tab', { name: '视频' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
 
     const preview = screen.getByRole('region', { name: '当前人物预览' });
     const controls = screen.getByRole('region', { name: '制作控制区' });
@@ -787,8 +840,6 @@ describe('text-to-video studio', () => {
       '文字生视频',
       '音频数字人',
     ]);
-    expect(screen.queryByRole('tab', { name: /语音|图像/ })).not.toBeInTheDocument();
-
     const textTab = within(modeTabs).getByRole('tab', { name: '文字生视频' });
     const audioTab = within(modeTabs).getByRole('tab', { name: '音频数字人' });
     const textPanel = document.getElementById('text-mode-panel');
@@ -809,6 +860,109 @@ describe('text-to-video studio', () => {
     expect(audioPanel).toBeVisible();
     expect(textTab).toHaveAttribute('aria-selected', 'false');
     expect(audioTab).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('语音与视频主 tab 支持 roving tabindex 和键盘循环导航', async () => {
+    await renderStudio();
+
+    const mainTabs = screen.getByRole('tablist', { name: '主制作模式' });
+    const speechTab = within(mainTabs).getByRole('tab', { name: '语音' });
+    const videoTab = within(mainTabs).getByRole('tab', { name: '视频' });
+
+    videoTab.focus();
+    fireEvent.keyDown(videoTab, { key: 'ArrowRight' });
+    expect(speechTab).toHaveFocus();
+    expect(speechTab).toHaveAttribute('aria-selected', 'true');
+    expect(speechTab).toHaveAttribute('tabindex', '0');
+    expect(videoTab).toHaveAttribute('tabindex', '-1');
+
+    fireEvent.keyDown(speechTab, { key: 'ArrowLeft' });
+    expect(videoTab).toHaveFocus();
+    expect(videoTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(videoTab, { key: 'Home' });
+    expect(speechTab).toHaveFocus();
+    expect(speechTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(speechTab, { key: 'End' });
+    expect(videoTab).toHaveFocus();
+    expect(videoTab).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('语音与视频草稿在切换主模式和应用页面后保留', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\speech-clone.wav');
+    await renderStudio();
+
+    fireEvent.change(screen.getByLabelText('原始文字'), {
+      target: { value: '主模式切换后保留的视频草稿' },
+    });
+    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    fireEvent.change(studioSpeechField('口播文字'), {
+      target: { value: '主模式切换后保留的口播草稿' },
+    });
+    fireEvent.change(studioSpeechField('情绪/语气'), {
+      target: { value: '亲切自然' },
+    });
+    fireEvent.change(studioSpeechField('输出格式'), { target: { value: 'mp3' } });
+
+    fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
+    await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledWith('clone'));
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    expect(await screen.findByText('speech-clone.wav')).toBeInTheDocument();
+    fireEvent.change(studioSpeechField('参考原文（可选）', 'clone'), {
+      target: { value: '保留的参考原文' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    expect(screen.getByLabelText('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
+    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    expect(studioSpeechField('口播文字', 'clone')).toHaveValue('主模式切换后保留的口播草稿');
+    expect(studioSpeechField('输出格式', 'clone')).toHaveValue('mp3');
+    expect(studioSpeechField('参考原文（可选）', 'clone')).toHaveValue('保留的参考原文');
+    expect(screen.getByText('speech-clone.wav')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: '固定音色' }));
+    expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      expect(studioSpeechField('口播文字')).toHaveValue('主模式切换后保留的口播草稿');
+      expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
+      expect(studioSpeechField('输出格式')).toHaveValue('mp3');
+    }
+
+    fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    expect(screen.getByLabelText('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
+  });
+
+  test('语音 capabilities 默认视频和切应用页面不调用，返回后只应用新结果', async () => {
+    const first = deferred<SpeechCapabilities>();
+    const second = deferred<SpeechCapabilities>();
+    smo.speech.getCapabilities
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    await renderStudio();
+    await waitFor(() => expect(smo.components.getState).toHaveBeenCalledWith('speech'));
+
+    expect(smo.speech.getCapabilities).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
+    await act(async () => {
+      first.resolve({ speakers: ['StaleHiddenVoice'], languages: ['StaleHiddenLanguage'] });
+      await first.promise;
+    });
+    expect(document.getElementById('custom-speech-speaker')).toHaveValue('');
+
+    fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+    await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      second.resolve({ speakers: ['ReturnVoice'], languages: ['Chinese'] });
+      await second.promise;
+    });
+    expect(studioSpeechField('音色')).toHaveValue('ReturnVoice');
+    expect(studioSpeechField('语言')).toHaveValue('Chinese');
+    expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled();
   });
 
   test('视频子 tab 支持 roving tabindex 和键盘循环导航', async () => {
