@@ -1,4 +1,3 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import defaultManifest from '../../resources/environment/media-components.json';
@@ -10,9 +9,12 @@ import type {
   MediaComponentState,
 } from '../shared/media-components';
 import {
+  clearTemporaryDownload,
+  downloadArtifactPaths,
   downloadFile as defaultDownloadFile,
   type DownloadReceipt,
   modelDownloadUrls,
+  prepareDownloadSource,
   runtimeDownloadUrls,
 } from './download';
 import type { ImageRuntimeInspection } from './environment-setup';
@@ -72,36 +74,8 @@ function pathsCollide(first: string, second: string): boolean {
     .every((segment, index) => segment === secondSegments[index]);
 }
 
-function temporaryDownloadPaths(destination: string): string[] {
-  return [
-    `${destination}.part`,
-    `${destination}.part.chunks.json`,
-    `${destination}.part.chunks.json.tmp`,
-    `${destination}.part.source`,
-  ];
-}
-
 function occupiedPaths(path: string): string[] {
-  return [path, ...temporaryDownloadPaths(path)];
-}
-
-async function clearTemporaryDownload(destination: string): Promise<void> {
-  await Promise.all(
-    temporaryDownloadPaths(destination).map((path) => rm(path, { force: true })),
-  );
-}
-
-async function prepareDownloadSource(destination: string, url: string): Promise<void> {
-  const sourcePath = `${destination}.part.source`;
-  let previousSource: string | undefined;
-  try {
-    previousSource = await readFile(sourcePath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  if (previousSource !== url) await clearTemporaryDownload(destination);
-  await mkdir(dirname(destination), { recursive: true });
-  await writeFile(sourcePath, url, 'utf8');
+  return [path, ...downloadArtifactPaths(path)];
 }
 
 function isDownloadHashMismatch(error: unknown): boolean {

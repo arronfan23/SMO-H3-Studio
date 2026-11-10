@@ -1192,7 +1192,28 @@ describe('download input validation', () => {
 });
 
 describe('downloadParts', () => {
+  const metadataTemporarySuffixes = [
+    '.part.chunks.json',
+    '.part.chunks.json.tmp',
+    '.part.source',
+  ] as const;
+
   test.each([
+    ...metadataTemporarySuffixes.map((suffix) => ({
+      label: `a part final path collides with the merged archive ${suffix}`,
+      paths: [`archive.bin${suffix}`],
+      destinationName: 'archive.bin',
+    })),
+    ...metadataTemporarySuffixes.map((suffix) => ({
+      label: `a part final path collides with an earlier part ${suffix}`,
+      paths: [`a${suffix}`, 'a'],
+      destinationName: 'archive.bin',
+    })),
+    ...metadataTemporarySuffixes.map((suffix) => ({
+      label: `a part final path collides with a later part ${suffix}`,
+      paths: ['a', `a${suffix}`],
+      destinationName: 'archive.bin',
+    })),
     {
       label: 'a part final path collides with an earlier part temporary path',
       paths: ['a.part', 'a'],

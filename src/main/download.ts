@@ -69,6 +69,34 @@ export function runtimeDownloadUrls(url: string): string[] {
   return [url, `https://ghproxy.net/${url}`];
 }
 
+export function downloadArtifactPaths(destination: string): string[] {
+  return [
+    `${destination}.part`,
+    `${destination}.part.chunks.json`,
+    `${destination}.part.chunks.json.tmp`,
+    `${destination}.part.source`,
+  ];
+}
+
+export async function clearTemporaryDownload(destination: string): Promise<void> {
+  await Promise.all(
+    downloadArtifactPaths(destination).map((path) => rm(path, { force: true })),
+  );
+}
+
+export async function prepareDownloadSource(destination: string, url: string): Promise<void> {
+  const sourcePath = `${destination}.part.source`;
+  let previousSource: string | undefined;
+  try {
+    previousSource = await readFile(sourcePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (previousSource !== url) await clearTemporaryDownload(destination);
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(sourcePath, url, 'utf8');
+}
+
 function electronResponseHeaders(
   input: Record<string, string | string[]>,
 ): Headers {
@@ -1083,11 +1111,13 @@ export async function downloadFile(
   }
 }
 
-export async function downloadParts(
-  options: DownloadPartsOptions,
-): Promise<DownloadReceipt> {
-  const expectedSize = validateExpectedSize(options.expectedSize);
-  const expectedSha256 = validateExpectedSha256(options.expectedSha256);
+export function validateDownloadPartPaths(
+  options: Pick<DownloadPartsOptions, 'parts' | 'directory' | 'destination'>,
+): {
+  directory: string;
+  destination: string;
+  parts: Array<EnvironmentArchivePart & { resolvedPartPath: string }>;
+} {
   validateAbsolutePath(options.directory, 'Parts directory');
   const destination = resolve(validateDestinationPath(options.destination));
   const directory = resolve(options.directory);
@@ -1098,8 +1128,7 @@ export async function downloadParts(
     throw new Error('At least one archive part is required');
   }
 
-  let declaredSize = 0;
-  const occupiedPaths = [destination, `${destination}.part`];
+  const occupiedPaths = [destination, ...downloadArtifactPaths(destination)];
   const parts = options.parts.map((part) => {
     validateHttpsUrl(part.url);
     validateExpectedSize(part.size);
@@ -1109,15 +1138,11 @@ export async function downloadParts(
     if (!isContainedPath(directory, resolvedPartPath)) {
       throw new Error('Part path escapes the parts directory');
     }
-    for (const path of [resolvedPartPath, `${resolvedPartPath}.part`]) {
+    for (const path of [resolvedPartPath, ...downloadArtifactPaths(resolvedPartPath)]) {
       if (occupiedPaths.some((occupiedPath) => pathsCollide(occupiedPath, path))) {
         throw new Error('Part or destination path collision detected');
       }
       occupiedPaths.push(path);
-    }
-    declaredSize += part.size;
-    if (!Number.isSafeInteger(declaredSize)) {
-      throw new Error('Combined part size must be a safe integer');
     }
     return {
       ...part,
@@ -1126,6 +1151,22 @@ export async function downloadParts(
       resolvedPartPath,
     };
   });
+  return { directory, destination, parts };
+}
+
+export async function downloadParts(
+  options: DownloadPartsOptions,
+): Promise<DownloadReceipt> {
+  const expectedSize = validateExpectedSize(options.expectedSize);
+  const expectedSha256 = validateExpectedSha256(options.expectedSha256);
+  const { directory, destination, parts } = validateDownloadPartPaths(options);
+  let declaredSize = 0;
+  for (const part of parts) {
+    declaredSize += part.size;
+    if (!Number.isSafeInteger(declaredSize)) {
+      throw new Error('Combined part size must be a safe integer');
+    }
+  }
   if (declaredSize !== expectedSize) {
     throw new Error('Combined part size does not match the expected archive size');
   }

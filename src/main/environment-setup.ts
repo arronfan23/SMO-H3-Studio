@@ -6,10 +6,13 @@ import { win32 } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parse as parseYaml } from 'yaml';
 import {
+  clearTemporaryDownload,
   downloadFile as defaultDownloadFile,
   downloadParts as defaultDownloadParts,
   modelDownloadUrls,
+  prepareDownloadSource,
   runtimeDownloadUrls,
+  validateDownloadPartPaths,
 } from './download';
 import {
   selectEnvironmentProfile,
@@ -217,6 +220,14 @@ interface InstallationLayout {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRuntimeDownloadHashMismatch(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message === 'Downloaded SHA256 does not match the expected SHA256' ||
+      error.message === 'Merged archive SHA256 does not match the expected SHA256')
+  );
 }
 
 export const MODEL_DOWNLOAD_ATTEMPTS = 6;
@@ -1548,9 +1559,27 @@ export class EnvironmentSetupService {
       } else {
         await assertNotReparsePoint(layout.workDirectory, 'the installation work directory');
         await assertNotReparsePoint(layout.downloadDirectory, 'the download directory');
+        const downloadDirectory = layout.downloadDirectory;
+        const archivePath = layout.archivePath;
+        const { parts: validatedParts } = validateDownloadPartPaths({
+          parts: selection.runtime.archiveParts,
+          directory: downloadDirectory,
+          destination: archivePath,
+        });
         const sourcesByPart = selection.runtime.archiveParts.map((part) =>
           runtimeDownloadUrls(part.url),
         );
+        const partDestinations = validatedParts.map(
+          (part) => part.resolvedPartPath,
+        );
+        const downloadDestinations = [...partDestinations, archivePath];
+        const clearRuntimeTemporaryDownloads = async () => {
+          await Promise.all(
+            downloadDestinations.map((destination) =>
+              clearTemporaryDownload(destination),
+            ),
+          );
+        };
         const sourceCount = Math.max(...sourcesByPart.map((sources) => sources.length));
         let downloaded = false;
         for (let sourceIndex = 0; sourceIndex < sourceCount; sourceIndex += 1) {
@@ -1558,6 +1587,13 @@ export class EnvironmentSetupService {
             const sources = sourcesByPart[index];
             return { ...part, url: sources[sourceIndex] ?? sources[0] };
           });
+          for (const [index, part] of parts.entries()) {
+            await prepareDownloadSource(partDestinations[index], part.url);
+          }
+          await prepareDownloadSource(
+            archivePath,
+            JSON.stringify(parts.map((part) => part.url)),
+          );
           for (let attempt = 1; attempt <= RUNTIME_DOWNLOAD_ATTEMPTS; attempt += 1) {
             try {
               await (this.options.downloadParts ?? defaultDownloadParts)({
@@ -1575,12 +1611,18 @@ export class EnvironmentSetupService {
                   );
                 },
               });
+              await clearRuntimeTemporaryDownloads();
               downloaded = true;
               break;
             } catch (error) {
               if (signal.aborted) throw error;
-              if (attempt === RUNTIME_DOWNLOAD_ATTEMPTS) {
-                if (sourceIndex === sourceCount - 1) throw error;
+              const finalAttempt = attempt === RUNTIME_DOWNLOAD_ATTEMPTS;
+              const finalSource = sourceIndex === sourceCount - 1;
+              if (finalAttempt && finalSource && isRuntimeDownloadHashMismatch(error)) {
+                await clearRuntimeTemporaryDownloads();
+              }
+              if (finalAttempt) {
+                if (finalSource) throw error;
                 break;
               }
               await (this.options.downloadRetryDelay

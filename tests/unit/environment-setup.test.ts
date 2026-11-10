@@ -29,13 +29,16 @@ import {
   type EnvironmentSetupServiceOptions,
 } from '../../src/main/environment-setup';
 import * as environmentSetupModule from '../../src/main/environment-setup';
+import * as downloadModule from '../../src/main/download';
 import { EnvironmentStore } from '../../src/main/environment-store';
 import type {
+  DownloadFetch,
   DownloadFileOptions,
   DownloadPartsOptions,
   DownloadReceipt,
 } from '../../src/main/download';
 import {
+  downloadParts as realDownloadParts,
   modelDownloadUrls as sharedModelDownloadUrls,
   runtimeDownloadUrls as sharedRuntimeDownloadUrls,
 } from '../../src/main/download';
@@ -85,6 +88,40 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 
 function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function requestUrl(input: Parameters<DownloadFetch>[0]): string {
+  return typeof input === 'string'
+    ? input
+    : input instanceof URL
+      ? input.href
+      : input.url;
+}
+
+function bufferDownloadResponse(data: Buffer, range: string | null): Response {
+  if (!range) {
+    return new Response(data, {
+      status: 200,
+      headers: { 'Content-Length': String(data.length) },
+    });
+  }
+  const match = /^bytes=(\d+)-$/.exec(range);
+  if (!match) return new Response(null, { status: 400 });
+  const start = Number(match[1]);
+  return new Response(data.subarray(start), {
+    status: 206,
+    headers: {
+      'Content-Length': String(data.length - start),
+      'Content-Range': `bytes ${start}-${data.length - 1}/${data.length}`,
+    },
+  });
+}
+
+function incompleteDownloadResponse(data: Buffer): Response {
+  return new Response(data, {
+    status: 200,
+    headers: { 'Content-Length': String(data.length) },
+  });
 }
 
 function crc32(value: Buffer): number {
@@ -1982,6 +2019,256 @@ describe('EnvironmentSetupService failures and recovery', () => {
     });
 
     expect(urls).toEqual(Array(5).fill(officialUrl));
+  });
+
+  test('does not resume official runtime bytes from the GitHub mirror', async () => {
+    const manifest = makeManifest();
+    const archive = Buffer.from('small test archive');
+    const prefix = archive.subarray(0, 6);
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    const mirrorUrl = `https://ghproxy.net/${officialUrl}`;
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    const requests: Array<{ url: string; range: string | null }> = [];
+    let officialRequests = 0;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: (options) =>
+          realDownloadParts({
+            ...options,
+            fetch: async (input, init) => {
+              const url = requestUrl(input);
+              const range = new Headers(init?.headers).get('range');
+              requests.push({ url, range });
+              if (url === officialUrl) {
+                officialRequests += 1;
+                if (officialRequests > 1) {
+                  return new Response('official unavailable', { status: 503 });
+                }
+                return incompleteDownloadResponse(prefix);
+              }
+              if (url === mirrorUrl) return bufferDownloadResponse(archive, range);
+              throw new Error(`Unexpected runtime URL: ${url}`);
+            },
+          }),
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(requests.at(-1)).toEqual({ url: mirrorUrl, range: null });
+    expect(
+      await readFile(
+        join(harness.installRoot, '.smo-install', 'downloads', 'sm120.zip'),
+      ),
+    ).toEqual(archive);
+  });
+
+  test('resumes a same-source runtime partial after a network failure', async () => {
+    const manifest = makeManifest();
+    const archive = Buffer.from('small test archive');
+    const prefix = archive.subarray(0, 6);
+    const url = manifest.runtimes.sm120.archiveParts[0].url;
+    const requests: Array<{ url: string; range: string | null }> = [];
+    let failing = true;
+    let failures = 0;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: (options) =>
+          realDownloadParts({
+            ...options,
+            fetch: async (input, init) => {
+              const range = new Headers(init?.headers).get('range');
+              requests.push({ url: requestUrl(input), range });
+              if (!failing) return bufferDownloadResponse(archive, range);
+              failures += 1;
+              if (failures === 1) {
+                return incompleteDownloadResponse(prefix);
+              }
+              return new Response('still unavailable', { status: 503 });
+            },
+          }),
+      },
+    });
+    const input = {
+      profileId: 'high-memory-candidate' as const,
+      installRoot: harness.installRoot,
+    };
+    const partPath = join(
+      harness.installRoot,
+      '.smo-install',
+      'downloads',
+      manifest.runtimes.sm120.archiveParts[0].path,
+    );
+
+    await expect(harness.service.start(input)).rejects.toThrow(/503/);
+    expect(await readFile(`${partPath}.part`)).toEqual(prefix);
+    await expect(readFile(`${partPath}.part.source`, 'utf8')).resolves.toBe(url);
+
+    requests.length = 0;
+    failing = false;
+    await harness.service.start(input);
+
+    expect(requests).toEqual([{ url, range: `bytes=${prefix.length}-` }]);
+  });
+
+  test('binds a merged runtime archive to every selected part URL', async () => {
+    const manifest = makeManifest();
+    const first = Buffer.from('first runtime part');
+    const second = Buffer.from('second runtime part');
+    const archive = Buffer.concat([first, second]);
+    const officialUrls = [
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1',
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part2',
+    ];
+    const mirrorUrls = officialUrls.map((url) => `https://ghproxy.net/${url}`);
+    manifest.runtimes.sm120.archiveParts = [first, second].map((data, index) => ({
+      url: officialUrls[index],
+      path: `sm120.zip.part${index + 1}`,
+      size: data.length,
+      sha256: sha256(data),
+    }));
+    manifest.runtimes.sm120.archiveSize = archive.length;
+    manifest.runtimes.sm120.archiveSha256 = sha256(archive);
+    const requests: string[] = [];
+    let observedMergedSource: string | undefined;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadParts: async (options) => {
+          observedMergedSource = await readFile(
+            `${options.destination}.part.source`,
+            'utf8',
+          );
+          return realDownloadParts({
+            ...options,
+            fetch: async (input, init) => {
+              const url = requestUrl(input);
+              requests.push(url);
+              const data = officialUrls.indexOf(url) === 0 ? first : second;
+              return bufferDownloadResponse(
+                data,
+                new Headers(init?.headers).get('range'),
+              );
+            },
+          });
+        },
+      },
+    });
+    const archivePath = join(
+      harness.installRoot,
+      '.smo-install',
+      'downloads',
+      'sm120.zip',
+    );
+    await mkdir(dirname(archivePath), { recursive: true });
+    await writeFile(`${archivePath}.part`, archive);
+    await writeFile(`${archivePath}.part.source`, JSON.stringify(mirrorUrls));
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(observedMergedSource).toBeDefined();
+    expect(JSON.parse(observedMergedSource!)).toEqual(officialUrls);
+    expect(requests).toEqual(officialUrls);
+  });
+
+  test('clears runtime temporary files after the final SHA256 mismatch', async () => {
+    const manifest = makeManifest();
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    let temporaryPaths: string[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: async (options) => {
+          const destinations = [
+            ...options.parts.map((part) =>
+              join(options.directory, ...part.path.split('/')),
+            ),
+            options.destination,
+          ];
+          temporaryPaths = destinations.flatMap((destination) => [
+            `${destination}.part`,
+            `${destination}.part.chunks.json`,
+            `${destination}.part.chunks.json.tmp`,
+            `${destination}.part.source`,
+          ]);
+          for (const path of temporaryPaths) {
+            await mkdir(dirname(path), { recursive: true });
+            await writeFile(path, 'corrupt temporary data');
+          }
+          throw new Error('Merged archive SHA256 does not match the expected SHA256');
+        },
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/SHA256/);
+
+    for (const path of temporaryPaths) {
+      expect(existsSync(path), path).toBe(false);
+    }
+  });
+
+  test('rejects colliding runtime paths before touching existing files', async () => {
+    const manifest = makeManifest();
+    manifest.runtimes.sm120.archiveParts[0].path = 'sm120.zip.part.source';
+    const prepareSource = vi.spyOn(downloadModule, 'prepareDownloadSource');
+    const clearTemporary = vi.spyOn(downloadModule, 'clearTemporaryDownload');
+    try {
+      const harness = await createHarness({
+        manifest,
+        service: { downloadParts: realDownloadParts },
+      });
+      const downloadDirectory = join(
+        harness.installRoot,
+        '.smo-install',
+        'downloads',
+      );
+      const archivePath = join(downloadDirectory, 'sm120.zip');
+      const existingFiles = new Map([
+        [archivePath, 'existing archive'],
+        [join(downloadDirectory, 'sm120.zip.part.source'), 'existing formal part'],
+        [`${archivePath}.part`, 'existing merged partial'],
+        [`${archivePath}.part.chunks.json`, 'existing merged ledger'],
+      ]);
+      for (const [path, content] of existingFiles) {
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, content);
+      }
+
+      await expect(
+        harness.service.start({
+          profileId: 'high-memory-candidate',
+          installRoot: harness.installRoot,
+        }),
+      ).rejects.toThrow(/collision|collide/i);
+
+      for (const [path, content] of existingFiles) {
+        expect(await readFile(path, 'utf8')).toBe(content);
+      }
+      expect(prepareSource).not.toHaveBeenCalled();
+      expect(clearTemporary).not.toHaveBeenCalled();
+    } finally {
+      prepareSource.mockRestore();
+      clearTemporary.mockRestore();
+    }
   });
 
   test('downloads Hugging Face models through the accessible mirror first', async () => {
