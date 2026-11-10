@@ -18,6 +18,7 @@ export interface SpeechExecFileOptions {
   env: NodeJS.ProcessEnv;
   shell: false;
   windowsHide: true;
+  signal?: AbortSignal;
 }
 
 export type SpeechExecFile = (
@@ -39,21 +40,34 @@ export interface PreparedSpeechRuntime {
   environment: Record<string, string>;
 }
 
-function defaultExecFile(
+export function defaultSpeechExecFile(
   command: string,
   args: readonly string[],
   options: SpeechExecFileOptions,
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(
+    let outcome:
+      | { error: Error | null; stdout: string; stderr: string }
+      | undefined;
+    let processClosed = false;
+    const settle = () => {
+      if (outcome === undefined || !processClosed) return;
+      if (outcome.error) reject(outcome.error);
+      else resolve({ stdout: outcome.stdout, stderr: outcome.stderr });
+    };
+    const child = execFile(
       command,
       [...args],
       { ...options, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
       (error, stdout, stderr) => {
-        if (error) reject(error);
-        else resolve({ stdout, stderr });
+        outcome = { error, stdout, stderr };
+        settle();
       },
     );
+    child.once('close', () => {
+      processClosed = true;
+      settle();
+    });
   });
 }
 
@@ -69,17 +83,57 @@ async function fileExists(path: string): Promise<boolean> {
 export class SpeechRuntime {
   private readonly execFile: SpeechExecFile;
   private preparePromise: Promise<PreparedSpeechRuntime> | null = null;
+  private prepareController: AbortController | null = null;
+  private closePromise: Promise<void> | null = null;
+  private closed = false;
 
   constructor(private readonly options: SpeechRuntimeOptions) {
-    this.execFile = options.execFile ?? defaultExecFile;
+    this.execFile = options.execFile ?? defaultSpeechExecFile;
   }
 
-  prepare(): Promise<PreparedSpeechRuntime> {
-    this.preparePromise ??= this.runPrepare().catch((error: unknown) => {
-      this.preparePromise = null;
-      throw error;
-    });
-    return this.preparePromise;
+  prepare(signal?: AbortSignal): Promise<PreparedSpeechRuntime> {
+    if (this.closed) {
+      return Promise.reject(new Error('SpeechRuntime is closed'));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason);
+    }
+    if (this.preparePromise === null) {
+      const controller = new AbortController();
+      const pending = this.runPrepare(controller.signal).catch((error: unknown) => {
+        if (this.preparePromise === pending) {
+          this.preparePromise = null;
+          this.prepareController = null;
+        }
+        throw error;
+      });
+      this.preparePromise = pending;
+      this.prepareController = controller;
+    }
+
+    const pending = this.preparePromise;
+    const controller = this.prepareController!;
+    if (signal) {
+      const abort = () => controller.abort(signal.reason);
+      const removeAbortListener = () => signal.removeEventListener('abort', abort);
+      signal.addEventListener('abort', abort, { once: true });
+      void pending.then(removeAbortListener, removeAbortListener);
+      if (signal.aborted) abort();
+    }
+    return pending;
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise !== null) return this.closePromise;
+    this.closed = true;
+    this.prepareController?.abort(
+      new Error('Speech runtime preparation cancelled'),
+    );
+    this.closePromise = (this.preparePromise ?? Promise.resolve()).then(
+      () => undefined,
+      () => undefined,
+    );
+    return this.closePromise;
   }
 
   private async hasExpectedUvVersion(
@@ -91,6 +145,7 @@ export class SpeechRuntime {
       const match = /^uv\s+(\S+)/.exec(stdout.trim());
       return match?.[1] === UV_VERSION;
     } catch {
+      commandOptions.signal?.throwIfAborted();
       return false;
     }
   }
@@ -109,6 +164,7 @@ export class SpeechRuntime {
         env: commandOptions.env,
         shell: false,
         windowsHide: true,
+        signal: commandOptions.signal,
       });
       const temporaryUvPath = join(temporaryDirectory, 'uv.exe');
       if (!(await fileExists(temporaryUvPath))) {
@@ -124,7 +180,8 @@ export class SpeechRuntime {
     }
   }
 
-  private async runPrepare(): Promise<PreparedSpeechRuntime> {
+  private async runPrepare(signal: AbortSignal): Promise<PreparedSpeechRuntime> {
+    signal.throwIfAborted();
     if (process.platform !== 'win32' || process.arch !== 'x64') {
       throw new Error('The isolated speech runtime requires Windows x64');
     }
@@ -168,7 +225,9 @@ export class SpeechRuntime {
       env: environment,
       shell: false,
       windowsHide: true,
+      signal,
     };
+    signal.throwIfAborted();
     if (
       !(await fileExists(uvPath)) ||
       !(await this.hasExpectedUvVersion(uvPath, commandOptions))
@@ -176,17 +235,21 @@ export class SpeechRuntime {
       await this.reinstallUv(archivePath, toolsRoot, toolDirectory, commandOptions);
     }
 
+    signal.throwIfAborted();
     await this.execFile(uvPath, ['python', 'install', '3.12'], commandOptions);
+    signal.throwIfAborted();
     await this.execFile(
       uvPath,
       ['venv', '--python', '3.12', venvDirectory],
       commandOptions,
     );
+    signal.throwIfAborted();
     await this.execFile(
       uvPath,
       ['sync', '--locked', '--project', this.options.projectDirectory],
       commandOptions,
     );
+    signal.throwIfAborted();
 
     return {
       pythonPath: join(venvDirectory, 'Scripts', 'python.exe'),

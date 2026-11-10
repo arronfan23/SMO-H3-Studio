@@ -581,6 +581,40 @@ describe('speech single-job coordination', () => {
     await waitForWork(harness.store, next.id, 'done');
   });
 
+  test('speech cancellation passes the job signal into runtime preparation', async () => {
+    let firstPreparation = true;
+    let observedSignal: AbortSignal | undefined;
+    const preparationStarted = deferred<void>();
+    const ensureReady = vi.fn((signal: AbortSignal) => {
+      observedSignal = signal;
+      if (!firstPreparation) return Promise.resolve();
+      firstPreparation = false;
+      return new Promise<void>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
+        preparationStarted.resolve();
+      });
+    });
+    const harness = await createHarness({ ensureReady });
+
+    const cancelled = await harness.startSpeech(harness.customRequest);
+    await preparationStarted.promise;
+    await harness.jobCoordinator.cancelActive();
+
+    const work = await waitForWork(harness.store, cancelled.id, 'failed');
+    expect(work.error).toMatch(/cancel/i);
+    expect(observedSignal?.aborted).toBe(true);
+
+    const next = await harness.startSpeech(harness.customRequest);
+    await waitForWork(harness.store, next.id, 'done');
+    expect(ensureReady).toHaveBeenCalledTimes(2);
+  });
+
   test('speech and video reject each other while active without adding works', async () => {
     const harness = await createHarness();
     const photoPath = join(harness.directory, 'avatar.png');
@@ -840,7 +874,7 @@ describe('speech AppServices assembly', () => {
       join(dataDirectory, 'output', 'SMO-Speech', `${result.id}.mp3`),
     );
     expect(videoHandler).not.toHaveBeenCalled();
-    expect(prepare).toHaveBeenCalled();
+    expect(prepare).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(generate).toHaveBeenCalledWith({
       voiceMode: 'custom',
       text: request.prompt,
@@ -875,6 +909,9 @@ describe('speech AppServices assembly', () => {
     vi.spyOn(services.jobCoordinator, 'close').mockImplementation(async () => {
       order.push('jobs');
     });
+    vi.spyOn(SpeechRuntime.prototype, 'close').mockImplementation(async () => {
+      order.push('speech-runtime');
+    });
     vi.spyOn(SpeechProcessManager.prototype, 'close').mockImplementation(async () => {
       order.push('speech-process');
     });
@@ -889,6 +926,7 @@ describe('speech AppServices assembly', () => {
 
     expect(order).toEqual([
       'jobs',
+      'speech-runtime',
       'speech-process',
       'cancel-speech',
       'cancel-image',

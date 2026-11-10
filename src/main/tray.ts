@@ -30,6 +30,7 @@ export interface TrayController {
   open(): Promise<void>;
   quit(): void;
   handleBeforeQuit(): void;
+  handleQuitFailure(): void;
   handleWindowAllClosed(): void;
 }
 
@@ -107,6 +108,10 @@ export function createTrayController({
     open,
     quit,
     handleBeforeQuit,
+    handleQuitFailure: () => {
+      isQuitting = false;
+      quitRequested = false;
+    },
     handleWindowAllClosed: () => {
       // Registering a listener prevents Electron's default app.quit().
     },

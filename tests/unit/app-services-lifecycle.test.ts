@@ -11,6 +11,8 @@ import { ComfyProcessManager } from '../../src/main/comfy-process';
 import { createAppServices } from '../../src/main/app-services';
 import { MediaComponentService } from '../../src/main/media-components';
 import { SpeechProcessManager } from '../../src/main/speech-process';
+import { SpeechRuntime } from '../../src/main/speech-runtime';
+import { Store } from '../../src/main/store';
 
 const { protocolRegisterFileProtocol } = vi.hoisted(() => ({
   protocolRegisterFileProtocol: vi.fn(() => true),
@@ -126,7 +128,7 @@ describe('AppServices lifecycle', () => {
     expect(storeClose).toHaveBeenCalledTimes(1);
   });
 
-  test('close awaits all component releases and does not stop on one failure', async () => {
+  test('close aggregates a release failure, finishes cleanup, and permits retry', async () => {
     const dataDirectory = await useDataDirectory();
     const services = await createAppServices({ dataDirectory });
 
@@ -136,10 +138,18 @@ describe('AppServices lifecycle', () => {
     const coordinatorClose = vi.spyOn(services.jobCoordinator, 'close');
     const storeClose = vi.spyOn(services.store, 'close');
 
-    await expect(services.close()).resolves.toBeUndefined();
+    const firstError = await services.close().catch((error: unknown) => error);
 
+    expect(firstError).toBeInstanceOf(AggregateError);
+    expect((firstError as AggregateError).errors).toEqual([
+      new Error('comfy close failed'),
+    ]);
     expect(coordinatorClose).toHaveBeenCalledTimes(1);
     expect(comfyClose).toHaveBeenCalledTimes(1);
+    expect(storeClose).toHaveBeenCalledTimes(1);
+
+    await expect(services.close()).resolves.toBeUndefined();
+    expect(comfyClose).toHaveBeenCalledTimes(2);
     expect(storeClose).toHaveBeenCalledTimes(1);
   });
 
@@ -205,6 +215,85 @@ describe('AppServices lifecycle', () => {
     expect(failedWorkBeforeStoreClose).toBe(true);
   });
 
+  test('close keeps Store open after a real job timeout and persists cancellation on retry', async () => {
+    const dataDirectory = await useDataDirectory();
+    const services = await createAppServices({ dataDirectory });
+    const work = services.store.addWork({
+      id: 'active-work-after-timeout',
+      avatarId: null,
+      mode: 'speech',
+      outputPath: null,
+      status: 'pending',
+    });
+    let rejectRun!: (reason: Error) => void;
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const run = services.jobCoordinator.enqueue({
+      id: work.id,
+      run: async () => {
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            rejectRun = reject;
+          });
+        } finally {
+          await cleanup;
+        }
+      },
+      cancel: async () => {
+        rejectRun(new Error('stop active job'));
+      },
+    });
+    const runOutcome = run.catch((error: unknown) => error);
+    expect(services.jobCoordinator.activeCount).toBe(1);
+
+    let storeClosed = false;
+    const realStoreClose = services.store.close.bind(services.store);
+    const storeClose = vi.spyOn(services.store, 'close').mockImplementation(() => {
+      storeClosed = true;
+      realStoreClose();
+    });
+    vi.useFakeTimers();
+    try {
+      const firstClose = services.close();
+      const firstOutcome = firstClose.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      const firstError = await firstOutcome;
+      expect(firstError).toBeInstanceOf(AggregateError);
+      expect(String(firstError)).toMatch(/timed out|timeout/i);
+      expect(storeClose).not.toHaveBeenCalled();
+      expect(services.store.getWork(work.id)?.status).toBe('running');
+
+      releaseCleanup();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(services.jobCoordinator.activeCount).toBe(0);
+      await expect(services.close()).resolves.toBeUndefined();
+
+      expect(storeClose).toHaveBeenCalledTimes(1);
+      expect(await runOutcome).toMatchObject({
+        message: expect.stringMatching(/cancel/i),
+      });
+      const reopened = new Store(join(dataDirectory, 'studio.sqlite'));
+      try {
+        expect(reopened.getWork(work.id)).toMatchObject({
+          status: 'failed',
+          error: expect.stringMatching(/cancel/i),
+        });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      releaseCleanup();
+      await vi.advanceTimersByTimeAsync(0);
+      await services.close().catch(() => undefined);
+      vi.useRealTimers();
+      if (!storeClosed) services.store.close();
+      vi.restoreAllMocks();
+    }
+  });
+
   test('close is idempotent and only releases components once', async () => {
     const dataDirectory = await useDataDirectory();
     const services = await createAppServices({ dataDirectory });
@@ -250,6 +339,11 @@ describe('AppServices lifecycle', () => {
       .mockImplementation(async () => {
         order.push('speech-process');
       });
+    const runtimeClose = vi
+      .spyOn(SpeechRuntime.prototype, 'close')
+      .mockImplementation(async () => {
+        order.push('speech-runtime');
+      });
     const componentCancel = vi
       .spyOn(MediaComponentService.prototype, 'cancel')
       .mockImplementation((id) => {
@@ -275,9 +369,12 @@ describe('AppServices lifecycle', () => {
       const concurrentClose = services.close();
       const concurrentCloseShared = concurrentClose === firstClose;
       void concurrentClose.catch(() => undefined);
-      await expect(firstClose).rejects.toBe(closeFailure);
-      expect(speechClose).not.toHaveBeenCalled();
-      expect(managerClose).not.toHaveBeenCalled();
+      const firstError = await firstClose.catch((error: unknown) => error);
+      expect(firstError).toBeInstanceOf(AggregateError);
+      expect((firstError as AggregateError).errors).toEqual([closeFailure]);
+      expect(runtimeClose).toHaveBeenCalledTimes(1);
+      expect(speechClose).toHaveBeenCalledTimes(1);
+      expect(managerClose).toHaveBeenCalledTimes(1);
       expect(storeClose).not.toHaveBeenCalled();
 
       await expect(services.close()).resolves.toBeUndefined();
@@ -294,12 +391,13 @@ describe('AppServices lifecycle', () => {
       expect(storeClose).toHaveBeenCalledTimes(1);
       expect(order).toEqual([
         'coordinator-failed',
-        'coordinator',
+        'speech-runtime',
         'speech-process',
         'cancel-speech',
         'cancel-image',
         'comfy-process',
         'comfy-client',
+        'coordinator',
         'store',
       ]);
     } finally {
@@ -367,7 +465,7 @@ describe('AppServices lifecycle', () => {
 
     try {
       await expect(services.close()).rejects.toThrow(/process.*error|kill/i);
-      expect(storeClose).not.toHaveBeenCalled();
+      expect(storeClose).toHaveBeenCalledTimes(1);
 
       await expect(services.close()).resolves.toBeUndefined();
 

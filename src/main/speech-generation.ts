@@ -33,7 +33,7 @@ export interface SpeechGenerationHandlerOptions {
   converter?: AudioConverter;
   durationReader?: AudioDurationReader;
   removeFile?: typeof rm;
-  ensureReady?: () => Promise<unknown>;
+  ensureReady?: (signal: AbortSignal) => Promise<unknown>;
   idGenerator?: () => string;
 }
 
@@ -238,7 +238,7 @@ export function createSpeechGenerationHandler(
       let failure: { error: unknown } | null = null;
       try {
         throwIfCancelled();
-        await options.ensureReady?.();
+        await options.ensureReady?.(controller.signal);
         throwIfCancelled();
         const wav = await speech.generate(
           request.speechMode === 'custom'

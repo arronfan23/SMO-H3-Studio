@@ -250,6 +250,16 @@ describe('tray lifecycle', () => {
     expect(onQuit).toHaveBeenCalledTimes(1);
   });
 
+  test('allows a new quit request after service cleanup fails', () => {
+    const { controller, onQuit } = createHarness();
+
+    controller.quit();
+    controller.handleQuitFailure();
+    controller.quit();
+
+    expect(onQuit).toHaveBeenCalledTimes(2);
+  });
+
   test('does not quit directly when all windows are closed', () => {
     const { controller, onQuit } = createHarness();
 
@@ -273,18 +283,42 @@ describe('tray lifecycle', () => {
 });
 
 describe('main process quit wiring', () => {
-  test('index before-quit closes services once and quits after cleanup', async () => {
+  test('index before-quit prevents repeated exits and permits only the post-cleanup internal quit', async () => {
     vi.resetModules();
     const listeners = new Map<
       string,
       Array<(event: { preventDefault(): void }) => void>
     >();
     const sequence: string[] = [];
+    const beforeQuitEvents: Array<{
+      preventDefault: ReturnType<typeof vi.fn>;
+    }> = [];
+    const emitBeforeQuit = () => {
+      let prevented = false;
+      const event = {
+        preventDefault: vi.fn(() => {
+          prevented = true;
+        }),
+      };
+      beforeQuitEvents.push(event);
+      for (const listener of listeners.get('before-quit') ?? []) {
+        listener(event);
+      }
+      if (!prevented) sequence.push('default-exit');
+      return event;
+    };
     const closing = createDeferred<void>();
-    const close = vi.fn(() => {
-      sequence.push('close:start');
-      return closing.promise;
-    });
+    const failedClose = createDeferred<void>();
+    const close = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        sequence.push('close:start');
+        return failedClose.promise;
+      })
+      .mockImplementationOnce(() => {
+        sequence.push('close:retry:start');
+        return closing.promise;
+      });
     const app = {
       isPackaged: false,
       whenReady: vi.fn(() => Promise.resolve()),
@@ -298,6 +332,7 @@ describe('main process quit wiring', () => {
       ),
       quit: vi.fn(() => {
         sequence.push('quit');
+        emitBeforeQuit();
       }),
     };
     const allWindows: unknown[] = [];
@@ -351,27 +386,42 @@ describe('main process quit wiring', () => {
       await vi.waitFor(() => {
         expect(listeners.get('before-quit')).toHaveLength(1);
       });
-      const beforeQuit = listeners.get('before-quit')![0];
-      const firstEvent = { preventDefault: vi.fn() };
-      const repeatedEvent = { preventDefault: vi.fn() };
 
-      beforeQuit(firstEvent);
-      beforeQuit(repeatedEvent);
+      const firstEvent = emitBeforeQuit();
+      await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+      failedClose.reject(new Error('injected service cleanup failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
       expect(firstEvent.preventDefault).toHaveBeenCalledTimes(1);
-      expect(repeatedEvent.preventDefault).not.toHaveBeenCalled();
-      expect(close).toHaveBeenCalledTimes(1);
       expect(app.quit).not.toHaveBeenCalled();
+
+      const retryEvent = emitBeforeQuit();
+      await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(2));
+      const repeatedEvent = emitBeforeQuit();
+
+      expect(retryEvent.preventDefault).toHaveBeenCalledTimes(1);
+      expect(repeatedEvent.preventDefault).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(app.quit).not.toHaveBeenCalled();
+      expect(sequence).toEqual(['close:start', 'close:retry:start']);
 
       sequence.push('close:finish');
       closing.resolve(undefined);
       await vi.waitFor(() => {
         expect(app.quit).toHaveBeenCalledTimes(1);
       });
-      beforeQuit({ preventDefault: vi.fn() });
+      const internalQuitEvent = beforeQuitEvents.at(-1);
 
-      expect(close).toHaveBeenCalledTimes(1);
-      expect(sequence).toEqual(['close:start', 'close:finish', 'quit']);
+      expect(internalQuitEvent?.preventDefault).not.toHaveBeenCalled();
+      expect(beforeQuitEvents).toHaveLength(4);
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(sequence).toEqual([
+        'close:start',
+        'close:retry:start',
+        'close:finish',
+        'quit',
+        'default-exit',
+      ]);
     } finally {
       vi.doUnmock('electron');
       vi.doUnmock('../../src/main/bootstrap');

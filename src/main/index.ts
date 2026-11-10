@@ -78,14 +78,28 @@ void app
     });
 
     let isQuitting = false;
+    let allowQuit = false;
     app.on('before-quit', (event) => {
       trayController?.handleBeforeQuit();
-      if (isQuitting) {
+      if (allowQuit) {
         return;
       }
       event.preventDefault();
+      if (isQuitting) {
+        return;
+      }
       isQuitting = true;
-      void services.close().finally(() => app.quit());
+      void services.close().then(
+        () => {
+          allowQuit = true;
+          app.quit();
+        },
+        (error: unknown) => {
+          isQuitting = false;
+          trayController?.handleQuitFailure();
+          console.error('[SMO.H3 Studio] 应用关闭清理失败', error);
+        },
+      );
     });
 
     app.on('activate', () => {

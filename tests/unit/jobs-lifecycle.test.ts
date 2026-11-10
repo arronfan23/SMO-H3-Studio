@@ -143,6 +143,63 @@ describe('JobCoordinator lifecycle', () => {
     vi.useRealTimers();
   });
 
+  test('default close timeout expires at 15000ms and remains retryable', async () => {
+    vi.useFakeTimers();
+    const coordinator = new JobCoordinator();
+    const cleanup = deferred<void>();
+    let rejectRun!: (reason: Error) => void;
+    const first = coordinator.enqueue({
+      id: 'speech-cleanup',
+      run: async () => {
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            rejectRun = reject;
+          });
+        } finally {
+          await cleanup.promise;
+        }
+      },
+      cancel: async () => {
+        rejectRun(new Error('stop active speech job'));
+      },
+    });
+    const firstOutcome = first.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const closing = coordinator.close();
+    let closeSettled = false;
+    void closing.then(
+      () => {
+        closeSettled = true;
+      },
+      () => {
+        closeSettled = true;
+      },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(closeSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(closing).rejects.toThrow(/timed out|timeout/i);
+      expect(coordinator.activeCount).toBe(1);
+
+      cleanup.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(coordinator.activeCount).toBe(0);
+      await coordinator.close();
+      expect(await firstOutcome).toMatchObject({
+        message: expect.stringMatching(/cancel/i),
+      });
+    } finally {
+      cleanup.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await coordinator.close().catch(() => undefined);
+      vi.useRealTimers();
+    }
+
+  });
+
   test('close timeout preserves the active job and can finish cleanup on a later close', async () => {
     const events: string[] = [];
     const coordinator = new JobCoordinator({

@@ -1,12 +1,14 @@
 // @vitest-environment node
 
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import defaultManifest from '../../resources/environment/media-components.json';
 import {
+  defaultSpeechExecFile,
   SpeechRuntime,
   type SpeechExecFile,
 } from '../../src/main/speech-runtime';
@@ -65,7 +67,10 @@ describe('SpeechRuntime', () => {
   });
 
   function createRuntime(
-    harness: { invalidInitialVersion?: 'mismatch' | 'error' } = {},
+    harness: {
+      invalidInitialVersion?: 'mismatch' | 'error';
+      execFileImpl?: SpeechExecFile;
+    } = {},
   ) {
     const calls: Array<{
       command: string;
@@ -75,6 +80,9 @@ describe('SpeechRuntime', () => {
     let versionChecks = 0;
     const execFile: SpeechExecFile = vi.fn(async (command, args, options) => {
       calls.push({ command, args, options: { ...options } });
+      if (harness.execFileImpl) {
+        return harness.execFileImpl(command, args, options);
+      }
       if (command === 'tar') {
         const outputDirectory = args[args.indexOf('-C') + 1];
         await mkdir(outputDirectory, { recursive: true });
@@ -128,7 +136,11 @@ describe('SpeechRuntime', () => {
       projectDirectory,
     ]);
     for (const call of calls) {
-      expect(call.options).toMatchObject({ shell: false, windowsHide: true });
+      expect(call.options).toMatchObject({
+        shell: false,
+        windowsHide: true,
+        signal: expect.any(AbortSignal),
+      });
     }
     expect(uvCalls[3]?.options.env).toMatchObject({
       UV_PROJECT_ENVIRONMENT: venvDirectory,
@@ -212,4 +224,168 @@ describe('SpeechRuntime', () => {
       source: UV_SOURCE,
     });
   });
+
+  test('aborts uv sync, stops the failed attempt, and permits a fresh prepare', async () => {
+    const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    await mkdir(toolDirectory, { recursive: true });
+    await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+    const syncStarted = deferred<void>();
+    const controller = new AbortController();
+    const cancellation = new Error('generation cancelled during uv sync');
+    let syncAttempts = 0;
+    let firstSyncSignal: AbortSignal | undefined;
+    const { runtime, calls } = createRuntime({
+      execFileImpl: async (_command, args, options) => {
+        if (args.length === 1 && args[0] === '--version') {
+          return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (args[0] !== 'sync') return { stdout: '', stderr: '' };
+        syncAttempts += 1;
+        if (syncAttempts > 1) return { stdout: '', stderr: '' };
+        firstSyncSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          const rejectCancellation = () => reject(options.signal?.reason);
+          if (options.signal?.aborted) {
+            rejectCancellation();
+            return;
+          }
+          options.signal?.addEventListener('abort', rejectCancellation, {
+            once: true,
+          });
+          syncStarted.resolve();
+        });
+      },
+    });
+
+    const firstPrepare = runtime.prepare(controller.signal);
+    await syncStarted.promise;
+    controller.abort(cancellation);
+
+    await expect(firstPrepare).rejects.toBe(cancellation);
+    expect(firstSyncSignal?.aborted).toBe(true);
+    expect(syncAttempts).toBe(1);
+
+    await expect(runtime.prepare()).resolves.toMatchObject({
+      pythonPath: join(runtimeDirectory, 'venv', 'Scripts', 'python.exe'),
+    });
+    expect(syncAttempts).toBe(2);
+    expect(calls.filter(({ args }) => args[0] === 'venv')).toHaveLength(2);
+  });
+
+  test('close aborts an unattached preparation and waits for command cleanup', async () => {
+    const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    await mkdir(toolDirectory, { recursive: true });
+    await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+    const syncStarted = deferred<void>();
+    const abortCleanup = deferred<void>();
+    let syncSignal: AbortSignal | undefined;
+    const { runtime } = createRuntime({
+      execFileImpl: async (_command, args, options) => {
+        if (args.length === 1 && args[0] === '--version') {
+          return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (args[0] !== 'sync') return { stdout: '', stderr: '' };
+        syncSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          options.signal?.addEventListener(
+            'abort',
+            () => {
+              void abortCleanup.promise.then(() => reject(options.signal?.reason));
+            },
+            { once: true },
+          );
+          syncStarted.resolve();
+        });
+      },
+    });
+
+    const preparing = runtime.prepare();
+    const preparingOutcome = preparing.catch((error: unknown) => error);
+    await syncStarted.promise;
+    const closing = runtime.close();
+    let closeSettled = false;
+    void closing.then(() => {
+      closeSettled = true;
+    });
+
+    await vi.waitFor(() => expect(syncSignal?.aborted).toBe(true));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeSettled).toBe(false);
+
+    abortCleanup.resolve();
+    expect(await preparingOutcome).toMatchObject({
+      message: expect.stringMatching(/cancel/i),
+    });
+    await closing;
+    expect(closeSettled).toBe(true);
+    expect(syncSignal?.aborted).toBe(true);
+    await expect(runtime.close()).resolves.toBeUndefined();
+  });
+
+  test('close terminates a real execFile child before preparation settles', async () => {
+    const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    await mkdir(toolDirectory, { recursive: true });
+    await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+    const syncStarted = deferred<void>();
+    const pidPath = join(directory, 'uv-sync-child.pid');
+    const { runtime } = createRuntime({
+      execFileImpl: async (_command, args, options) => {
+        if (args.length === 1 && args[0] === '--version') {
+          return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (args[0] !== 'sync') return { stdout: '', stderr: '' };
+        const script =
+          "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); " +
+          'setInterval(() => undefined, 1000)';
+        const pending = defaultSpeechExecFile(
+          process.execPath,
+          ['-e', script, pidPath],
+          options,
+        );
+        syncStarted.resolve();
+        return pending;
+      },
+    });
+
+    const preparing = runtime.prepare();
+    const preparingOutcome = preparing.catch((error: unknown) => error);
+    let pid: number | undefined;
+    try {
+      await syncStarted.promise;
+      await vi.waitFor(() => expect(existsSync(pidPath)).toBe(true));
+      pid = Number(await readFile(pidPath, 'utf8'));
+      expect(Number.isInteger(pid)).toBe(true);
+      const closing = runtime.close();
+
+      expect(await preparingOutcome).toMatchObject({ name: 'AbortError' });
+      await closing;
+      expect(() => process.kill(pid!, 0)).toThrow();
+    } finally {
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, 0);
+          process.kill(pid);
+        } catch {
+          // The expected final state is an exited child.
+        }
+      }
+      await preparingOutcome;
+    }
+  });
 });
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: Deferred<T>['resolve'];
+  let reject!: Deferred<T>['reject'];
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}

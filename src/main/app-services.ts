@@ -533,6 +533,7 @@ export async function createAppServices(
   let environmentSetup: EnvironmentSetupService | undefined;
   let recordings: RecordingService | undefined;
   let mediaComponents: MediaComponentService | undefined;
+  let speechRuntime: SpeechRuntime | undefined;
   let speechProcess: SpeechProcessManager | undefined;
   const activeEnvironmentPaths: EnvironmentPaths = { ...environmentPaths };
 
@@ -690,7 +691,7 @@ export async function createAppServices(
       outputDirectory,
       ensureReady: () => activeComfyProcess!.ensureReady(),
     });
-    const speechRuntime = new SpeechRuntime({
+    speechRuntime = new SpeechRuntime({
       modelDirectory: speechModelDirectory,
       runtimeDirectory: speechRuntimeDirectory,
       projectDirectory: speechProject,
@@ -735,9 +736,9 @@ export async function createAppServices(
         throw new Error('Speech component must be installed and ready');
       }
     };
-    const prepareSpeechRuntime = async (): Promise<void> => {
+    const prepareSpeechRuntime = async (signal?: AbortSignal): Promise<void> => {
       requireSpeechComponent();
-      await speechRuntime.prepare();
+      await speechRuntime!.prepare(signal);
     };
     const startSpeechGeneration = createSpeechGenerationHandler({
       store,
@@ -779,6 +780,20 @@ export async function createAppServices(
 
     let closed = false;
     let closePromise: Promise<void> | null = null;
+    const cleanupSteps = new Map<string, Promise<void>>();
+    const runCleanupStep = (
+      id: string,
+      cleanup: () => void | Promise<void>,
+    ): Promise<void> => {
+      const existing = cleanupSteps.get(id);
+      if (existing) return existing;
+      const pending = (async () => cleanup())();
+      cleanupSteps.set(id, pending);
+      void pending.catch(() => {
+        if (cleanupSteps.get(id) === pending) cleanupSteps.delete(id);
+      });
+      return pending;
+    };
     return {
       startGeneration,
       retryWork,
@@ -831,17 +846,39 @@ export async function createAppServices(
         }
         if (closePromise !== null) return closePromise;
         const pending = (async () => {
-          await recordings!.close();
-          await setup.cancel();
-          await jobCoordinator!.close();
-          await closeSpeechProcess();
-          mediaComponents!.cancel('speech');
-          mediaComponents!.cancel('image');
-          await activeComfyProcess!.close();
-          await Promise.allSettled([
-            comfy!.close(),
-            (async () => store!.close())(),
-          ]);
+          const errors: unknown[] = [];
+          const attempt = async (
+            id: string,
+            cleanup: () => void | Promise<void>,
+          ): Promise<void> => {
+            try {
+              await runCleanupStep(id, cleanup);
+            } catch (error) {
+              if (!errors.includes(error)) errors.push(error);
+            }
+          };
+          await attempt('recordings', () => recordings!.close());
+          await attempt('environment-setup', async () => {
+            await setup.cancel();
+          });
+          const jobsCleanup = runCleanupStep('jobs', () => jobCoordinator!.close());
+          await attempt('jobs', () => jobsCleanup);
+          await attempt('speech-runtime', () => speechRuntime!.close());
+          await attempt('speech-process', () => closeSpeechProcess());
+          await attempt('speech-components', () => mediaComponents!.cancel('speech'));
+          await attempt('image-components', () => mediaComponents!.cancel('image'));
+          await attempt('comfy-process', () => activeComfyProcess!.close());
+          await attempt('comfy-client', () => comfy!.close());
+          await attempt('store', async () => {
+            await jobsCleanup;
+            store!.close();
+          });
+          if (errors.length > 0) {
+            throw new AggregateError(
+              errors,
+              `Application services cleanup failed: ${errors.map(jobErrorMessage).join('; ')}`,
+            );
+          }
         })();
         closePromise = pending;
         pending.then(
@@ -860,6 +897,7 @@ export async function createAppServices(
     await recordings?.close();
     await environmentSetup?.cancel().catch(() => undefined);
     await jobCoordinator?.close();
+    await speechRuntime?.close().catch(() => undefined);
     await speechProcess?.close().catch(() => undefined);
     mediaComponents?.cancel('speech');
     mediaComponents?.cancel('image');

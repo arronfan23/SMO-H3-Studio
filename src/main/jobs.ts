@@ -43,7 +43,7 @@ interface ActiveItem {
   settle?: () => void;
 }
 
-const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
+const DEFAULT_CLOSE_TIMEOUT_MS = 15_000;
 
 export class JobCoordinator {
   private readonly reservedIds = new Set<string>();
