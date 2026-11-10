@@ -191,7 +191,7 @@ describe('WorkService.deleteWork', () => {
     expect(store.getWork(done.id)).toBeNull();
   });
 
-  test('deletes a failed work with a null output path', async () => {
+  test('deletes a failed work record with a null output path when no output matches', async () => {
     const { store, service, avatarId } = await createHarness();
     const failed = store.addWork({
       id: 'failed-work',
@@ -204,6 +204,161 @@ describe('WorkService.deleteWork', () => {
     await service.deleteWork(failed.id);
 
     expect(store.getWork(failed.id)).toBeNull();
+  });
+
+  test.each([
+    {
+      mode: 'text' as const,
+      subdirectory: 'SMO-H3',
+      extension: 'mp4',
+      associatedExtension: 'png',
+      disallowedExtension: 'mp3',
+    },
+    {
+      mode: 'audio' as const,
+      subdirectory: 'SMO-H3',
+      extension: 'webm',
+      associatedExtension: 'jpg',
+      disallowedExtension: 'wav',
+    },
+    {
+      mode: 'image' as const,
+      subdirectory: 'SMO-Image',
+      extension: 'png',
+      associatedExtension: 'webp',
+      disallowedExtension: 'mp4',
+    },
+    {
+      mode: 'speech' as const,
+      subdirectory: 'SMO-Speech',
+      extension: 'wav',
+      associatedExtension: 'm4a',
+      disallowedExtension: 'png',
+    },
+  ])(
+    'deletes real $mode output for a failed work with a null output path only in $subdirectory',
+    async ({ mode, subdirectory, extension, associatedExtension, disallowedExtension }) => {
+      const { directory, outputDirectory, store, service, avatarId } = await createHarness();
+      const workId = `failed-${mode}`;
+      const modeDirectory = join(outputDirectory, subdirectory);
+      const otherModeDirectory = join(
+        outputDirectory,
+        subdirectory === 'SMO-H3' ? 'SMO-Image' : 'SMO-H3',
+      );
+      const nestedDirectory = join(modeDirectory, `${workId}_nested`);
+      const outputPath = join(modeDirectory, `${workId}.${extension}`);
+      const associatedAsset = join(
+        modeDirectory,
+        `${workId}_asset.${associatedExtension}`,
+      );
+      const disallowedAsset = join(
+        modeDirectory,
+        `${workId}_asset.${disallowedExtension}`,
+      );
+      const otherWorkOutput = join(modeDirectory, `other-${mode}.${extension}`);
+      const similarlyNamedFile = join(modeDirectory, `${workId}-other.${extension}`);
+      const rootCandidate = join(outputDirectory, `${workId}.${extension}`);
+      const otherModeCandidate = join(otherModeDirectory, `${workId}.${extension}`);
+      const nestedCandidate = join(nestedDirectory, `${workId}.${extension}`);
+      const referenceMedia = join(directory, `${workId}.${extension}`);
+      await Promise.all([
+        mkdir(modeDirectory, { recursive: true }),
+        mkdir(otherModeDirectory, { recursive: true }),
+        mkdir(nestedDirectory, { recursive: true }),
+      ]);
+      await Promise.all(
+        [
+          outputPath,
+          associatedAsset,
+          disallowedAsset,
+          otherWorkOutput,
+          similarlyNamedFile,
+          rootCandidate,
+          otherModeCandidate,
+          nestedCandidate,
+          referenceMedia,
+        ].map(async (filePath) => writeFile(filePath, 'media')),
+      );
+      store.addWork({
+        id: workId,
+        avatarId,
+        mode,
+        outputPath: null,
+        status: 'failed',
+      });
+
+      await service.deleteWork(workId);
+
+      expect(existsSync(outputPath)).toBe(false);
+      expect(existsSync(associatedAsset)).toBe(false);
+      expect(existsSync(disallowedAsset)).toBe(true);
+      expect(existsSync(otherWorkOutput)).toBe(true);
+      expect(existsSync(similarlyNamedFile)).toBe(true);
+      expect(existsSync(rootCandidate)).toBe(true);
+      expect(existsSync(otherModeCandidate)).toBe(true);
+      expect(existsSync(nestedCandidate)).toBe(true);
+      expect(existsSync(referenceMedia)).toBe(true);
+      expect(store.getWork(workId)).toBeNull();
+    },
+  );
+
+  test('refuses failed null-output image candidates outside the real output root', async () => {
+    const { directory, outputDirectory, store, service } = await createHarness();
+    const workId = 'failed-outside-image';
+    const outsideDirectory = join(directory, 'outside-image');
+    const outsideImage = join(outsideDirectory, `${workId}_00001.png`);
+    await mkdir(outsideDirectory);
+    await writeFile(outsideImage, 'image');
+    await symlink(
+      outsideDirectory,
+      join(outputDirectory, 'SMO-Image'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    store.addWork({
+      id: workId,
+      avatarId: null,
+      mode: 'image',
+      outputPath: null,
+      status: 'failed',
+    });
+
+    await expect(service.deleteWork(workId)).rejects.toThrow(/output directory/i);
+
+    expect(existsSync(outsideImage)).toBe(true);
+    expect(store.getWork(workId)).not.toBeNull();
+  });
+
+  test('refuses a symbolic failed null-output speech candidate without deleting other assets', async () => {
+    const { directory, outputDirectory, store, service } = await createHarness();
+    const workId = 'failed-linked-speech';
+    const speechDirectory = join(outputDirectory, 'SMO-Speech');
+    const outputPath = join(speechDirectory, `${workId}.wav`);
+    const linkedAsset = join(speechDirectory, `${workId}_linked.mp3`);
+    const outsideDirectory = join(directory, 'outside-speech');
+    const outsideAsset = join(outsideDirectory, 'source.mp3');
+    await mkdir(speechDirectory);
+    await mkdir(outsideDirectory);
+    await writeFile(outputPath, 'audio');
+    await writeFile(outsideAsset, 'source');
+    await symlink(
+      outsideDirectory,
+      linkedAsset,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    store.addWork({
+      id: workId,
+      avatarId: null,
+      mode: 'speech',
+      outputPath: null,
+      status: 'failed',
+    });
+
+    await expect(service.deleteWork(workId)).rejects.toThrow(/symbolic link|regular file/i);
+
+    expect(existsSync(outputPath)).toBe(true);
+    expect(existsSync(linkedAsset)).toBe(true);
+    expect(existsSync(outsideAsset)).toBe(true);
+    expect(store.getWork(workId)).not.toBeNull();
   });
 
   test('deletes the record when the output file no longer exists', async () => {

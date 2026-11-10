@@ -7,46 +7,68 @@ import type { Store } from './store';
 
 const execFileAsync = promisify(execFile);
 
-const ASSET_EXTENSIONS = new Set([
+const IMAGE_EXTENSIONS = new Set([
   '.png',
   '.jpg',
   '.jpeg',
   '.webp',
-  '.mp4',
-  '.webm',
-  '.gif',
-  '.wav',
-  '.mp3',
-  '.flac',
-  '.ogg',
-  '.m4a',
 ]);
 
-const OUTPUT_RULES: Record<
-  WorkMode,
-  { extensions: ReadonlySet<string>; description: string; mediaType: string }
-> = {
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm']);
+
+const SPEECH_EXTENSIONS = new Set(['.wav', '.mp3', '.flac', '.m4a']);
+
+const H3_OUTPUT_EXTENSIONS = new Set([...VIDEO_EXTENSIONS, ...IMAGE_EXTENSIONS]);
+
+const ASSET_EXTENSIONS = new Set([
+  ...H3_OUTPUT_EXTENSIONS,
+  '.gif',
+  ...SPEECH_EXTENSIONS,
+  '.ogg',
+]);
+
+interface OutputRule {
+  extensions: ReadonlySet<string>;
+  description: string;
+  mediaType: string;
+  subdirectory: string;
+  untrackedExtensions: ReadonlySet<string>;
+}
+
+const OUTPUT_RULES: Record<WorkMode, OutputRule> = {
   text: {
-    extensions: new Set(['.mp4', '.webm']),
+    extensions: VIDEO_EXTENSIONS,
     description: 'an MP4 or WebM video',
     mediaType: 'video',
+    subdirectory: 'SMO-H3',
+    untrackedExtensions: H3_OUTPUT_EXTENSIONS,
   },
   audio: {
-    extensions: new Set(['.mp4', '.webm']),
+    extensions: VIDEO_EXTENSIONS,
     description: 'an MP4 or WebM video',
     mediaType: 'video',
+    subdirectory: 'SMO-H3',
+    untrackedExtensions: H3_OUTPUT_EXTENSIONS,
   },
   speech: {
-    extensions: new Set(['.wav', '.mp3', '.flac', '.m4a']),
+    extensions: SPEECH_EXTENSIONS,
     description: 'a WAV, MP3, FLAC, or M4A audio file',
     mediaType: 'audio',
+    subdirectory: 'SMO-Speech',
+    untrackedExtensions: SPEECH_EXTENSIONS,
   },
   image: {
-    extensions: new Set(['.png', '.jpg', '.jpeg', '.webp']),
+    extensions: IMAGE_EXTENSIONS,
     description: 'a PNG, JPG, JPEG, or WebP image',
     mediaType: 'image',
+    subdirectory: 'SMO-Image',
+    untrackedExtensions: IMAGE_EXTENSIONS,
   },
 };
+
+function belongsToWork(name: string, workId: string): boolean {
+  return name === workId || name.startsWith(`${workId}.`) || name.startsWith(`${workId}_`);
+}
 
 // Deletes files through an open handle so the bytes removed are exactly the
 // file that passed validation, closing the check-to-delete TOCTOU window.
@@ -239,6 +261,8 @@ export class WorkService {
     }
     if (work.outputPath !== null && work.outputPath.trim().length > 0) {
       await this.removeOutput(work.id, work.mode, work.outputPath);
+    } else if (work.status === 'failed' && work.outputPath === null) {
+      await this.removeUntrackedOutput(work.id, work.mode);
     }
     this.store.deleteWork(id);
   }
@@ -261,9 +285,7 @@ export class WorkService {
     });
     const candidates = new Map<string, boolean>([[candidate, true]]);
     for (const name of names) {
-      const belongsToWork =
-        name === workId || name.startsWith(`${workId}.`) || name.startsWith(`${workId}_`);
-      if (!belongsToWork || !ASSET_EXTENSIONS.has(extname(name).toLowerCase())) {
+      if (!belongsToWork(name, workId) || !ASSET_EXTENSIONS.has(extname(name).toLowerCase())) {
         continue;
       }
       const assetPath = resolve(directory, name);
@@ -271,7 +293,38 @@ export class WorkService {
         candidates.set(assetPath, false);
       }
     }
+    await this.removeCandidates(root, candidates, outputRule);
+  }
 
+  private async removeUntrackedOutput(workId: string, mode: WorkMode): Promise<void> {
+    const root = resolve(this.outputDirectory);
+    const outputRule = OUTPUT_RULES[mode];
+    const directory = resolve(root, outputRule.subdirectory);
+    assertInside(root, directory);
+    const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    });
+    const candidates = new Map<string, boolean>();
+    for (const name of names) {
+      if (
+        !belongsToWork(name, workId) ||
+        !outputRule.untrackedExtensions.has(extname(name).toLowerCase())
+      ) {
+        continue;
+      }
+      candidates.set(resolve(directory, name), false);
+    }
+    await this.removeCandidates(root, candidates, outputRule);
+  }
+
+  private async removeCandidates(
+    root: string,
+    candidates: Map<string, boolean>,
+    outputRule: OutputRule,
+  ): Promise<void> {
     let realRoot: string | undefined;
     const validated: string[] = [];
     for (const [assetPath, isOutput] of candidates) {
