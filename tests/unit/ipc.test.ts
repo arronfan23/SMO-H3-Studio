@@ -35,6 +35,7 @@ import { ASPECT_RATIO_OPTIONS } from '../../src/shared/generation-options';
 import type {
   Avatar,
   HardwareInfo,
+  ImageGenerationRequest,
   SpeechGenerationRequest,
   Work,
 } from '../../src/shared/types';
@@ -94,6 +95,15 @@ const speechGenerationRequest: SpeechGenerationRequest = {
   outputFormat: 'mp3',
   speaker: 'Vivian',
   instruct: '自然地说',
+};
+
+const imageGenerationRequest: ImageGenerationRequest = {
+  mode: 'image',
+  prompt: '玻璃温室里的晨光',
+  width: 1344,
+  height: 768,
+  seed: 99,
+  steps: 30,
 };
 
 const polishRequest = {
@@ -397,6 +407,33 @@ describe('IPC input schema', () => {
     };
 
     expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('image accepts a strict generation request', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: imageGenerationRequest,
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([
+    { prompt: ' ' },
+    { width: 1000 },
+    { height: 1023 },
+    { seed: -1 },
+    { steps: 0 },
+    { steps: 101 },
+    { avatarId: 'avatar-must-not-be-accepted' },
+    { unknown: true },
+  ])('image rejects invalid or undeclared request fields: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...imageGenerationRequest, ...override },
+      }),
+    ).toThrow();
   });
 
   test.each([
@@ -943,6 +980,16 @@ describe('main-process IPC handlers', () => {
       harness.invoke('jobs:start', speechGenerationRequest),
     ).resolves.toEqual({ id: 'speech-job' });
     expect(startGeneration).toHaveBeenCalledWith(speechGenerationRequest);
+  });
+
+  test('forwards an image generation request through jobs:start', async () => {
+    const startGeneration = vi.fn(async () => ({ id: 'image-job' }));
+    const harness = await createHarness({ startGeneration });
+
+    await expect(
+      harness.invoke('jobs:start', imageGenerationRequest),
+    ).resolves.toEqual({ id: 'image-job' });
+    expect(startGeneration).toHaveBeenCalledWith(imageGenerationRequest);
   });
 
   test('dispatches speech capabilities and component state, install, and cancel', async () => {
@@ -2013,6 +2060,11 @@ describe('preload API', () => {
       channel: 'jobs:start',
       payload: speechGenerationRequest,
       call: (smo: SmoApi) => smo.jobs.start(speechGenerationRequest),
+    },
+    {
+      channel: 'jobs:start',
+      payload: imageGenerationRequest,
+      call: (smo: SmoApi) => smo.jobs.start(imageGenerationRequest),
     },
     {
       channel: 'speech:getCapabilities',

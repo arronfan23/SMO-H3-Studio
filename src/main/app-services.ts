@@ -24,6 +24,7 @@ import {
 import { EnvironmentStore, resolveEnvironmentPaths } from './environment-store';
 import { FileService, type FileDialog } from './files';
 import { createGenerationHandler, createRetryHandler } from './generation';
+import { createImageGenerationHandler } from './image-generation';
 import { createSpeechGenerationHandler } from './speech-generation';
 import { SpeechProcessManager } from './speech-process';
 import { SpeechRuntime } from './speech-runtime';
@@ -680,6 +681,15 @@ export async function createAppServices(
       inspectImageRuntime: async () =>
         inspectImageRuntime(await comfy!.objectInfo()),
     });
+    const startImageGeneration = createImageGenerationHandler({
+      store,
+      comfy,
+      mediaComponents,
+      jobCoordinator,
+      workflowsDirectory: defaultWorkflowsDirectory(),
+      outputDirectory,
+      ensureReady: () => activeComfyProcess!.ensureReady(),
+    });
     const speechRuntime = new SpeechRuntime({
       modelDirectory: speechModelDirectory,
       runtimeDirectory: speechRuntimeDirectory,
@@ -753,6 +763,8 @@ export async function createAppServices(
       ((request, executionOptions) =>
         request.mode === 'speech'
           ? startSpeechGeneration(request)
+          : request.mode === 'image'
+            ? startImageGeneration(request, executionOptions)
           : startVideoGeneration(request, executionOptions));
 
     const retryWork = createRetryHandler({

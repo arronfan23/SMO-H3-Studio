@@ -18,6 +18,7 @@ import type {
   HardwareInfo,
   HardwareProfile,
   HardwareRecommendationInput,
+  ImageGenerationRequest,
   SpeechCapabilities,
   SpeechGenerationRequest,
   SpeechMode,
@@ -189,9 +190,29 @@ const speechGenerationRequestSchema = z
     }
   }) satisfies z.ZodType<SpeechGenerationRequest>;
 
+const imageDimensionSchema = z
+  .number()
+  .int()
+  .min(256)
+  .max(4096)
+  .multipleOf(32);
+
+const imageGenerationRequestSchema = z
+  .object({
+    mode: z.literal('image'),
+    prompt: nonEmptyString,
+    width: imageDimensionSchema,
+    height: imageDimensionSchema,
+    seed: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    steps: z.number().int().min(1).max(100),
+    retryOf: nonEmptyString.optional(),
+  })
+  .strict() satisfies z.ZodType<ImageGenerationRequest>;
+
 const generationRequestSchema = z.union([
   videoGenerationRequestSchema,
   speechGenerationRequestSchema,
+  imageGenerationRequestSchema,
 ]) satisfies z.ZodType<GenerationRequest>;
 
 const componentIdSchema = z

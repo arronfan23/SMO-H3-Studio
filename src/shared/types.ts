@@ -30,7 +30,20 @@ export interface SpeechGenerationRequest {
   steps?: never;
 }
 
-export type GenerationRequest = VideoGenerationRequest | SpeechGenerationRequest;
+export interface ImageGenerationRequest {
+  mode: 'image';
+  prompt: string;
+  width: number;
+  height: number;
+  seed: number;
+  steps: number;
+  retryOf?: string;
+}
+
+export type GenerationRequest =
+  | VideoGenerationRequest
+  | SpeechGenerationRequest
+  | ImageGenerationRequest;
 
 export interface SpeechCapabilities {
   speakers: string[];

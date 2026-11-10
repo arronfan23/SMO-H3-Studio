@@ -11,6 +11,7 @@ import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
 import type { Store } from './store';
 import { isSpeechGenerationRequest } from './speech-generation';
+import { isImageGenerationRequest } from './image-generation';
 import {
   applySparkAcceleration,
   selectSparkAcceleration,
@@ -309,6 +310,9 @@ export function createGenerationHandler(
   return async (input, executionOptions = {}) => {
     if (input.mode === 'speech') {
       throw new Error('Speech generation requires the speech generation handler');
+    }
+    if (input.mode === 'image') {
+      throw new Error('Image generation requires the image generation handler');
     }
     validateRequest(input);
     const avatar = store
@@ -798,6 +802,19 @@ export function createRetryHandler(
         await mediaRegistry.authorizeSelectedFile(referenceAudioPath);
       }
       return startGeneration({ ...storedRequest, retryOf: id });
+    }
+    if (work.mode === 'image') {
+      if (
+        !isImageGenerationRequest(work.metadata?.request) ||
+        typeof work.metadata?.workflowVersion !== 'string' ||
+        work.metadata.workflowVersion.length === 0
+      ) {
+        throw new Error('Work metadata is missing a valid image request or workflowVersion');
+      }
+      return startGeneration(
+        { ...work.metadata.request, retryOf: id },
+        { workflowPath: work.metadata.workflowVersion },
+      );
     }
     if (!isRetryableMetadata(work.metadata)) {
       throw new Error('Work metadata is missing request or workflowVersion');
