@@ -394,3 +394,42 @@ git commit -m "Use speech works in audio digital human"
 - 开始快照：RTX 5080，总计 `16303 MiB`，已用 `1244 MiB`，利用率 `2%`，温度 `44.50 C`。结束快照：已用 `1239 MiB`，利用率 `2%`，温度 `44.89 C`；没有 Qwen 推理负载。
 - 验收目录下 Python 进程数为 0，锁定 venv、模型事件审计和真实验收结果文件均不存在。未终止或修改既有 ComfyUI/Python 进程，未读取用户素材或密钥。
 
+#### 2026-11-10 续验记录（HEAD `24471b9d`）
+
+**结论：BLOCKED。** 复验 HEAD 为 `24471b9dfd1f322e98346c1175caf56379598576`。26 个既有模型文件全部复用，GitHub uv 归档已补齐并通过 SHA256 校验；独立 Python 3.12.13 和 venv 已创建，但锁定依赖同步在下载 2.7 GiB 的 CUDA Torch wheel 时反复被对端断开，真实推理仍未开始。达到本轮边界后未再重试真实安装。
+
+工作树复验前已有 `tests/e2e/environment.spec.ts`、`tests/unit/environment-wizard.test.tsx` 的未提交修改及 Python 缓存，本次保留原状。本轮新发现的两个 uv Windows 兼容性缺陷已在 `src/main/speech-runtime.ts` 和 `tests/unit/speech-runtime.test.ts` 中最小修复并完成红绿验证；按“只提交计划文件”的要求，这两个文件不纳入本次 commit。
+
+**1. 组件与 uv 下载：PASS**
+
+- `MediaComponentService.install('speech')` 实测 `8.1406924` 秒完成，27/27 文件为 ready，总计 `5,720,134,760` 字节，状态为 `active: false`、`error: null`；结果保存在 `reports/install-result.json` 和 `reports/install-ghproxy.log`。
+- uv 归档大小为 `23,354,520` 字节，独立复算 SHA256 为 `0953ac2ef4fbe47ad469bfa80b658a577a02c4d73a2fb9c4c7c70dda432efded`，与锁定清单一致。没有替换或重新下载已校验的 26 个模型文件。
+
+**2. uv 兼容性缺陷与独立 Python 环境**
+
+- G 盘实际为 exFAT。Windows `bsdtar 3.5.2` 解压已校验 uv ZIP 时，对 `uv.exe`、`uvw.exe`、`uvx.exe` 均返回 `Can't restore time` 并以 1 退出；同一归档使用 `-m` 后退出 0。新增 exFAT 回归用例先因缺少 `-m` 失败，最小修复后通过。
+- 对照探针进一步证实：在 NTFS 和 exFAT 上，刚执行临时目录中的 `uv.exe --version` 后重命名其父目录可能出现 `EPERM`；不执行该文件时重命名成功。修复顺序调整为解压并切换到固定工具目录后再执行版本检查，没有加入睡眠或无限重试。新增顺序用例同样先失败后通过，`speech-runtime` 最终 **7/7 PASS**。探针证据保存在 `reports/uv-lifecycle-probe*.log`。
+- exFAT 上的 `uv python install 3.12` 已成功下载 `20.9 MiB` CPython，但创建 minor version link directory 时返回 Windows `os error 1 (函数不正确)`；uv 0.11.13 没有关闭该链接的命令行选项。
+- 因此模型继续保留在 `G:\SMO-H3-Speech-Verification-20261110\data\components\speech\models`，通过目录联接复用；隔离运行时改到 NTFS 的 `C:\Users\FG\AppData\Local\SMO-H3-Speech-Verification-20261110\data\components\speech\runtime`。未使用或修改 ComfyUI Python。
+- NTFS 运行时实测 `uv 0.11.13 (4512a3931)`、Python **3.12.13** 和 venv 创建成功。`uv sync --locked` 已解析 108 个锁定包并完成多个依赖下载/构建，但最终下载 `torch==2.9.1+cu128`（2.7 GiB）时多次重试后仍失败：`peer closed connection without sending TLS close_notify: unexpected EOF`，导致 distribution cache 写入失败。
+- 最终 NTFS 验收运行耗时 `59.453` 秒。验收脚本末尾的 `model-events.jsonl ENOENT` 是模型服务从未启动后的派生错误；真正前置根因完整保存在 `reports/acceptance-failure.txt` 和 `reports/acceptance-run-ntfs-runtime.log`。当前 venv 中 `torch`、`qwen_tts`、`soundfile` 均不可导入，未继续执行推理或再次同步。
+
+**3. 真实推理与四格式：未执行，步骤 2 不勾选**
+
+- 因锁定依赖同步失败，未启动 Qwen 服务或加载模型，未生成短文本、温和情绪的固定音色 WAV，也未生成以该 WAV 和已知文本为参考的声音克隆。
+- **真实输出仍为空。** `output` 文件数为 0，`audit/model-events.jsonl` 不存在；没有 WAV/MP3/FLAC/M4A 的真实 ffprobe 编码、采样率、时长、非静音检测、SHA256 或推理耗时结果。
+- 固定音色与克隆的单模型实例切换、真实任务锁释放及锁释放后立即启动另一任务仍未验证。模拟 studio E2E 的音频用例不作为真实 Qwen 验收结果。
+
+**4. 限定自动回归：PASS**
+
+- `npm run typecheck`：PASS。
+- 相关语音/组件测试：`media-components`、`download`、`speech-runtime`、`speech-process`、`speech-generation`、`speech-form`、`studio`、`ipc`、`jobs` 共 **9 个测试文件、649 项测试全部通过**。
+- 第一次限定运行曾有一项 `重复选择同一音频...` 断言失败，其余 648 项通过；该用例单独运行通过。代码和断言确认是 `duration` 已重置但异步 `mediaUrl` 尚未生成 `<audio>` 的测试查询竞争，未修改生产代码或该测试；一次有界完整重跑为 **649/649 PASS**。
+- `npm run build`：PASS；`npx playwright test tests/e2e/studio.spec.ts`：**20 通过、0 失败**。本轮按要求执行限定回归，没有运行完整环境导入测试，因此没有出现允许豁免的 5 项失败。
+
+**5. 进程与 GPU 健康**
+
+- NTFS 环境准备期间采集 18 个快照：RTX 5080，总计 `16303 MiB`，已用 `2310-2318 MiB`，利用率最高 `2%`，温度 `47.11-47.23 C`；只观察到本次验收的 uv/Python 进程，没有 Qwen 推理负载。
+- 最终快照：已用 `2315 MiB`、利用率 `2%`、温度 `47.03 C`，驱动 `621.01`；两个验收根目录下的残留进程数为 **0**。未终止或修改既有 ComfyUI/Python 进程，未读取用户素材或密钥。
+- 最终 commit 只包含本计划文件；模型、Python 环境、缓存、音频、验收脚本和其他工作树修改均不提交。
+
