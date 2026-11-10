@@ -497,6 +497,8 @@ export class MediaComponentService {
     }
 
     signal.throwIfAborted();
+    // Reload ComfyUI's cached model choices after image files are in place.
+    await this.inspectRuntime(component, signal);
     if (component.id === 'image') {
       this.readyModelDirectory = modelDirectory
         ? this.modelDirectoryKey(modelDirectory)

@@ -693,7 +693,11 @@ test.describe('SMO.H3 Studio portable package', () => {
     const workflowFiles = (await readdir(join(packagedResourcesPath, 'resources', 'workflows')))
       .filter((entry) => entry.endsWith('.json'))
       .sort();
-    expect(workflowFiles).toEqual(['audio-digital-human.json', 'text-ref2va.json']);
+    expect(workflowFiles).toEqual([
+      'audio-digital-human.json',
+      'qwen-image-2-1.json',
+      'text-ref2va.json',
+    ]);
 
     const skillEntries = await readdir(join(packagedResourcesPath, 'resources', 'skills'), {
       withFileTypes: true,

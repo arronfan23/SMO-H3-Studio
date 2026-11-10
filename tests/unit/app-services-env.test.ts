@@ -85,15 +85,29 @@ async function useDataDirectory(): Promise<string> {
 }
 
 async function startHttpServer(
-  options: { objectInfo?: Record<string, unknown> } = {},
-): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  options: {
+    objectInfo?: Record<string, unknown>;
+    onObjectInfo?: (call: number) =>
+      | { status?: number; body?: unknown }
+      | void;
+  } = {},
+): Promise<{
+  baseUrl: string;
+  readonly objectInfoCalls: number;
+  close: () => Promise<void>;
+}> {
+  let objectInfoCalls = 0;
   const server: Server = createServer((request, response) => {
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify(
-      request.url === '/object_info' && options.objectInfo
-        ? options.objectInfo
-        : { system: { os: 'test' }, devices: [] },
-    ));
+    let status = 200;
+    let body: unknown = { system: { os: 'test' }, devices: [] };
+    if (request.url === '/object_info') {
+      objectInfoCalls += 1;
+      const override = options.onObjectInfo?.(objectInfoCalls);
+      status = override?.status ?? 200;
+      body = override?.body ?? options.objectInfo ?? body;
+    }
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(typeof body === 'string' ? body : JSON.stringify(body));
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -101,6 +115,9 @@ async function startHttpServer(
   let closed = false;
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
+    get objectInfoCalls() {
+      return objectInfoCalls;
+    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -454,13 +471,17 @@ describe('createAppServices environment integration', () => {
     const dataDirectory = await useDataDirectory();
     const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
     await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    const destinations: string[] = [];
+    const objectInfoDownloadCounts: number[] = [];
     const upstream = await startHttpServer({
       objectInfo: Object.fromEntries(
         REQUIRED_IMAGE_COMFY_NODES.map((node) => [node, {}]),
       ),
+      onObjectInfo: () => {
+        objectInfoDownloadCounts.push(destinations.length);
+      },
     });
     cleanups.push(() => upstream.close());
-    const destinations: string[] = [];
     const download = vi.spyOn(downloadModule, 'downloadFile').mockImplementation(
       async (options) => {
         destinations.push(options.destination);
@@ -480,6 +501,7 @@ describe('createAppServices environment integration', () => {
 
     await services.components.install('image');
 
+    expect(objectInfoDownloadCounts).toEqual([0, 3]);
     const imageDestinations = destinations.slice();
     expect(imageDestinations).toHaveLength(3);
     for (const destination of imageDestinations) {
@@ -505,6 +527,52 @@ describe('createAppServices environment integration', () => {
         true,
       );
     }
+    expect(upstream.objectInfoCalls).toBe(2);
+  });
+
+  test('marks image installation failed when the post-install model refresh fails and allows retry', async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
+    await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    const upstream = await startHttpServer({
+      objectInfo: Object.fromEntries(
+        REQUIRED_IMAGE_COMFY_NODES.map((node) => [node, {}]),
+      ),
+      onObjectInfo: (call) =>
+        call === 2
+          ? { status: 503, body: 'Qwen model refresh unavailable' }
+          : undefined,
+    });
+    cleanups.push(() => upstream.close());
+    const download = vi.spyOn(downloadModule, 'downloadFile').mockImplementation(
+      async (options) => ({
+        resumed: false,
+        bytes: options.expectedSize,
+        sha256: options.expectedSha256,
+      }),
+    );
+    cleanups.push(() => download.mockRestore());
+    const services = await createAppServices({
+      dataDirectory,
+      comfyBaseUrl: upstream.baseUrl,
+    });
+    cleanups.push(() => services.close());
+
+    await expect(services.components.install('image')).rejects.toThrow(
+      /HTTP 503.*Qwen model refresh unavailable/,
+    );
+    expect(services.components.getState('image')).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/HTTP 503.*Qwen model refresh unavailable/),
+      active: false,
+    });
+
+    await expect(services.components.install('image')).resolves.toMatchObject({
+      status: 'ready',
+      error: null,
+      active: false,
+    });
+    expect(upstream.objectInfoCalls).toBe(4);
   });
 
   test('fails image runtime inspection before downloading without changing H3 health', async () => {
