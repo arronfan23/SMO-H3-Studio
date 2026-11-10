@@ -41,6 +41,33 @@ export const REQUIRED_COMFY_NODES = [
   'MiniMaxH3ReferenceToVideo',
 ] as const;
 
+export const REQUIRED_IMAGE_COMFY_NODES = [
+  'TextEncodeQwenImage21',
+  'QwenImage21Cache',
+  'SaveImageAdvanced',
+] as const;
+
+export interface ImageRuntimeInspection {
+  missingNodes: string[];
+  error: string | null;
+}
+
+/** Image support is optional and must not change the base H3 health verdict. */
+export function inspectImageRuntime(
+  objectInfo: Record<string, unknown>,
+): ImageRuntimeInspection {
+  const missingNodes = REQUIRED_IMAGE_COMFY_NODES.filter(
+    (node) => !Object.hasOwn(objectInfo, node),
+  );
+  return {
+    missingNodes: [...missingNodes],
+    error:
+      missingNodes.length > 0
+        ? '运行时需要支持 Qwen Image 2.1'
+        : null,
+  };
+}
+
 function requiredComfyNodesFor(config: EnvironmentConfig): string[] {
   const acceleration = selectSparkAcceleration(config);
   const sparkNode =

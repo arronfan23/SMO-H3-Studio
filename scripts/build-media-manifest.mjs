@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -7,6 +7,12 @@ const SPEECH_REPOSITORIES = [
   'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice',
   'Qwen/Qwen3-TTS-12Hz-0.6B-Base',
   'Qwen/Qwen3-TTS-Tokenizer-12Hz',
+];
+const IMAGE_REPOSITORY = 'Comfy-Org/Qwen-Image-2.1';
+const IMAGE_MODEL_PATHS = [
+  'diffusion_models/qwen_image_2.1_int8_convrot.safetensors',
+  'text_encoders/qwen3vl_8b_int8_convrot.safetensors',
+  'vae/qwen_image_2.1_vae_bf16.safetensors',
 ];
 const UV_REPOSITORY = 'astral-sh/uv';
 const UV_VERSION = '0.11.13';
@@ -28,6 +34,9 @@ const MAXIMUM_UNTRACKED_FILE_BYTES = 32 * 1024 * 1024;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAXIMUM_REDIRECTS = 20;
 const SMALL_FILE_NETWORK_ATTEMPTS = 3;
+const HUGGINGFACE_ORIGIN = 'https://huggingface.co';
+const HUGGINGFACE_METADATA_MIRROR = 'https://hf-mirror.com';
+const METADATA_TIMEOUT_MS = 30_000;
 
 class NonTransientHttpError extends Error {}
 
@@ -67,7 +76,10 @@ function nextPageUrl(linkHeader) {
     const match = /^\s*<([^>]+)>\s*;\s*rel="?next"?\s*$/i.exec(part);
     if (!match) continue;
     const url = new URL(match[1]);
-    if (url.protocol !== 'https:' || url.hostname !== 'huggingface.co') {
+    if (
+      url.protocol !== 'https:' ||
+      !['huggingface.co', 'hf-mirror.com'].includes(url.hostname)
+    ) {
       throw new Error('Hugging Face returned an unsafe pagination URL');
     }
     return url.href;
@@ -75,25 +87,57 @@ function nextPageUrl(linkHeader) {
   return null;
 }
 
-async function fetchRepositoryRevision(repository, fetchImpl) {
+function metadataAttemptInit(init, timeoutMs) {
+  const { signal: externalSignal, ...requestInit } = init;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return {
+    ...requestInit,
+    signal: externalSignal
+      ? AbortSignal.any([externalSignal, timeoutSignal])
+      : timeoutSignal,
+  };
+}
+
+async function fetchRepositoryMetadata(url, init, fetchImpl, timeoutMs) {
+  const externalSignal = init.signal;
+  const request = async (requestUrl) => {
+    externalSignal?.throwIfAborted();
+    const response = await fetchImpl(requestUrl, metadataAttemptInit(init, timeoutMs));
+    if (response.status === 429 || response.status >= 500) {
+      discardResponse(response);
+      throw new Error(`Hugging Face metadata request failed for ${requestUrl}: HTTP ${response.status}`);
+    }
+    if (!response.ok) return { response, metadata: undefined };
+    return { response, metadata: await response.json() };
+  };
+  try {
+    return await request(url);
+  } catch (error) {
+    externalSignal?.throwIfAborted();
+    if (!url.startsWith(`${HUGGINGFACE_ORIGIN}/api/models/`)) throw error;
+    const mirrorUrl = `${HUGGINGFACE_METADATA_MIRROR}${url.slice(HUGGINGFACE_ORIGIN.length)}`;
+    return request(mirrorUrl);
+  }
+}
+
+async function fetchRepositoryRevision(repository, fetchImpl, options = {}) {
   const url = `https://huggingface.co/api/models/${repository}`;
-  const response = await fetchImpl(url, {
+  const { response, metadata } = await fetchRepositoryMetadata(url, {
     headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(30_000),
-  });
+    signal: options.signal,
+  }, fetchImpl, options.metadataTimeoutMs ?? METADATA_TIMEOUT_MS);
   if (!response.ok) {
     throw new Error(
       `Hugging Face repository info request failed for ${repository}: HTTP ${response.status}`,
     );
   }
-  const metadata = await response.json();
   if (typeof metadata?.sha !== 'string' || !REVISION_PATTERN.test(metadata.sha)) {
     throw new Error(`Hugging Face repository info has no full commit SHA for ${repository}`);
   }
   return metadata.sha;
 }
 
-async function fetchRepositoryTree(repository, revision, fetchImpl) {
+async function fetchRepositoryTree(repository, revision, fetchImpl, options = {}) {
   const files = [];
   const visited = new Set();
   let url =
@@ -102,16 +146,15 @@ async function fetchRepositoryTree(repository, revision, fetchImpl) {
   while (url) {
     if (visited.has(url)) throw new Error(`Hugging Face pagination loop for ${repository}`);
     visited.add(url);
-    const response = await fetchImpl(url, {
+    const { response, metadata: entries } = await fetchRepositoryMetadata(url, {
       headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(30_000),
-    });
+      signal: options.signal,
+    }, fetchImpl, options.metadataTimeoutMs ?? METADATA_TIMEOUT_MS);
     if (!response.ok) {
       throw new Error(
         `Hugging Face tree request failed for ${repository}: HTTP ${response.status}`,
       );
     }
-    const entries = await response.json();
     if (!Array.isArray(entries)) {
       throw new Error(`Hugging Face tree response is not an array for ${repository}`);
     }
@@ -208,7 +251,13 @@ async function hashSmallFile(repository, revision, entry, fetchImpl) {
   return createHash('sha256').update(data).digest('hex');
 }
 
-async function buildFile(repository, revision, entry, fetchImpl) {
+async function buildFile(
+  repository,
+  revision,
+  entry,
+  fetchImpl,
+  { outputPath, requireLfs = false } = {},
+) {
   if (
     typeof entry?.path !== 'string' ||
     entry.path.length === 0 ||
@@ -219,13 +268,16 @@ async function buildFile(repository, revision, entry, fetchImpl) {
   }
   assertPositiveSafeInteger(entry.size, `${repository}/${entry.path} size`);
   const publishedSha256 = entry.lfs?.oid ?? entry.lfs?.sha256;
+  if (requireLfs && !publishedSha256) {
+    throw new Error(`${repository}/${entry.path} must provide an LFS SHA256 digest`);
+  }
   const sha256 = publishedSha256
     ? assertSha256(publishedSha256.toLowerCase(), `${repository}/${entry.path}`)
     : await hashSmallFile(repository, revision, entry, fetchImpl);
 
   return {
     url: resolveUrl(repository, revision, entry.path),
-    path: `${repository.split('/')[1]}/${entry.path}`,
+    path: outputPath ?? `${repository.split('/')[1]}/${entry.path}`,
     size: entry.size,
     sha256,
     source: repository,
@@ -277,17 +329,68 @@ export async function buildUvRuntime(fetchImpl) {
   };
 }
 
-export async function buildMediaComponentManifest({ component, fetchImpl = fetch }) {
+export async function buildMediaComponentManifest({
+  component,
+  fetchImpl = fetch,
+  signal,
+  metadataTimeoutMs,
+}) {
+  const metadataOptions = { signal, metadataTimeoutMs };
+  if (component === 'image') {
+    const revision = await fetchRepositoryRevision(
+      IMAGE_REPOSITORY,
+      fetchImpl,
+      metadataOptions,
+    );
+    const tree = await fetchRepositoryTree(
+      IMAGE_REPOSITORY,
+      revision,
+      fetchImpl,
+      metadataOptions,
+    );
+    const entries = new Map(
+      tree
+        .filter((entry) => IMAGE_MODEL_PATHS.includes(entry.path))
+        .map((entry) => [entry.path, entry]),
+    );
+    const files = [];
+    for (const path of IMAGE_MODEL_PATHS) {
+      const entry = entries.get(path);
+      if (!entry) throw new Error(`The image component is missing ${IMAGE_REPOSITORY}/${path}`);
+      files.push(
+        await buildFile(IMAGE_REPOSITORY, revision, entry, fetchImpl, {
+          outputPath: path,
+          requireLfs: true,
+        }),
+      );
+    }
+    const totalBytes = files.reduce((total, file) => total + file.size, 0);
+    if (!Number.isSafeInteger(totalBytes)) {
+      throw new Error('Image component total bytes must be a safe integer');
+    }
+    return {
+      version: 1,
+      components: {
+        image: {
+          id: 'image',
+          target: 'comfy-models',
+          revisions: { [IMAGE_REPOSITORY]: revision },
+          files,
+          totalBytes,
+        },
+      },
+    };
+  }
   if (component !== 'speech') {
-    throw new Error('Only the speech media component has a manifest generator');
+    throw new Error('Only the speech and image media components have manifest generators');
   }
 
   const files = [];
   const revisions = {};
   for (const repository of SPEECH_REPOSITORIES) {
-    const revision = await fetchRepositoryRevision(repository, fetchImpl);
+    const revision = await fetchRepositoryRevision(repository, fetchImpl, metadataOptions);
     revisions[repository] = revision;
-    const tree = await fetchRepositoryTree(repository, revision, fetchImpl);
+    const tree = await fetchRepositoryTree(repository, revision, fetchImpl, metadataOptions);
     const selected = tree
       .filter((entry) => isRuntimeFile(entry.path))
       .sort((a, b) => a.path.localeCompare(b.path, 'en'));
@@ -318,6 +421,7 @@ export async function buildMediaComponentManifest({ component, fetchImpl = fetch
     components: {
       speech: {
         id: 'speech',
+        target: 'component',
         revisions,
         files,
         totalBytes,
@@ -337,13 +441,13 @@ function parseArguments(argv) {
       output = argv[++index];
     } else {
       throw new Error(
-        'Usage: node scripts/build-media-manifest.mjs --component speech [--output <manifest.json>]',
+        'Usage: node scripts/build-media-manifest.mjs --component speech|image [--output <manifest.json>]',
       );
     }
   }
-  if (component !== 'speech') {
+  if (component !== 'speech' && component !== 'image') {
     throw new Error(
-      'Usage: node scripts/build-media-manifest.mjs --component speech [--output <manifest.json>]',
+      'Usage: node scripts/build-media-manifest.mjs --component speech|image [--output <manifest.json>]',
     );
   }
   return { component, output };
@@ -351,14 +455,27 @@ function parseArguments(argv) {
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
-  const manifest = await buildMediaComponentManifest({ component: options.component });
   const outputPath = options.output
     ? resolve(options.output)
     : fileURLToPath(new URL('../resources/environment/media-components.json', import.meta.url));
+  const generated = await buildMediaComponentManifest({ component: options.component });
+  let manifest = generated;
+  try {
+    const existing = JSON.parse(await readFile(outputPath, 'utf8'));
+    manifest = {
+      ...generated,
+      components: {
+        ...(existing.components ?? {}),
+        ...generated.components,
+      },
+    };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
   await mkdir(dirname(outputPath), { recursive: true });
   await writeFile(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  const { files, totalBytes } = manifest.components.speech;
-  console.log(`speech: ${files.length} files, ${totalBytes} bytes`);
+  const { files, totalBytes } = manifest.components[options.component];
+  console.log(`${options.component}: ${files.length} files, ${totalBytes} bytes`);
   console.log(outputPath);
 }
 

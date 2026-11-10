@@ -1,5 +1,5 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import defaultManifest from '../../resources/environment/media-components.json';
 import type {
@@ -15,6 +15,7 @@ import {
   modelDownloadUrls,
   runtimeDownloadUrls,
 } from './download';
+import type { ImageRuntimeInspection } from './environment-setup';
 
 const WINDOWS_DEVICE_NAME_PATTERN =
   /^(?:CONIN\$|CONOUT\$|CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])(?:[ .]|$)/i;
@@ -125,6 +126,7 @@ const mediaComponentFileSchema = z
 const mediaComponentDefinitionSchema = z
   .object({
     id: z.enum(['speech', 'image']),
+    target: z.enum(['component', 'comfy-models']).default('component'),
     revisions: z.record(
       z.string().trim().min(1),
       z.string().regex(/^[a-f0-9]{40}$/, 'Revision must be a full commit SHA'),
@@ -228,12 +230,22 @@ export const mediaComponentManifestSchema = z
     }
   });
 
-export function parseMediaComponentManifest(input: unknown): MediaComponentManifest {
-  return mediaComponentManifestSchema.parse(input);
+export function parseMediaComponentManifest(input: unknown): ParsedMediaComponentManifest {
+  return mediaComponentManifestSchema.parse(input) as ParsedMediaComponentManifest;
 }
+
+export type MediaComponentTarget = 'component' | 'comfy-models';
+export type TargetedMediaComponentDefinition = MediaComponentDefinition & {
+  target: MediaComponentTarget;
+};
+export type ParsedMediaComponentManifest = Omit<MediaComponentManifest, 'components'> & {
+  components: Partial<Record<MediaComponentId, TargetedMediaComponentDefinition>>;
+};
 
 export interface MediaComponentServiceOptions {
   dataDirectory: string;
+  modelDirectory?: string | (() => string);
+  inspectImageRuntime?: () => ImageRuntimeInspection | Promise<ImageRuntimeInspection>;
   manifest?: unknown;
   downloadFile?: typeof defaultDownloadFile;
 }
@@ -262,9 +274,10 @@ function initialState(
 }
 
 export class MediaComponentService {
-  private readonly manifest: MediaComponentManifest;
+  private readonly manifest: ParsedMediaComponentManifest;
   private readonly states: Record<MediaComponentId, MediaComponentState>;
   private readonly flights = new Map<MediaComponentId, InstallFlight>();
+  private readyModelDirectory: string | undefined;
 
   constructor(private readonly options: MediaComponentServiceOptions) {
     this.manifest = parseMediaComponentManifest(options.manifest ?? defaultManifest);
@@ -275,6 +288,28 @@ export class MediaComponentService {
   }
 
   getState(id: MediaComponentId): MediaComponentState {
+    const component = this.manifest.components[id];
+    if (
+      id === 'image' &&
+      component?.target === 'comfy-models' &&
+      this.states[id].status === 'ready'
+    ) {
+      const currentModelDirectory = this.currentModelDirectory();
+      if (
+        this.readyModelDirectory === undefined ||
+        !currentModelDirectory ||
+        this.modelDirectoryKey(currentModelDirectory) !== this.readyModelDirectory
+      ) {
+        this.readyModelDirectory = undefined;
+        this.setState(id, {
+          status: 'missing',
+          downloadedBytes: 0,
+          currentFile: null,
+          error: null,
+          active: false,
+        });
+      }
+    }
     return { ...this.states[id] };
   }
 
@@ -289,6 +324,7 @@ export class MediaComponentService {
 
     const flight = { controller: new AbortController() };
     this.flights.set(id, flight);
+    if (id === 'image') this.readyModelDirectory = undefined;
     this.setState(id, {
       status: 'installing',
       downloadedBytes: 0,
@@ -330,8 +366,57 @@ export class MediaComponentService {
     this.states[id] = { ...this.states[id], ...state, id };
   }
 
-  private destination(id: MediaComponentId, file: MediaComponentFile): string {
-    const root = resolve(this.options.dataDirectory, 'components', id, 'models');
+  private currentModelDirectory(): string | undefined {
+    const configured = this.options.modelDirectory;
+    return typeof configured === 'function' ? configured() : configured;
+  }
+
+  private modelDirectoryKey(modelDirectory: string): string {
+    return resolve(modelDirectory).toLowerCase();
+  }
+
+  private requireInstallModelDirectory(
+    component: TargetedMediaComponentDefinition,
+  ): string | undefined {
+    if (component.target !== 'comfy-models') return undefined;
+    const modelDirectory = this.currentModelDirectory();
+    if (!modelDirectory || basename(modelDirectory) !== 'diffusion_models') {
+      throw new Error(
+        'modelDirectory must end with diffusion_models for comfy-models media components',
+      );
+    }
+    return modelDirectory;
+  }
+
+  private async inspectRuntime(
+    component: TargetedMediaComponentDefinition,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (component.id !== 'image') return;
+    const inspect = this.options.inspectImageRuntime;
+    if (!inspect) {
+      throw new Error('Image runtime inspection is required before the component can be ready');
+    }
+    signal.throwIfAborted();
+    const inspection = await inspect();
+    signal.throwIfAborted();
+    if (inspection.missingNodes.length > 0) {
+      throw new Error(inspection.error ?? '运行时需要支持 Qwen Image 2.1');
+    }
+  }
+
+  private destination(
+    component: TargetedMediaComponentDefinition,
+    file: MediaComponentFile,
+    modelDirectory: string | undefined,
+  ): string {
+    let root: string;
+    if (component.target === 'comfy-models') {
+      if (!modelDirectory) throw new Error('Image installation model root was not captured');
+      root = resolve(dirname(modelDirectory));
+    } else {
+      root = resolve(this.options.dataDirectory, 'components', component.id, 'models');
+    }
     const destination = resolve(root, ...file.path.split('/'));
     const child = relative(root, destination);
     if (
@@ -346,17 +431,19 @@ export class MediaComponentService {
   }
 
   private async runInstall(
-    component: MediaComponentDefinition,
+    component: TargetedMediaComponentDefinition,
     flight: InstallFlight,
   ): Promise<MediaComponentState> {
     const { id, files, totalBytes } = component;
     const { signal } = flight.controller;
+    const modelDirectory = this.requireInstallModelDirectory(component);
+    await this.inspectRuntime(component, signal);
     let completedBytes = 0;
     let displayedBytes = 0;
 
     for (const file of files) {
       signal.throwIfAborted();
-      const destination = this.destination(id, file);
+      const destination = this.destination(component, file, modelDirectory);
       this.setState(id, { currentFile: file.path });
       const hostname = new URL(file.url).hostname;
       const sources =
@@ -410,6 +497,11 @@ export class MediaComponentService {
     }
 
     signal.throwIfAborted();
+    if (component.id === 'image') {
+      this.readyModelDirectory = modelDirectory
+        ? this.modelDirectoryKey(modelDirectory)
+        : undefined;
+    }
     this.setState(id, {
       status: 'ready',
       downloadedBytes: totalBytes,

@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { app, dialog } from 'electron';
@@ -24,10 +24,12 @@ import { ComfyProcessManager } from '../../src/main/comfy-process';
 import {
   EnvironmentSetupService,
   REQUIRED_COMFY_NODES,
+  REQUIRED_IMAGE_COMFY_NODES,
 } from '../../src/main/environment-setup';
 import { detectHardware } from '../../src/main/hardware';
 import type { EnvironmentBackendInput } from '../../src/main/environment-setup';
 import type { EnvironmentPaths } from '../../src/shared/environment';
+import * as downloadModule from '../../src/main/download';
 
 const { protocolRegisterFileProtocol, electronAppState, legacyEnvironment } =
   vi.hoisted(() => ({
@@ -82,10 +84,16 @@ async function useDataDirectory(): Promise<string> {
   return directory;
 }
 
-async function startHttpServer(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+async function startHttpServer(
+  options: { objectInfo?: Record<string, unknown> } = {},
+): Promise<{ baseUrl: string; close: () => Promise<void> }> {
   const server: Server = createServer((request, response) => {
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ system: { os: 'test' }, devices: [] }));
+    response.end(JSON.stringify(
+      request.url === '/object_info' && options.objectInfo
+        ? options.objectInfo
+        : { system: { os: 'test' }, devices: [] },
+    ));
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -127,6 +135,33 @@ function mockHardware(gpu = 'Env GPU') {
     cudaComputeCapability: '12.0',
     freeDiskGiB: 512,
   });
+}
+
+function writeMediaEnvironmentConfig(
+  dataDirectory: string,
+  modelDirectory: string,
+): Promise<void> {
+  return writeFile(
+    join(dataDirectory, 'environment.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      runtimeId: 'sm120',
+      runtimeRoot: join(dataDirectory, 'runtime', 'sm120'),
+      modelDirectory,
+      outputDirectory: join(dataDirectory, 'output'),
+      profile: 'balanced-16gb',
+      hardwareFingerprint: {
+        gpu: 'Recorded GPU',
+        vramGiB: 16,
+        ramGiB: 64,
+        cudaComputeCapability: '12.0',
+      },
+      manifestVersion: '1',
+      status: 'ready',
+      createdAt: '2026-01-01T00:00:00+08:00',
+      updatedAt: '2026-01-01T00:00:00+08:00',
+    }),
+  );
 }
 
 describe('createAppServices defaults', () => {
@@ -413,6 +448,108 @@ describe('createAppServices environment integration', () => {
       undefined,
       configOutputDirectory,
     );
+  });
+
+  test('installs image models under the active ComfyUI root and speech under its component root', async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
+    await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    const upstream = await startHttpServer({
+      objectInfo: Object.fromEntries(
+        REQUIRED_IMAGE_COMFY_NODES.map((node) => [node, {}]),
+      ),
+    });
+    cleanups.push(() => upstream.close());
+    const destinations: string[] = [];
+    const download = vi.spyOn(downloadModule, 'downloadFile').mockImplementation(
+      async (options) => {
+        destinations.push(options.destination);
+        return {
+          resumed: false,
+          bytes: options.expectedSize,
+          sha256: options.expectedSha256,
+        };
+      },
+    );
+    cleanups.push(() => download.mockRestore());
+    const services = await createAppServices({
+      dataDirectory,
+      comfyBaseUrl: upstream.baseUrl,
+    });
+    cleanups.push(() => services.close());
+
+    await services.components.install('image');
+
+    const imageDestinations = destinations.slice();
+    expect(imageDestinations).toHaveLength(3);
+    for (const destination of imageDestinations) {
+      expect(destination.startsWith(`${dirname(modelDirectory)}\\`)).toBe(true);
+      expect(destination.startsWith(join(dataDirectory, 'components', 'image', 'models'))).toBe(
+        false,
+      );
+    }
+    expect(imageDestinations[0]).toBe(
+      join(
+        dirname(modelDirectory),
+        'diffusion_models',
+        'qwen_image_2.1_int8_convrot.safetensors',
+      ),
+    );
+
+    await services.components.install('speech');
+
+    const speechDestinations = destinations.slice(imageDestinations.length);
+    expect(speechDestinations).toHaveLength(27);
+    for (const destination of speechDestinations) {
+      expect(destination.startsWith(join(dataDirectory, 'components', 'speech', 'models'))).toBe(
+        true,
+      );
+    }
+  });
+
+  test('fails image runtime inspection before downloading without changing H3 health', async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
+    await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    const objectInfo = Object.fromEntries(
+      [
+        ...REQUIRED_COMFY_NODES,
+        'MiniMaxH3SparkAttentionSM120',
+        ...REQUIRED_IMAGE_COMFY_NODES,
+      ].map((node) => [node, {}]),
+    );
+    delete objectInfo.QwenImage21Cache;
+    const upstream = await startHttpServer({ objectInfo });
+    cleanups.push(() => upstream.close());
+    const download = vi.spyOn(downloadModule, 'downloadFile').mockImplementation(
+      async (options) => ({
+        resumed: false,
+        bytes: options.expectedSize,
+        sha256: options.expectedSha256,
+      }),
+    );
+    cleanups.push(() => download.mockRestore());
+    const services = await createAppServices({
+      dataDirectory,
+      comfyBaseUrl: upstream.baseUrl,
+    });
+    cleanups.push(() => services.close());
+
+    await expect(services.environment.validate()).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+    });
+    await expect(services.components.install('image')).rejects.toThrow(
+      /Qwen Image 2\.1/,
+    );
+
+    expect(download).not.toHaveBeenCalled();
+    expect(services.components.getState('image')).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/Qwen Image 2\.1/),
+      active: false,
+    });
+    expect((await services.environment.getState()).healthy).toBe(true);
   });
 
   test('uses the Electron userData directory when the legacy data root is absent', async () => {

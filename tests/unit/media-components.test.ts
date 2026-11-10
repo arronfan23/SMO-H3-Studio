@@ -34,6 +34,7 @@ import type {
   MediaComponentManifest,
   MediaComponentState,
 } from '../../src/shared/media-components';
+import type { ImageRuntimeInspection } from '../../src/main/environment-setup';
 
 type Fetch = typeof globalThis.fetch;
 type DownloadFile = typeof realDownloadFile;
@@ -43,6 +44,12 @@ type EditableManifest = any;
 const FIRST_REPOSITORY = 'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice';
 const SECOND_REPOSITORY = 'Qwen/Qwen3-TTS-12Hz-0.6B-Base';
 const TOKENIZER_REPOSITORY = 'Qwen/Qwen3-TTS-Tokenizer-12Hz';
+const IMAGE_REPOSITORY = 'Comfy-Org/Qwen-Image-2.1';
+const IMAGE_MODEL_PATHS = [
+  'diffusion_models/qwen_image_2.1_int8_convrot.safetensors',
+  'text_encoders/qwen3vl_8b_int8_convrot.safetensors',
+  'vae/qwen_image_2.1_vae_bf16.safetensors',
+] as const;
 const UV_REPOSITORY = 'astral-sh/uv';
 const UV_VERSION = '0.11.13';
 const UV_ASSET_NAME = 'uv-x86_64-pc-windows-msvc.zip';
@@ -141,6 +148,10 @@ function makeManifest(): EditableManifest {
 function makeService(
   manifest: unknown = makeManifest(),
   downloadFile?: DownloadFile,
+  options: {
+    modelDirectory?: string | (() => string);
+    inspectImageRuntime?: () => Promise<ImageRuntimeInspection>;
+  } = {},
 ): { service: MediaComponentService; download: ReturnType<typeof vi.fn> } {
   const download = vi.fn<DownloadFile>(async (options: DownloadFileOptions) =>
     (downloadFile ?? realDownloadFile)({
@@ -152,6 +163,10 @@ function makeService(
     dataDirectory,
     manifest,
     downloadFile: download,
+    modelDirectory: options.modelDirectory,
+    inspectImageRuntime:
+      options.inspectImageRuntime ??
+      (async () => ({ missingNodes: [], error: null })),
   });
   return { service, download };
 }
@@ -218,14 +233,27 @@ afterEach(async () => {
 });
 
 describe('media component manifest', () => {
-  test('parses the generated speech manifest without adding image entries', () => {
+  test('parses speech and image manifests with only the standard image models', () => {
     const manifest = parseMediaComponentManifest(rawManifest);
     const files = manifest.components.speech?.files ?? [];
     const revisions = manifest.components.speech?.revisions ?? {};
+    const image = manifest.components.image;
 
     expect(manifest.version).toBe(1);
     expect(files.length).toBeGreaterThan(0);
-    expect(manifest.components.image).toBeUndefined();
+    expect(manifest.components.speech).toMatchObject({ target: 'component' });
+    expect(image).toMatchObject({
+      id: 'image',
+      target: 'comfy-models',
+      revisions: { [IMAGE_REPOSITORY]: expect.stringMatching(/^[a-f0-9]{40}$/) },
+    });
+    expect(image?.files.map((file) => file.path)).toEqual(IMAGE_MODEL_PATHS);
+    expect(image?.files.every((file) => file.source === IMAGE_REPOSITORY)).toBe(true);
+    expect(image?.files.every((file) => file.sha256.match(/^[a-f0-9]{64}$/))).toBe(true);
+    expect(image?.files.some((file) => /prompt|enhancer/i.test(file.path))).toBe(false);
+    expect(image?.totalBytes).toBe(
+      image?.files.reduce((total, file) => total + file.size, 0),
+    );
     expect(new Set(files.map((file) => file.source))).toEqual(
       new Set([FIRST_REPOSITORY, SECOND_REPOSITORY, TOKENIZER_REPOSITORY, UV_REPOSITORY]),
     );
@@ -355,6 +383,134 @@ describe('media component manifest', () => {
 });
 
 describe('MediaComponentService', () => {
+  test('installs image files beneath the current ComfyUI model root', async () => {
+    const modelDirectory = join(directory, 'current-environment', 'models', 'diffusion_models');
+    const imagePath = IMAGE_MODEL_PATHS[0];
+    payloads[`/${imagePath}`] = secondData;
+    const manifest = makeManifest();
+    manifest.components.image = {
+      id: 'image',
+      target: 'comfy-models',
+      revisions: revisionsFor(SECOND_REPOSITORY),
+      files: [makeFile(imagePath, secondData, SECOND_REPOSITORY)],
+      totalBytes: secondData.length,
+    };
+    const { service, download } = makeService(manifest, undefined, { modelDirectory });
+
+    await service.install('image');
+
+    const imageDestination = join(
+      dirname(modelDirectory),
+      ...imagePath.split('/'),
+    );
+    expect(download).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: imageDestination }),
+    );
+    expect(await readFile(imageDestination)).toEqual(secondData);
+    expect(await exists(destination(imagePath, 'image'))).toBe(false);
+
+    await service.install('speech');
+    expect(await readFile(destination('CustomVoice/config.json'))).toEqual(firstData);
+  });
+
+  test('rejects an image model directory that is not diffusion_models before writing', async () => {
+    const manifest = makeManifest();
+    manifest.components.image = {
+      id: 'image',
+      target: 'comfy-models',
+      revisions: revisionsFor(SECOND_REPOSITORY),
+      files: [makeFile(IMAGE_MODEL_PATHS[0], secondData, SECOND_REPOSITORY)],
+      totalBytes: secondData.length,
+    };
+    const { service, download } = makeService(manifest, undefined, {
+      modelDirectory: join(directory, 'current-environment', 'models'),
+    });
+
+    await expect(service.install('image')).rejects.toThrow(/diffusion_models/i);
+    expect(download).not.toHaveBeenCalled();
+  });
+
+  test('pins one image model root for two files when the environment switches during install', async () => {
+    const firstModelDirectory = join(directory, 'environment-a', 'models', 'diffusion_models');
+    const secondModelDirectory = join(directory, 'environment-b', 'models', 'diffusion_models');
+    let currentModelDirectory = firstModelDirectory;
+    const files = IMAGE_MODEL_PATHS.slice(0, 2).map((path, index) => {
+      const data = index === 0 ? firstData : secondData;
+      payloads[`/${path}`] = data;
+      return makeFile(path, data, SECOND_REPOSITORY);
+    });
+    const manifest = makeManifest();
+    manifest.components.image = {
+      id: 'image',
+      target: 'comfy-models',
+      revisions: revisionsFor(SECOND_REPOSITORY),
+      files,
+      totalBytes: firstData.length + secondData.length,
+    };
+    const destinations: string[] = [];
+    const download = vi.fn<DownloadFile>(async (options) => {
+      destinations.push(options.destination);
+      const receipt = await realDownloadFile({ ...options, fetch: transport });
+      if (destinations.length === 1) currentModelDirectory = secondModelDirectory;
+      return receipt;
+    });
+    const { service } = makeService(manifest, download, {
+      modelDirectory: () => currentModelDirectory,
+    });
+
+    const state = await service.install('image');
+
+    expect(destinations).toEqual(
+      files.map((file) =>
+        join(dirname(firstModelDirectory), ...file.path.split('/')),
+      ),
+    );
+    expect(state.status).toBe('missing');
+    currentModelDirectory = firstModelDirectory;
+    expect(service.getState('image').status).toBe('missing');
+  });
+
+  test('invalidates image ready after model root changes without affecting speech', async () => {
+    const firstModelDirectory = join(directory, 'environment-a', 'models', 'diffusion_models');
+    const secondModelDirectory = join(directory, 'environment-b', 'models', 'diffusion_models');
+    let currentModelDirectory = firstModelDirectory;
+    const imagePath = IMAGE_MODEL_PATHS[0];
+    payloads[`/${imagePath}`] = secondData;
+    const manifest = makeManifest();
+    manifest.components.image = {
+      id: 'image',
+      target: 'comfy-models',
+      revisions: revisionsFor(SECOND_REPOSITORY),
+      files: [makeFile(imagePath, secondData, SECOND_REPOSITORY)],
+      totalBytes: secondData.length,
+    };
+    const { service } = makeService(manifest, undefined, {
+      modelDirectory: () => currentModelDirectory,
+    });
+
+    await expect(service.install('image')).resolves.toMatchObject({ status: 'ready' });
+    await expect(service.install('speech')).resolves.toMatchObject({ status: 'ready' });
+
+    currentModelDirectory = secondModelDirectory;
+    expect(service.getState('image')).toMatchObject({
+      status: 'missing',
+      downloadedBytes: 0,
+      active: false,
+    });
+    expect(service.getState('speech').status).toBe('ready');
+
+    currentModelDirectory = firstModelDirectory;
+    expect(service.getState('image').status).toBe('missing');
+    expect(service.getState('speech').status).toBe('ready');
+
+    await expect(service.install('image')).resolves.toMatchObject({ status: 'ready' });
+    currentModelDirectory = secondModelDirectory;
+    expect(service.getState('image').status).toBe('missing');
+    currentModelDirectory = firstModelDirectory;
+    expect(service.getState('image').status).toBe('missing');
+    expect(service.getState('speech').status).toBe('ready');
+  });
+
   test('falls back from the Hugging Face mirror without changing verified downloads', async () => {
     const manifest = makeManifest();
     const originalUrl =
@@ -1162,7 +1318,11 @@ describe('media component manifest generator', () => {
   const repositories = [FIRST_REPOSITORY, SECOND_REPOSITORY, TOKENIZER_REPOSITORY];
   type Failure = 'type' | 'timeout' | 'body';
 
-  async function generate(fetchImpl: Fetch): Promise<MediaComponentManifest> {
+  async function generate(
+    fetchImpl: Fetch,
+    component: 'speech' | 'image' = 'speech',
+    options: { metadataTimeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<MediaComponentManifest> {
     const generatorUrl = pathToFileURL(
       resolve('scripts/build-media-manifest.mjs'),
     ).href;
@@ -1170,9 +1330,11 @@ describe('media component manifest generator', () => {
       buildMediaComponentManifest: (options: {
         component: string;
         fetchImpl: Fetch;
+        metadataTimeoutMs?: number;
+        signal?: AbortSignal;
       }) => Promise<MediaComponentManifest>;
     };
-    return buildMediaComponentManifest({ component: 'speech', fetchImpl });
+    return buildMediaComponentManifest({ component, fetchImpl, ...options });
   }
 
   function createHarness(
@@ -1440,5 +1602,158 @@ describe('media component manifest generator', () => {
     expect(
       harness.requestedUrls.filter((url) => url.includes('/resolve/')),
     ).toHaveLength(1);
+  });
+
+  test('image generator pins three LFS models through metadata mirror fallback', async () => {
+    const revision = 'a'.repeat(40);
+    const requestedUrls: string[] = [];
+    const requestSignals: AbortSignal[] = [];
+    let mirrorSignalAbortedAtRequest: boolean | undefined;
+    const entries = IMAGE_MODEL_PATHS.map((path, index) => ({
+      type: 'file',
+      path,
+      size: 1000 + index,
+      lfs: { oid: sha256(path) },
+    }));
+    const fetchMock: Fetch = async (input, init) => {
+      const url = new URL(
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+      );
+      requestedUrls.push(url.href);
+      if (url.href === `https://huggingface.co/api/models/${IMAGE_REPOSITORY}`) {
+        const signal = init?.signal;
+        if (!signal) throw new Error('Official request has no abort signal');
+        requestSignals.push(signal);
+        await new Promise<never>((_resolve, reject) => {
+          if (signal.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      if (url.href === `https://hf-mirror.com/api/models/${IMAGE_REPOSITORY}`) {
+        const signal = init?.signal;
+        if (!signal) throw new Error('Mirror request has no abort signal');
+        requestSignals.push(signal);
+        mirrorSignalAbortedAtRequest = signal.aborted;
+        return Response.json({ sha: revision });
+      }
+      if (
+        url.href ===
+        `https://huggingface.co/api/models/${IMAGE_REPOSITORY}/tree/${revision}?recursive=true`
+      ) {
+        throw new TypeError('official tree connection timeout');
+      }
+      if (
+        url.href ===
+        `https://hf-mirror.com/api/models/${IMAGE_REPOSITORY}/tree/${revision}?recursive=true`
+      ) {
+        return Response.json([
+          ...entries,
+          {
+            type: 'file',
+            path: 'text_encoders/qwen3vl_32b_prompt_enhancer.safetensors',
+            size: 9999,
+            lfs: { oid: 'f'.repeat(64) },
+          },
+        ]);
+      }
+      throw new Error(`Unexpected image generator request: ${url.href}`);
+    };
+
+    const manifest = await generate(fetchMock, 'image', { metadataTimeoutMs: 15 });
+
+    expect(manifest.components.image).toMatchObject({
+      id: 'image',
+      target: 'comfy-models',
+      revisions: { [IMAGE_REPOSITORY]: revision },
+      totalBytes: 3003,
+    });
+    expect(manifest.components.image?.files.map((file) => file.path)).toEqual(
+      IMAGE_MODEL_PATHS,
+    );
+    expect(manifest.components.image?.files.map((file) => file.size)).toEqual([
+      1000, 1001, 1002,
+    ]);
+    expect(manifest.components.image?.files.map((file) => file.sha256)).toEqual(
+      IMAGE_MODEL_PATHS.map((path) => sha256(path)),
+    );
+    expect(requestSignals).toHaveLength(2);
+    expect(requestSignals[0]).not.toBe(requestSignals[1]);
+    expect(requestSignals[0].aborted).toBe(true);
+    expect(mirrorSignalAbortedAtRequest).toBe(false);
+    expect(requestedUrls.filter((url) => url.includes('/resolve/'))).toEqual([]);
+  });
+
+  test.each(['http-503', 'invalid-json'] as const)(
+    'image generator mirrors metadata after official %s',
+    async (failure) => {
+      const revision = 'b'.repeat(40);
+      const requestedUrls: string[] = [];
+      const fetchMock: Fetch = async (input) => {
+        const url = new URL(
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url,
+        );
+        requestedUrls.push(url.href);
+        if (url.hostname === 'huggingface.co') {
+          return failure === 'http-503'
+            ? new Response(null, { status: 503 })
+            : new Response('{not json', {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+              });
+        }
+        if (url.href === `https://hf-mirror.com/api/models/${IMAGE_REPOSITORY}`) {
+          return Response.json({ sha: revision });
+        }
+        if (
+          url.href ===
+          `https://hf-mirror.com/api/models/${IMAGE_REPOSITORY}/tree/${revision}?recursive=true`
+        ) {
+          return Response.json(
+            IMAGE_MODEL_PATHS.map((path, index) => ({
+              type: 'file',
+              path,
+              size: 2000 + index,
+              lfs: { oid: sha256(path) },
+            })),
+          );
+        }
+        throw new Error(`Unexpected metadata request: ${url.href}`);
+      };
+
+      const manifest = await generate(fetchMock, 'image');
+
+      expect(manifest.components.image?.files).toHaveLength(3);
+      expect(manifest.components.image?.totalBytes).toBe(6003);
+      expect(requestedUrls).toEqual([
+        `https://huggingface.co/api/models/${IMAGE_REPOSITORY}`,
+        `https://hf-mirror.com/api/models/${IMAGE_REPOSITORY}`,
+        `https://huggingface.co/api/models/${IMAGE_REPOSITORY}/tree/${revision}?recursive=true`,
+        `https://hf-mirror.com/api/models/${IMAGE_REPOSITORY}/tree/${revision}?recursive=true`,
+      ]);
+    },
+  );
+
+  test.each([403, 404])('does not mirror metadata after official HTTP %s', async (status) => {
+    const requestedUrls: string[] = [];
+    const fetchMock: Fetch = async (input) => {
+      requestedUrls.push(String(input));
+      return new Response(null, { status });
+    };
+
+    await expect(generate(fetchMock, 'image')).rejects.toThrow(String(status));
+    expect(requestedUrls).toEqual([
+      `https://huggingface.co/api/models/${IMAGE_REPOSITORY}`,
+    ]);
   });
 });

@@ -19,7 +19,9 @@ import {
   EnvironmentSetupService,
   MODEL_DOWNLOAD_ATTEMPTS,
   REQUIRED_COMFY_NODES,
+  REQUIRED_IMAGE_COMFY_NODES,
   extractZipArchive,
+  inspectImageRuntime,
   modelDownloadUrls,
   runtimeDownloadUrls,
   resolveExistingModelRoot,
@@ -219,6 +221,41 @@ function makeObjectInfo(): Record<string, Record<string, unknown>> {
     [...REQUIRED_COMFY_NODES, 'MiniMaxH3SparkAttentionSM120'].map((node) => [node, {}]),
   );
 }
+
+describe('image runtime inspection', () => {
+  test('reports missing Qwen Image nodes with a component-specific error', () => {
+    expect(inspectImageRuntime({})).toEqual({
+      missingNodes: [...REQUIRED_IMAGE_COMFY_NODES],
+      error: expect.stringMatching(/运行时需要支持 Qwen Image 2\.1/),
+    });
+    expect(REQUIRED_COMFY_NODES).not.toEqual(
+      expect.arrayContaining([...REQUIRED_IMAGE_COMFY_NODES]),
+    );
+  });
+
+  test('accepts a runtime with all image nodes without changing H3 node requirements', () => {
+    const objectInfo = Object.fromEntries(
+      REQUIRED_IMAGE_COMFY_NODES.map((node) => [node, {}]),
+    );
+
+    expect(inspectImageRuntime(objectInfo)).toEqual({ missingNodes: [], error: null });
+    expect(REQUIRED_COMFY_NODES).toContain('SelfLiftH3Sampler');
+  });
+
+  test('keeps a healthy H3 environment ready when image-only nodes are absent', async () => {
+    const harness = await createHarness();
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true, error: null });
+    expect(inspectImageRuntime(makeObjectInfo()).missingNodes).toEqual([
+      ...REQUIRED_IMAGE_COMFY_NODES,
+    ]);
+  });
+});
 
 async function writeRuntimeFiles(
   runtimeRoot: string,

@@ -17,6 +17,7 @@ import { parseEnvironmentManifest } from './environment-manifest';
 import {
   EnvironmentSetupService,
   REQUIRED_COMFY_NODES,
+  inspectImageRuntime,
   type EnvironmentBackendInput,
   type EnvironmentBackendTransaction,
 } from './environment-setup';
@@ -673,7 +674,12 @@ export async function createAppServices(
       'runtime',
     );
     const speechProject = speechProjectDirectory();
-    mediaComponents = new MediaComponentService({ dataDirectory });
+    mediaComponents = new MediaComponentService({
+      dataDirectory,
+      modelDirectory: () => activeEnvironmentPaths.modelDirectory,
+      inspectImageRuntime: async () =>
+        inspectImageRuntime(await comfy!.objectInfo()),
+    });
     const speechRuntime = new SpeechRuntime({
       modelDirectory: speechModelDirectory,
       runtimeDirectory: speechRuntimeDirectory,
