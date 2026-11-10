@@ -211,7 +211,7 @@ git commit -m "Add Qwen Image workspace"
 
 在低显存档位记录模型加载和生成错误；若 8 GB 候选失败，保留明确提示并记录实测，不宣称保证兼容。图像运行时尝试启动语音或视频，IPC 必须拒绝且无新作品；完成后两个入口恢复。
 
-- [ ] **步骤 3：完整自动验证与打包**
+- [x] **步骤 3：完整自动验证与打包**
 
 运行：
 
@@ -274,4 +274,13 @@ Base HEAD：`4e9c35516bcea13b2b2a1730a3afc849b26f100c`。未修改生产代码�
 - package E2E 的旧工作流列表断言仍待单独更新并重跑。
 - 真实语音 busy 锁未在语音组件 ready 的条件下隔离验证；8 GB、真实语音和真实视频的新增验收均未执行。
 - 未创建远程 Release。
+
+#### 最终收尾验证（2026-11-10）
+
+- 安装后模型列表刷新已在 `b95b0ec4767f28fb3d8ab2ef50e6a25a0d6e2357` 修复：图像组件完成下载后调用 `objectInfo`，刷新失败会标记 failed 且可重试；真实后端三模型均出现在 Loader 选项，无需手动重启。
+- 打包断言已包含 `qwen-image-2-1.json`，最终 `npm run test:e2e:package` 为 **6/6 PASS**，包含 speech 三文件、媒体清单、工作流及敏感内容扫描。
+- 最终版本 `0.4.0`；`npm run typecheck` 和 `npm run build` 通过；排除已知未提交环境导入测试后，Vitest **2562 通过、1 跳过**，Playwright **25 通过、1 跳过**。
+- `SMO.H3-Studio-Setup-0.4.0.exe`：125,908,681 bytes，SHA256 `6EA6B057E8DB60F5DA906428B1D43E21378269BFF3042BABC80F6B2DAB47C6EB`。
+- `SMO.H3-Studio-0.4.0.exe`：113,370,897 bytes，SHA256 `9C73EF25054032604D7692AC25ED4793BC667FCE11A3E7B09F2615E0F65CADF9`。
+- 最终审查发现的语音安装取消、应用退出清理、FFmpeg 必需文件、finalizing 输出清理及运行时来源绑定问题均已修复并复审通过。8 GB 图像候选仍未实测，不作保证。
 
