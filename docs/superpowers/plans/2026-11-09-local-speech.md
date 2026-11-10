@@ -327,3 +327,41 @@ git commit -m "Use speech works in audio digital human"
 - 固定音色与克隆切换时单模型实例、任务锁释放及后续任务启动的真实验证。
 - 便携安装包 E2E、安装器生成与发布；本任务仅构建并检查 `win-unpacked`。
 
+#### 2026-11-10 复验记录（HEAD `71bb4293`）
+
+**结论：BLOCKED。** 复验 HEAD 为 `71bb42936eb92c1aa8f4e203e321f56aad4a30c8`。镜像下载和原站回退已实际工作，组件完成到 87.663789% 后，原站连接再次超时；锁定 Python 环境、模型加载和真实推理均未开始。未修改生产代码，未使用或修改 ComfyUI Python，未读取用户素材或密钥，也未进行重复下载重试、代理调整或模型替换。
+
+工作树复验前已有两个环境导入测试文件的未提交修改及 Python 缓存，本次保留原状。自动回归包含这些已有测试修改；复验提交仍只包含本计划文件。
+
+**1. 自动回归：仅允许的 5 个已知失败**
+
+- `npm run typecheck`：PASS。
+- `npm test`：57 个测试文件中 56 通过、1 失败；2363 个测试中 **2357 通过、1 跳过、5 失败**。5 个失败全部位于 `tests/unit/environment-wizard.test.tsx`，均为允许豁免的 `imports an existing environment...` 用例，没有其他失败。
+- 原始 `npm run typecheck && npm test && npm run build && npx playwright test --grep-invert "imports an existing environment"` 因上述 5 项在 `npm test` 后以退出码 1 停止。随后单独执行 `npm run build && npx playwright test --grep-invert "imports an existing environment"`：构建 PASS，Playwright **24 通过、1 跳过、0 失败**。
+- 因此除明确允许的 5 项外，自动回归通过；原始串联命令本身不能记为退出码 0。
+
+**2. 真实组件安装：23/27 文件后下载阻塞**
+
+- 独立目录仍为 `G:\SMO-H3-Speech-Verification-20261110`，组件目标为 `data/components/speech/models`，运行时目标为 `data/components/speech/runtime`。清单 27 个文件，总计 `5,720,134,760` 字节（约 `5.327290632 GiB`）。
+- 本次 `MediaComponentService.install('speech')` 实际运行 `138.913` 秒，完成 **23/27** 个文件、`5,014,486,838` 字节（**87.663789%**）。完成文件均在写入正式路径前通过下载器的预期大小和 SHA256 校验；失败后没有残留 `.part` 或分块账本文件，已完成的正确部分保留供以后明确要求的续传使用。
+- 失败文件为 `Qwen3-TTS-Tokenizer-12Hz/configuration.json`，预期大小 `76` 字节，SHA256 `6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd`。镜像路径失败后，最终原站 URL 为 `https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz/resolve/7dd38ad4e9bad454aae9cd937d0cd577604fe229/configuration.json`。
+- 完整最终错误：`TypeError: fetch failed`，原因 `ConnectTimeoutError / UND_ERR_CONNECT_TIMEOUT`，`timeout: 10000ms`，尝试地址 `104.244.43.208:443`、`2001::6ca0:a9b5:443`。证据保存在 `G:\SMO-H3-Speech-Verification-20261110\reports\download-root-cause-rerun.txt`、`install-failure.txt` 和 `install-progress.json`。
+- 尚缺 `Qwen3-TTS-Tokenizer-12Hz/configuration.json`、`model.safetensors`、`preprocessor_config.json` 以及 `runtime/uv-0.11.13-x86_64-pc-windows-msvc.zip`，合计 `705,647,922` 字节。组件从未进入 ready 状态，按要求未再次重试。
+
+**3. 锁定环境、真实推理与音频：未执行，无伪造结果**
+
+- 因 uv 压缩包和 tokenizer 文件未完成，未执行 `SpeechRuntime.prepare()`，未创建或同步锁定 Python 3.12 环境，未加载 Qwen3-TTS，未启动固定音色或克隆任务。
+- **真实输出：无。** 没有生成固定音色 WAV、克隆 WAV 或 MP3/FLAC/M4A；克隆参考音也没有生成。没有推理耗时、ffprobe 编码/采样率/时长、非静音检测或输出 SHA256 结果。
+- 固定音色与克隆切换时的单模型实例、真实任务锁释放以及完成后立即启动另一任务仍未验证。任务 6 步骤 2 保持未勾选。
+
+**4. 打包资源与打包态测试：PASS**
+
+- 使用已校验的 Electron 45.0.0 本地分发目录执行离线 `npx electron-builder --win --dir --config.electronDist=G:\SMO-H3-Speech-Verification-20261110\electron-45.0.0`，随后以相同离线分发目录构建 portable，均成功；未签名、未发布。
+- `npx playwright test --config playwright.package.config.ts --grep "portable runtime exposes packaged resources and excludes sensitive files"`：**1 通过、0 失败**，真实便携包启动和资源检查通过。
+- `release/win-unpacked` 共 130 个磁盘文件、`418,003,107` 字节，`app.asar` 内另有 5461 个条目。
+- `resources/resources/speech` 中 `pyproject.toml`、`uv.lock`、`qwen_tts_service.py` 均存在且非空，SHA256 分别为 `f7165c5c2a9c95ad7bdd9064e45cac1a7abf6aad55d818796606ef9cac8df455`、`f20d1167ed09065dfda245d2747fa9b6c142969e27f743b7f14d2d829b989244`、`c407e2284062d3a49b35034fd6b716a69c247fcb30a19c00b50b4ca45df33dce`，均与源文件一致。
+- `resources/resources/environment/media-components.json` 存在，大小 `11,487` 字节，源文件与包内 SHA256 均为 `d7c472aa13cec943e88bac260f6fe4f7567add9c3ef64b88465e5ebe55e9419a`。
+- 独立扫描包目录及 `app.asar`：模型文件、Python 环境/缓存/可执行文件、密钥、测试音频、固定测试文本及测试 API Key 的违规项均为 **0**；必需的 `qwen_tts_service.py` 是允许进入包内的服务源码，不是 Python 环境。报告位于 `G:\SMO-H3-Speech-Verification-20261110\reports\package-audit.json`。
+
+**剩余风险：** 网络阻塞使真实语音主链路仍未得到本轮验收；打包结果不能替代真实模型加载、推理、音频有效性和任务调度验证。允许的 5 个环境导入测试失败仍使原始回归串联命令返回 1。
+
