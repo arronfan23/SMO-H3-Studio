@@ -279,7 +279,7 @@ git commit -m "Use speech works in audio digital human"
 
 预期：所有已完成范围测试 PASS，记录实际数量。
 
-- [ ] **步骤 2：真实 Qwen3-TTS 验收**
+- [x] **步骤 2：真实 Qwen3-TTS 验收**
 
 在独立环境安装锁定依赖和 0.6B 模型，使用固定测试文本完成固定音色和授权样例克隆。四种格式均用 ffprobe 验证编码、采样率、非零时长；试听后确认没有空音频。切换固定音色与克隆时只保留一个模型实例，任务完成后可立即启动视频。
 
@@ -432,4 +432,49 @@ git commit -m "Use speech works in audio digital human"
 - NTFS 环境准备期间采集 18 个快照：RTX 5080，总计 `16303 MiB`，已用 `2310-2318 MiB`，利用率最高 `2%`，温度 `47.11-47.23 C`；只观察到本次验收的 uv/Python 进程，没有 Qwen 推理负载。
 - 最终快照：已用 `2315 MiB`、利用率 `2%`、温度 `47.03 C`，驱动 `621.01`；两个验收根目录下的残留进程数为 **0**。未终止或修改既有 ComfyUI/Python 进程，未读取用户素材或密钥。
 - 最终 commit 只包含本计划文件；模型、Python 环境、缓存、音频、验收脚本和其他工作树修改均不提交。
+
+#### 2026-11-10 真实推理完成记录（HEAD `c00d2524`）
+
+**结论：DONE。** 复验 HEAD 为 `c00d252473aabafa6882683f6038fe338d03a963`。通过注入已 prepared 的 `SpeechRuntime` 直接使用现有 venv 和模型，真实运行 `SpeechProcessManager`、应用生成服务、共享 `JobCoordinator` 与 FFmpeg 转换；未运行 `uv sync`，未重新安装 Python 依赖，未修改生产代码。
+
+工作树复验前已有 `src/main/speech-runtime.ts`、`tests/unit/speech-runtime.test.ts` 两个 Windows 兼容性修复，以及 `tests/e2e/environment.spec.ts`、`tests/unit/environment-wizard.test.tsx` 和 Python 缓存。全部保留原状，最终提交仍只包含本计划文件。
+
+**1. 已准备运行时与真实生成路径：PASS**
+
+- 使用 `G:\SMO-H3-Speech-Verification-20261110\data\components\speech\runtime\venv\Scripts\python.exe`，实测 Python **3.12.13**、`torch 2.9.1+cu128`、`qwen_tts` 和 `soundfile 0.14.0` 可导入，CUDA 为 `True`，设备为 RTX 5080。
+- 既有组件清单仅在本地复验，耗时 `5.958` 秒，状态为 ready，`5,720,134,760 / 5,720,134,760` 字节；没有依赖安装或下载。`SpeechRuntime.prepare()` 被验收 harness 替换为现有 venv 的 prepared 结果，真实模型生成未被替换或模拟。
+- 首次 harness 因写死大写 `Vivian` 而在生成前停止；真实 capabilities 返回小写音色列表。随后改为选择真实返回的 `aiden` 并完整重跑，未改服务或模型。固定文本为“大家好，这是一段本地语音验收。”，情绪说明为“温和、平静、亲切地讲述，语速稍慢。”；克隆文本为“声音克隆验收完成，感谢聆听。”。
+- 克隆参考音是本轮刚生成的固定音色 WAV，参考文本就是上述固定文本；未读取用户素材。
+
+**2. 真实输出、格式与耗时：PASS**
+
+| 模式/格式 | 编码 | 采样率 | 时长 | 字节 | 最大音量 | 端到端耗时 | 模型推理耗时 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 固定 WAV | `pcm_s16le` | 24000 Hz | 2.64 s | 126764 | -6.2 dB | 20.373 s | 20.004 s |
+| 固定 MP3 | `mp3` | 24000 Hz | 3.60 s | 14829 | -2.2 dB | 4.859 s | 4.387 s |
+| 固定 FLAC | `flac` | 24000 Hz | 2.88 s | 76304 | -5.7 dB | 3.820 s | 3.476 s |
+| 固定 M4A | `aac` | 24000 Hz | 3.04 s | 29289 | -2.1 dB | 4.001 s | 3.631 s |
+| 克隆 WAV | `pcm_s16le` | 24000 Hz | 2.64 s | 126764 | -7.1 dB | 6.061 s | 5.674 s |
+
+- 五个输出均为单声道、非空、非零时长；FFmpeg `volumedetect` 均高于 `-60 dB`，不是纯静音。完整真实验收测试耗时 `55.29` 秒。
+- 随后独立重新执行 ffprobe、volumedetect 和 SHA256 复核，**5/5 PASS**。文件哈希未变化；完整路径、SHA256 和模型事件见 `reports/prepared-acceptance-result-run2.json` 与 `reports/prepared-independent-audio-audit.json`。
+
+**3. 单模型实例、任务锁与健康：PASS**
+
+- 审计共有 `model_loaded=2`、`model_reused=4`、`generation_complete=5`、`release_start=2`、`release_end=2`、`server_stop=1`。固定音色任务复用同一实例；切到克隆时先释放固定模型，再加载 Base 模型；事件顺序断言确认任意时刻最多一个模型实例。
+- 首个任务 active 时第二次提交被 `Another generation is already running` 拒绝，且没有新增作品。每个任务结束后的 `activeCountAfter` 都为 0；随后通过视频路由启动一个仅调度探针，`activeCountInside=1`、`activeCountAfter=0`。该探针只验证锁释放和视频任务入口，没有执行真实 H3 视频渲染。
+- 12 个健康快照显示：RTX 5080 总计 `16303 MiB`，初始已用 `2505 MiB`，峰值已用 `7079 MiB`，峰值利用率 `30%`，峰值温度 `49.55 C`；最终已用 `2493 MiB`，验收目录下 Python 进程数为 **0**。未终止既有 ComfyUI、应用或用户进程。
+
+**4. 限定自动回归：PASS，保留一次非重现差异**
+
+- `npm run typecheck`：PASS。
+- 相关 Vitest：media/components、download、speech runtime/process/generation/form、audio converter/duration、jobs、studio、IPC、generation、files、works 共 **14 个文件、845/845 项通过**。
+- 使用 prepared venv 直接运行 `tests/python/test_qwen_tts_service.py`：**3/3 PASS**，覆盖本地模型加载、模式切换释放及加载失败清理。
+- `npm run build`：PASS。首次 studio E2E 为 **19 通过、1 失败**：MP3 用例的情绪草稿预期为 `Calm and warm.`，实际末尾多一个空格；音频预览与生成断言不是失败点。未修改测试或生产代码，MP3 单例原样重跑通过，随后一次有界完整重跑为 **20/20 PASS**。首轮非重现差异保留在 `reports/prepared-build-studio-e2e.log`，最终结果为 `reports/prepared-studio-e2e-rerun.log`。
+- 本轮按要求运行相关语音/组件测试和 studio E2E，没有重跑完整环境导入测试，也没有把模拟 studio 音频作为真实 Qwen 输出。
+
+**5. 证据与提交范围**
+
+- 真实运行日志为 `reports/prepared-acceptance-run2.log`，健康采样为 `reports/prepared-gpu-process-health-run2.jsonl`，模型事件为 `audit/prepared-c00d252-run2/model-events.jsonl`，均位于 `G:\SMO-H3-Speech-Verification-20261110`。
+- 输出位于仓库外的 `output/prepared-c00d252-run2/SMO-Speech`。模型、venv、缓存、验收 harness、音频、报告、既有 runtime 修复和其他工作树修改均不纳入 commit。
 
