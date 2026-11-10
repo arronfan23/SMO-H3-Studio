@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { StudioPage } from '../../src/renderer/StudioPage';
 import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 import type { SmoApi } from '../../src/shared/ipc';
-import type { MediaComponentState } from '../../src/shared/media-components';
+import type { MediaComponentId, MediaComponentState } from '../../src/shared/media-components';
 import type { Avatar, SpeechCapabilities, SpeechMode } from '../../src/shared/types';
 
 const avatar: Avatar = {
@@ -16,9 +16,10 @@ const avatar: Avatar = {
 
 function componentState(
   overrides: Partial<MediaComponentState> = {},
+  id: MediaComponentId = 'speech',
 ): MediaComponentState {
   return {
-    id: 'speech',
+    id,
     status: 'ready',
     downloadedBytes: 1024,
     totalBytes: 1024,
@@ -100,8 +101,12 @@ beforeEach(() => {
   smo.speech.getCapabilities.mockImplementation(async (mode: SpeechMode) =>
     capabilitiesFor(mode),
   );
-  smo.components.getState.mockResolvedValue(componentState());
-  smo.components.install.mockResolvedValue(componentState());
+  smo.components.getState.mockImplementation(async (id: MediaComponentId) =>
+    componentState({}, id),
+  );
+  smo.components.install.mockImplementation(async (id: MediaComponentId) =>
+    componentState({}, id),
+  );
   smo.components.cancel.mockResolvedValue(undefined);
   smo.jobs.start.mockResolvedValue({ id: 'speech-job-1' });
   smo.jobs.getState.mockResolvedValue({ activeId: null });
@@ -129,9 +134,9 @@ describe('语音工作区', () => {
     const mainTabs = screen.getByRole('tablist', { name: '主制作模式' });
     expect(within(mainTabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
       '语音',
+      '图像',
       '视频',
     ]);
-    expect(screen.queryByRole('tab', { name: '图像' })).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '视频' }));
@@ -287,12 +292,18 @@ describe('语音工作区', () => {
   });
 
   test('语音组件未安装只禁用语音，视频布局和生成入口保持可用', async () => {
-    smo.components.getState.mockResolvedValue(
-      componentState({ status: 'missing', downloadedBytes: 0, totalBytes: 1024 ** 3 }),
+    smo.components.getState.mockImplementation(async (id: MediaComponentId) =>
+      componentState(
+        id === 'speech'
+          ? { status: 'missing', downloadedBytes: 0, totalBytes: 1024 ** 3 }
+          : {},
+        id,
+      ),
     );
     await renderSpeech(avatar);
 
-    expect(await screen.findByText(/1\.0 GB/)).toBeInTheDocument();
+    const speechPanel = within(screen.getByRole('tabpanel', { name: '语音' }));
+    expect(await speechPanel.findByText(/1\.0 GB/)).toBeInTheDocument();
     expect(smo.speech.getCapabilities).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: '生成语音' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '安装语音组件' })).toBeEnabled();
@@ -310,10 +321,14 @@ describe('语音工作区', () => {
       totalBytes: 1024 ** 3,
     });
     let rejectInstall!: (error: Error) => void;
-    smo.components.getState.mockImplementation(async () => state);
+    smo.components.getState.mockImplementation(async (id: MediaComponentId) =>
+      id === 'speech' ? state : componentState({}, id),
+    );
     smo.components.install.mockImplementation(
-      () =>
-        new Promise<MediaComponentState>((_resolve, reject) => {
+      (id: MediaComponentId) =>
+        id !== 'speech'
+          ? Promise.resolve(componentState({}, id))
+          : new Promise<MediaComponentState>((_resolve, reject) => {
           rejectInstall = reject;
           state = componentState({
             status: 'installing',
@@ -341,14 +356,18 @@ describe('语音工作区', () => {
     expect(progress).toHaveAttribute('value', String(512 * 1024 ** 2));
     expect(screen.getByText('50%')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '取消安装' }));
+    const speechPanel = within(screen.getByRole('tabpanel', { name: '语音' }));
+    fireEvent.click(speechPanel.getByRole('button', { name: '取消安装' }));
     await waitFor(() => expect(smo.components.cancel).toHaveBeenCalledWith('speech'));
     expect(await screen.findByRole('button', { name: '安装语音组件' })).toBeEnabled();
   });
 
   test('语音组件安装失败后可重试并恢复生成', async () => {
-    smo.components.getState.mockResolvedValue(
-      componentState({ status: 'failed', error: '磁盘空间不足' }),
+    smo.components.getState.mockImplementation(async (id: MediaComponentId) =>
+      componentState(
+        id === 'speech' ? { status: 'failed', error: '磁盘空间不足' } : {},
+        id,
+      ),
     );
     await renderSpeech();
 
@@ -362,15 +381,19 @@ describe('语音工作区', () => {
 
   test('语音活动任务禁止安装组件', async () => {
     smo.jobs.getState.mockResolvedValue({ activeId: 'video-job-1' });
-    smo.components.getState.mockResolvedValue(
-      componentState({ status: 'missing', downloadedBytes: 0 }),
+    smo.components.getState.mockImplementation(async (id: MediaComponentId) =>
+      componentState(
+        id === 'speech' ? { status: 'missing', downloadedBytes: 0 } : {},
+        id,
+      ),
     );
     await renderSpeech();
 
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '安装语音组件' })).toBeDisabled(),
     );
-    expect(screen.getByText(/当前有生成任务/)).toBeInTheDocument();
+    const speechPanel = within(screen.getByRole('tabpanel', { name: '语音' }));
+    expect(speechPanel.getByText(/当前有生成任务，完成后才能安装/)).toBeInTheDocument();
     expect(smo.components.install).not.toHaveBeenCalled();
   });
 
@@ -569,22 +592,32 @@ describe('语音工作区', () => {
   test('语音安装 ready 结果不会被较旧轮询覆盖', async () => {
     const stalePoll = deferred<MediaComponentState>();
     const install = deferred<MediaComponentState>();
-    let stateReads = 0;
-    smo.components.getState.mockImplementation(() => {
-      stateReads += 1;
-      if (stateReads === 1) {
+    let installStarted = false;
+    let stalePollRequested = false;
+    smo.components.getState.mockImplementation((id: MediaComponentId) => {
+      if (id !== 'speech') {
+        return Promise.resolve(componentState({}, id));
+      }
+      if (!installStarted) {
         return Promise.resolve(componentState({ status: 'missing', downloadedBytes: 0 }));
       }
-      if (stateReads === 2) {
+      if (!stalePollRequested) {
+        stalePollRequested = true;
         return stalePoll.promise;
       }
       return Promise.resolve(componentState());
     });
-    smo.components.install.mockReturnValue(install.promise);
+    smo.components.install.mockImplementation((id: MediaComponentId) => {
+      if (id === 'speech') {
+        installStarted = true;
+        return install.promise;
+      }
+      return Promise.resolve(componentState({}, id));
+    });
     await renderSpeech();
 
     fireEvent.click(await screen.findByRole('button', { name: '安装语音组件' }));
-    await waitFor(() => expect(stateReads).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(stalePollRequested).toBe(true));
     await act(async () => {
       install.resolve(componentState());
       await install.promise;
@@ -602,26 +635,37 @@ describe('语音工作区', () => {
   test('语音取消结果不会被较旧安装轮询覆盖', async () => {
     const stalePoll = deferred<MediaComponentState>();
     const install = deferred<MediaComponentState>();
-    let stateReads = 0;
-    smo.components.getState.mockImplementation(() => {
-      stateReads += 1;
-      if (stateReads === 1) {
+    let installStarted = false;
+    let stalePollRequested = false;
+    smo.components.getState.mockImplementation((id: MediaComponentId) => {
+      if (id !== 'speech') {
+        return Promise.resolve(componentState({}, id));
+      }
+      if (!installStarted) {
         return Promise.resolve(componentState({ status: 'missing', downloadedBytes: 0 }));
       }
-      if (stateReads === 2) {
+      if (!stalePollRequested) {
+        stalePollRequested = true;
         return stalePoll.promise;
       }
       return Promise.resolve(componentState({ status: 'missing', downloadedBytes: 0 }));
     });
-    smo.components.install.mockReturnValue(install.promise);
+    smo.components.install.mockImplementation((id: MediaComponentId) => {
+      if (id === 'speech') {
+        installStarted = true;
+        return install.promise;
+      }
+      return Promise.resolve(componentState({}, id));
+    });
     smo.components.cancel.mockImplementation(async () => {
       install.reject(new Error('安装已取消'));
     });
     await renderSpeech();
 
     fireEvent.click(await screen.findByRole('button', { name: '安装语音组件' }));
-    await waitFor(() => expect(stateReads).toBeGreaterThanOrEqual(2));
-    fireEvent.click(screen.getByRole('button', { name: '取消安装' }));
+    await waitFor(() => expect(stalePollRequested).toBe(true));
+    const speechPanel = within(screen.getByRole('tabpanel', { name: '语音' }));
+    fireEvent.click(speechPanel.getByRole('button', { name: '取消安装' }));
     expect(await screen.findByRole('button', { name: '安装语音组件' })).toBeEnabled();
 
     await act(async () => {

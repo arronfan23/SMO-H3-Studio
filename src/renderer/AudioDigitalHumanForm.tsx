@@ -50,7 +50,7 @@ export function AudioDigitalHumanForm({
   active?: boolean;
   pageActive?: boolean;
   busy?: boolean;
-  onJobStarted?: () => Promise<void>;
+  onJobStarted?: () => Promise<boolean | void>;
   intent?: StudioIntent | null;
 }) {
   const [audioPath, setAudioPath] = useState<string | null>(null);

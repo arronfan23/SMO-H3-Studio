@@ -5,14 +5,16 @@ const POLL_INTERVAL_MS = 500;
 export function useActiveJob(): {
   activeId: string | null;
   busy: boolean;
-  refresh: () => Promise<void>;
+  syncRevision: number;
+  refresh: () => Promise<boolean>;
 } {
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [syncRevision, setSyncRevision] = useState(0);
   const mountedRef = useRef(false);
   const lifecycleRef = useRef(0);
   const latestRequestRef = useRef(0);
 
-  const refresh = useCallback(async (): Promise<void> => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     const requestId = ++latestRequestRef.current;
     const lifecycle = lifecycleRef.current;
     try {
@@ -24,10 +26,13 @@ export function useActiveJob(): {
         !document.hidden
       ) {
         setActiveId(state.activeId);
+        setSyncRevision((current) => current + 1);
+        return true;
       }
     } catch {
       // A later poll or manual refresh can retry without surfacing a polling error.
     }
+    return false;
   }, []);
 
   useEffect(() => {
@@ -63,5 +68,5 @@ export function useActiveJob(): {
     };
   }, [refresh]);
 
-  return { activeId, busy: activeId !== null, refresh };
+  return { activeId, busy: activeId !== null, syncRevision, refresh };
 }

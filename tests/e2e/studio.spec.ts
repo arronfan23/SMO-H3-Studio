@@ -2,11 +2,12 @@ import { test, expect, _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import sharp from 'sharp';
 import { startComfyMock } from '../fixtures/mock-comfy';
 import { startLlmMock } from '../fixtures/mock-llm';
 import { writeReadyEnvironment } from '../fixtures/ready-environment';
@@ -63,10 +64,11 @@ interface LaunchAppOptions {
   userDataDir: string;
   comfyBaseUrl: string;
   fileDialogPaths: string[];
+  appPath?: string;
 }
 
 async function launchApp(options: LaunchAppOptions): Promise<ElectronApplication> {
-  const appPath = join(__dirname, '../../dist/main/index.js');
+  const appPath = options.appPath ?? join(__dirname, '../../dist/main/index.js');
   return electron.launch({
     args: [
       appPath,
@@ -87,6 +89,108 @@ async function launchApp(options: LaunchAppOptions): Promise<ElectronApplication
       SMO_FFMPEG_PATH: FFMPEG_PATH,
     },
   });
+}
+
+async function createImageServiceProbeEntry(): Promise<string> {
+  const sourcePath = join(__dirname, '../../dist/main/index.js');
+  const source = await readFile(sourcePath, 'utf8');
+  const needle = 'const services = await bootstrapApplication(';
+  if (!source.includes(needle)) {
+    throw new Error('Could not locate the application services bootstrap in the test build');
+  }
+  const probePath = join(
+    __dirname,
+    `../../dist/main/image-service-probe-${process.pid}.js`,
+  );
+  await writeFile(
+    probePath,
+    source.replace(
+      needle,
+      'const services = process.__smoImageE2eServices = await bootstrapApplication(',
+    ),
+    'utf8',
+  );
+  return probePath;
+}
+
+async function installImageBackendProbe(
+  app: ElectronApplication,
+  options: { outputDirectory: string; pngBase64: string },
+): Promise<void> {
+  await expect.poll(() =>
+    app.evaluate(() => Object.hasOwn(process, '__smoImageE2eServices')),
+  ).toBe(true);
+  await app.evaluate(async (_electron, { outputDirectory, pngBase64 }) => {
+    type Graph = Record<string, { inputs: Record<string, unknown> }>;
+    type ProbeServices = {
+      components: { getState: (id: 'speech' | 'image') => unknown };
+      comfy: {
+        submit: (graph: Graph) => Promise<{
+          prompt_id: string;
+          number: number;
+          node_errors: Record<string, never>;
+        }>;
+        waitForCompletion: (promptId: string) => Promise<void>;
+        history: (promptId: string) => Promise<Array<{
+          nodeId: string;
+          kind: 'images';
+          filename: string;
+          subfolder: string;
+          type: 'output';
+        }>>;
+      };
+    };
+    const probeGlobal = process as unknown as {
+      __smoImageE2eServices?: ProbeServices;
+      __smoImageE2eGraph?: Graph;
+    };
+    const services = probeGlobal.__smoImageE2eServices;
+    if (!services) {
+      throw new Error('Image E2E service probe is unavailable');
+    }
+    const originalGetState = services.components.getState.bind(services.components);
+    services.components.getState = (id) =>
+      id === 'image'
+        ? {
+            id,
+            status: 'ready',
+            downloadedBytes: 1,
+            totalBytes: 1,
+            currentFile: null,
+            error: null,
+            active: false,
+          }
+        : originalGetState(id);
+
+    let workId = '';
+    services.comfy.submit = async (graph) => {
+      const prefix = graph['461']?.inputs.filename_prefix;
+      if (typeof prefix !== 'string') {
+        throw new Error('Image output prefix is missing from the submitted graph');
+      }
+      workId = prefix.slice(prefix.lastIndexOf('/') + 1);
+      probeGlobal.__smoImageE2eGraph = structuredClone(graph);
+      const { mkdir, writeFile } = process.getBuiltinModule('node:fs/promises');
+      const { join } = process.getBuiltinModule('node:path');
+      const directory = join(outputDirectory, 'SMO-Image');
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, `${workId}_00001.png`),
+        Buffer.from(pngBase64, 'base64'),
+      );
+      return { prompt_id: 'image-e2e-prompt', number: 1, node_errors: {} };
+    };
+    services.comfy.waitForCompletion = async () => undefined;
+    services.comfy.history = async () => [
+      {
+        nodeId: '461',
+        kind: 'images',
+        filename: `${workId}_00001.png`,
+        subfolder: 'SMO-Image',
+        type: 'output',
+      },
+    ];
+  }, options);
 }
 
 function attachMainProcessLogs(
@@ -242,6 +346,7 @@ async function assertViewLayout(
   page: Page,
   viewName: string,
   selectors: string[],
+  textAssertions: Array<{ selector: string; text: string }> = [],
 ): Promise<void> {
   type Rect = { left: number; top: number; right: number; bottom: number; width: number; height: number };
   type Violation = { view: string; type: string; selector?: string; message: string; rect?: Rect };
@@ -311,6 +416,95 @@ async function assertViewLayout(
     );
     expect(violations).toEqual([]);
   }
+
+  const overlapViolations = await page.evaluate(({ view, selectors: targets }) => {
+    const rects = targets.map((selector) => {
+      const rect = document.querySelector(selector)?.getBoundingClientRect();
+      return rect === undefined
+        ? { selector, rect: null }
+        : {
+            selector,
+            rect: {
+              left: rect.left,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              width: rect.width,
+              height: rect.height,
+            },
+          };
+    });
+    const results: Array<{ view: string; first: string; second: string }> = [];
+    for (let first = 0; first < rects.length; first += 1) {
+      for (let second = first + 1; second < rects.length; second += 1) {
+        const a = rects[first];
+        const b = rects[second];
+        if (a.rect === null || b.rect === null) continue;
+        const overlapWidth = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
+        const overlapHeight = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
+        if (overlapWidth > 2 && overlapHeight > 2) {
+          results.push({ view, first: a.selector, second: b.selector });
+        }
+      }
+    }
+    return results;
+  }, { view: viewName, selectors });
+  expect(overlapViolations).toEqual([]);
+
+  for (const assertion of textAssertions) {
+    const locator = page.locator(assertion.selector);
+    await expect(locator, `${viewName}: ${assertion.text}`).toBeVisible();
+    await expect(locator, `${viewName}: ${assertion.text}`).toHaveText(assertion.text);
+  }
+}
+
+async function assertCurrentOptionText(
+  page: Page,
+  viewName: string,
+  selector: string,
+  expectedText: string,
+): Promise<void> {
+  const select = page.locator(selector);
+  await expect(select, `${viewName}: select visible`).toBeVisible();
+  await expect(select, `${viewName}: select value`).not.toHaveValue('');
+
+  const metrics = await select.evaluate((element) => {
+    const selectElement = element as HTMLSelectElement;
+    const option = selectElement.selectedOptions[0];
+    if (!option) {
+      throw new Error('No selected option');
+    }
+    const selectStyle = getComputedStyle(element);
+    const optionStyle = getComputedStyle(option);
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Canvas text measurement is unavailable');
+    }
+    context.font = `${optionStyle.fontStyle} ${optionStyle.fontWeight} ${optionStyle.fontSize} ${optionStyle.fontFamily}`;
+    const optionText = option.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    const optionRow = selectElement.closest('.image-option-row');
+    const horizontalPadding =
+      Number.parseFloat(selectStyle.paddingLeft) +
+      Number.parseFloat(selectStyle.paddingRight);
+    return {
+      optionText,
+      optionVisibility: optionStyle.visibility,
+      optionDisplay: optionStyle.display,
+      viewportWidth: window.innerWidth,
+      selectWidth: selectElement.clientWidth,
+      optionRowColumns: optionRow === null ? null : getComputedStyle(optionRow).gridTemplateColumns,
+      textWidth: context.measureText(optionText).width,
+      availableTextWidth: selectElement.clientWidth - horizontalPadding - 28,
+    };
+  });
+
+  expect(metrics.optionText, `${viewName}: complete option text`).toBe(expectedText);
+  expect(metrics.optionVisibility, `${viewName}: option visibility`).toBe('visible');
+  expect(metrics.optionDisplay, `${viewName}: option display`).not.toBe('none');
+  expect(metrics.availableTextWidth, `${viewName}: text space`).toBeGreaterThan(0);
+  expect(metrics.textWidth, `${viewName}: ${JSON.stringify(metrics)}`)
+    .toBeLessThanOrEqual(metrics.availableTextWidth + 2);
 }
 
 async function createAvatar(page: Page, name: string): Promise<void> {
@@ -439,6 +633,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   let consoleErrors: string[] = [];
   let rendererLogs: string[] = [];
   let mainProcessRaw: (Buffer | string)[] = [];
+  let imageServiceProbeEntry: string | undefined;
 
   let dataDirectory: string;
   let outputDirectory: string;
@@ -501,6 +696,10 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       page = undefined;
       await llmMock?.close();
       await comfyMock?.close();
+      if (imageServiceProbeEntry) {
+        await rm(imageServiceProbeEntry, { force: true });
+        imageServiceProbeEntry = undefined;
+      }
       if (tempDirectory) {
         await rm(tempDirectory, { recursive: true, force: true });
         tempDirectory = undefined;
@@ -781,6 +980,95 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     expect(promptNode.inputs.prompt).toBe(editedPrompt);
   });
 
+  test('图像生成使用模拟 ComfyUI PNG 并在作品页保持原始比例', async () => {
+    const png = await sharp({
+      create: {
+        width: 96,
+        height: 48,
+        channels: 3,
+        background: { r: 24, g: 150, b: 112 },
+      },
+    }).png().toBuffer();
+
+    await app!.close();
+    app = undefined;
+    page = undefined;
+    imageServiceProbeEntry = await createImageServiceProbeEntry();
+    app = await launchApp({
+      ...launchOptions,
+      appPath: imageServiceProbeEntry,
+      fileDialogPaths: [],
+    });
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    await installImageBackendProbe(app, {
+      outputDirectory,
+      pngBase64: png.toString('base64'),
+    });
+    await page.reload();
+    await expect(page).toHaveTitle('SMO.H3 Studio');
+
+    await page.click('#image-main-tab');
+    await expect(page.locator('#image-main-panel')).toBeVisible();
+    await expect(page.locator('.person-preview:visible')).toHaveCount(0);
+    await expect(page.locator('#image-main-panel button:has-text("生成图像")')).toBeEnabled();
+    await page.fill('#image-prompt', 'A clean geometric image from the simulated backend.');
+    await page.selectOption('#image-aspect', '16:9 (Widescreen)');
+    await page.selectOption('#image-resolution', '1');
+    await page.fill('#image-seed', '7');
+    await page.fill('#image-steps', '30');
+    await page.click('#image-main-panel button:has-text("生成图像")');
+
+    const jobLocator = page.locator(
+      '#image-main-panel section[aria-label="任务状态"] code',
+    );
+    await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
+    const jobId = (await jobLocator.textContent())!;
+    await waitForStableStatus(page, jobId, 'done');
+    const outputPath = join(outputDirectory, 'SMO-Image', `${jobId}_00001.png`);
+    expect(existsSync(outputPath)).toBe(true);
+
+    const submitted = await app.evaluate(() => {
+      const probeGlobal = process as unknown as {
+        __smoImageE2eGraph?: Record<string, { inputs: Record<string, unknown> }>;
+      };
+      return {
+        prompt: probeGlobal.__smoImageE2eGraph?.['452']?.inputs,
+        latent: probeGlobal.__smoImageE2eGraph?.['456']?.inputs,
+        sampler: probeGlobal.__smoImageE2eGraph?.['458']?.inputs,
+      };
+    });
+    expect(submitted.prompt).toMatchObject({
+      prompt: 'A clean geometric image from the simulated backend.',
+    });
+    expect(submitted.latent).toMatchObject({ width: 1376, height: 768 });
+    expect(submitted.sampler).toMatchObject({ seed: 7, steps: 30 });
+
+    await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page.locator('.works-list article').filter({ hasText: jobId });
+    await expect(work).toBeVisible();
+    await expect(work).toContainText('已完成');
+    const image = work.getByRole('img', { name: `作品图像 ${jobId}` });
+    await expect(image).toBeVisible();
+    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
+      .toBe(96);
+    const display = await image.evaluate((element) => {
+      const imageElement = element as HTMLImageElement;
+      const rect = imageElement.getBoundingClientRect();
+      return {
+        naturalRatio: imageElement.naturalWidth / imageElement.naturalHeight,
+        renderedRatio: rect.width / rect.height,
+        objectFit: getComputedStyle(imageElement).objectFit,
+      };
+    });
+    expect(display.naturalRatio).toBe(2);
+    expect(display.renderedRatio).toBeCloseTo(display.naturalRatio, 2);
+    expect(display.objectFit).toBe('contain');
+  });
+
   test('works list shows completed work and filters by status and mode', async () => {
     const avatarName = 'E2E Works Avatar';
     await createAvatar(page!, avatarName);
@@ -857,7 +1145,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(failedWork).toBeVisible();
     const worksBefore = await page!.locator('.works-list article').count();
 
-    await page!.click('button:has-text("重试")');
+    await failedWork.getByRole('button', { name: '重试' }).click();
 
     await expect
       .poll(
@@ -1075,6 +1363,38 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#audio-mode-panel .button-generate',
       ]);
 
+      await page!.click('#image-main-tab');
+      await expect(page!.locator('#image-main-panel')).toBeVisible();
+      await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
+      await assertViewLayout(page!, 'studio-image', [
+        '#image-prompt',
+        '#image-aspect',
+        '#image-resolution',
+        '#image-seed',
+        '#image-steps',
+        '#image-main-panel .button-generate',
+      ], [
+        { selector: 'label[for="image-prompt"]', text: '图像提示词' },
+        { selector: 'label[for="image-aspect"]', text: '图像比例' },
+        { selector: 'label[for="image-resolution"]', text: '分辨率' },
+        { selector: 'label[for="image-seed"]', text: '随机种子' },
+        { selector: 'label[for="image-steps"]', text: '采样步数' },
+        { selector: '#image-main-panel .button-generate', text: '生成图像' },
+      ]);
+      await assertCurrentOptionText(
+        page!,
+        'studio-image aspect',
+        '#image-aspect',
+        '1:1 方形（Square）',
+      );
+      await assertCurrentOptionText(
+        page!,
+        'studio-image resolution',
+        '#image-resolution',
+        '1024 × 1024 px',
+      );
+      await page!.click('#video-main-tab');
+
       await page!.click('nav[aria-label="主导航"] button:has-text("数字模特")');
       await expect(page!.locator('.avatar-list')).toBeVisible();
       await assertViewLayout(page!, 'avatars', [
@@ -1159,6 +1479,36 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       '#original-text',
       '#text-mode-panel .button-generate',
     ]);
+
+    await page!.click('#image-main-tab');
+    await expect(page!.locator('#image-main-panel')).toBeVisible();
+    await assertViewLayout(page!, 'studio-image-200-zoom', [
+      '#image-prompt',
+      '#image-aspect',
+      '#image-resolution',
+      '#image-seed',
+      '#image-steps',
+      '#image-main-panel .button-generate',
+    ], [
+      { selector: 'label[for="image-prompt"]', text: '图像提示词' },
+      { selector: 'label[for="image-aspect"]', text: '图像比例' },
+      { selector: 'label[for="image-resolution"]', text: '分辨率' },
+      { selector: 'label[for="image-seed"]', text: '随机种子' },
+      { selector: 'label[for="image-steps"]', text: '采样步数' },
+      { selector: '#image-main-panel .button-generate', text: '生成图像' },
+    ]);
+    await assertCurrentOptionText(
+      page!,
+      'studio-image-200-zoom aspect',
+      '#image-aspect',
+      '1:1 方形（Square）',
+    );
+    await assertCurrentOptionText(
+      page!,
+      'studio-image-200-zoom resolution',
+      '#image-resolution',
+      '1024 × 1024 px',
+    );
   });
 
   test('window maximize round trip toggles the rounded frame', async () => {

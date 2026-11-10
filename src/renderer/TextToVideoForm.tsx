@@ -35,7 +35,7 @@ export function TextToVideoForm({
   modelDirectory: string;
   active?: boolean;
   busy?: boolean;
-  onJobStarted?: () => Promise<void>;
+  onJobStarted?: () => Promise<boolean | void>;
 }) {
   const [originalText, setOriginalText] = useState('');
   const [polishedText, setPolishedText] = useState('');

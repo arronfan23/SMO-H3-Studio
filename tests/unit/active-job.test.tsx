@@ -95,7 +95,9 @@ describe('useActiveJob', () => {
     expect(result.current).toMatchObject({ activeId: null, busy: false });
 
     getState.mockResolvedValue({ activeId: 'one' });
-    await act(async () => result.current.refresh());
+    await act(async () => {
+      await result.current.refresh();
+    });
     expect(getState).toHaveBeenCalledTimes(2);
     expect(result.current).toMatchObject({ activeId: 'one', busy: true });
 
@@ -147,7 +149,7 @@ describe('useActiveJob', () => {
     exposeGetState(getState);
     const { result } = renderHook(() => useActiveJob());
 
-    let latestRefresh!: Promise<void>;
+    let latestRefresh!: Promise<boolean>;
     act(() => {
       latestRefresh = result.current.refresh();
     });
@@ -165,6 +167,44 @@ describe('useActiveJob', () => {
 
     expect(result.current.activeId).toBe('latest');
     expect(stateUpdates).toHaveBeenCalledTimes(updateCount);
+  });
+
+  test('refresh reports applied synchronization and IPC failure explicitly', async () => {
+    const getState = vi.fn().mockResolvedValue({ activeId: 'active-job' });
+    exposeGetState(getState);
+    const { result } = renderHook(() => useActiveJob());
+
+    let synchronized: boolean | undefined;
+    await act(async () => {
+      synchronized = await result.current.refresh();
+    });
+    expect(synchronized).toBe(true);
+
+    getState.mockRejectedValueOnce(new Error('IPC unavailable'));
+    let failed: boolean | undefined;
+    await act(async () => {
+      failed = await result.current.refresh();
+    });
+    expect(failed).toBe(false);
+  });
+
+  test('increments syncRevision for applied null states but not for failures', async () => {
+    const getState = vi.fn().mockResolvedValue({ activeId: null });
+    exposeGetState(getState);
+    const { result } = renderHook(() => useActiveJob());
+    await flushPromises();
+
+    expect(result.current.syncRevision).toBe(1);
+    await act(async () => {
+      expect(await result.current.refresh()).toBe(true);
+    });
+    expect(result.current.syncRevision).toBe(2);
+
+    getState.mockRejectedValueOnce(new Error('IPC unavailable'));
+    await act(async () => {
+      expect(await result.current.refresh()).toBe(false);
+    });
+    expect(result.current.syncRevision).toBe(2);
   });
 
   test('invalidates a pre-hide request after visibility resumes', async () => {

@@ -29,7 +29,7 @@ export function SpeechForm({
   active?: boolean;
   pageActive?: boolean;
   busy?: boolean;
-  onJobStarted?: () => Promise<void>;
+  onJobStarted?: () => Promise<boolean | void>;
 }) {
   const [speechMode, setSpeechMode] = useState<SpeechMode>('custom');
   const [prompt, setPrompt] = useState('');

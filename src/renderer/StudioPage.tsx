@@ -1,15 +1,16 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Mic, UserPlus, Video } from 'lucide-react';
+import { Image as ImageIcon, Mic, UserPlus, Video } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import type { StudioIntent } from './App';
 import { AudioDigitalHumanForm } from './AudioDigitalHumanForm';
 import { AvatarImage } from './AvatarImage';
+import { ImageForm } from './ImageForm';
 import { SpeechForm } from './SpeechForm';
 import { TextToVideoForm } from './TextToVideoForm';
 import { useActiveJob } from './useActiveJob';
 
 type StudioMode = 'speech' | 'image' | 'video';
-type VisibleStudioMode = 'speech' | 'video';
+const STUDIO_MODES: readonly StudioMode[] = ['speech', 'image', 'video'];
 
 export function StudioPage({
   avatar,
@@ -31,12 +32,13 @@ export function StudioPage({
   const [mode, setMode] = useState<StudioMode>('video');
   const [videoMode, setVideoMode] = useState<'text' | 'audio'>('text');
   const speechModeTabRef = useRef<HTMLButtonElement | null>(null);
+  const imageModeTabRef = useRef<HTMLButtonElement | null>(null);
   const videoModeTabRef = useRef<HTMLButtonElement | null>(null);
   const textModeTabRef = useRef<HTMLButtonElement | null>(null);
   const audioModeTabRef = useRef<HTMLButtonElement | null>(null);
   const handledIntentTokenRef = useRef<number | null>(null);
   const pendingIntentFocusTokenRef = useRef<number | null>(null);
-  const { busy, refresh } = useActiveJob();
+  const { busy, syncRevision, refresh } = useActiveJob();
 
   useEffect(() => {
     if (intent === null) {
@@ -69,18 +71,32 @@ export function StudioPage({
     pendingIntentFocusTokenRef.current = null;
   }, [avatar, loading, intent, mode, videoMode]);
 
-  const focusMode = (nextMode: VisibleStudioMode): void => {
+  const focusMode = (nextMode: StudioMode): void => {
     setMode(nextMode);
-    (nextMode === 'speech' ? speechModeTabRef : videoModeTabRef).current?.focus();
+    const refs = {
+      speech: speechModeTabRef,
+      image: imageModeTabRef,
+      video: videoModeTabRef,
+    };
+    refs[nextMode].current?.focus();
   };
 
   const handleModeKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    const currentMode = event.target === speechModeTabRef.current ? 'speech' : 'video';
-    let nextMode: VisibleStudioMode;
+    const currentMode = event.target === speechModeTabRef.current
+      ? 'speech'
+      : event.target === imageModeTabRef.current
+        ? 'image'
+        : event.target === videoModeTabRef.current
+          ? 'video'
+          : mode;
+    const currentIndex = STUDIO_MODES.indexOf(currentMode);
+    let nextMode: StudioMode;
     switch (event.key) {
       case 'ArrowLeft':
+        nextMode = STUDIO_MODES[(currentIndex - 1 + STUDIO_MODES.length) % STUDIO_MODES.length];
+        break;
       case 'ArrowRight':
-        nextMode = currentMode === 'speech' ? 'video' : 'speech';
+        nextMode = STUDIO_MODES[(currentIndex + 1) % STUDIO_MODES.length];
         break;
       case 'Home':
         nextMode = 'speech';
@@ -148,6 +164,19 @@ export function StudioPage({
           语音
         </button>
         <button
+          ref={imageModeTabRef}
+          id="image-main-tab"
+          type="button"
+          role="tab"
+          aria-selected={mode === 'image'}
+          aria-controls="image-main-panel"
+          tabIndex={mode === 'image' ? 0 : -1}
+          onClick={() => setMode('image')}
+        >
+          <ImageIcon size={17} aria-hidden="true" />
+          图像
+        </button>
+        <button
           ref={videoModeTabRef}
           id="video-main-tab"
           type="button"
@@ -173,6 +202,23 @@ export function StudioPage({
             active={mode === 'speech'}
             pageActive={pageActive}
             busy={busy}
+            onJobStarted={refresh}
+          />
+        </section>
+      </div>
+
+      <div
+        id="image-main-panel"
+        role="tabpanel"
+        aria-labelledby="image-main-tab"
+        hidden={mode !== 'image'}
+      >
+        <section className="production-controls image-controls" aria-label="图像控制区">
+          <ImageForm
+            active={mode === 'image'}
+            pageActive={pageActive}
+            busy={busy}
+            syncRevision={syncRevision}
             onJobStarted={refresh}
           />
         </section>
