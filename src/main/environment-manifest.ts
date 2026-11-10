@@ -88,6 +88,7 @@ const runtimeSchema = z
     estimatedExtractedBytes: byteSizeSchema,
     pythonPath: relativePathSchema,
     launchScript: relativePathSchema,
+    ffmpegPath: relativePathSchema,
     ffprobePath: relativePathSchema,
   })
   .strict()

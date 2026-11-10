@@ -56,6 +56,34 @@ describe('environment manifest', () => {
         runtime.archiveParts.reduce((total, part) => total + part.size, 0),
       ).toBe(runtime.archiveSize);
     }
+    expect(manifest.runtimes.sm89.ffmpegPath).toBe(
+      'ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/ffmpeg/ffmpeg.exe',
+    );
+    expect(manifest.runtimes.sm120.ffmpegPath).toBe(
+      'ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffmpeg.exe',
+    );
+  });
+
+  test('requires ffmpeg paths in every runtime', () => {
+    const manifest = makeManifest();
+    manifest.runtimes.sm89.ffmpegPath =
+      'ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/ffmpeg/ffmpeg.exe';
+    manifest.runtimes.sm120.ffmpegPath =
+      'ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffmpeg.exe';
+
+    expect(() => parseEnvironmentManifest(manifest)).not.toThrow();
+
+    delete manifest.runtimes.sm89.ffmpegPath;
+    expect(() => parseEnvironmentManifest(manifest)).toThrow(/ffmpegPath/i);
+  });
+
+  test('uses safe relative path validation for ffmpeg paths', () => {
+    const manifest = makeManifest();
+    manifest.runtimes.sm89.ffmpegPath = '../ffmpeg.exe';
+    manifest.runtimes.sm120.ffmpegPath =
+      'ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffmpeg.exe';
+
+    expect(() => parseEnvironmentManifest(manifest)).toThrow(/safe relative path/i);
   });
 
   test.each([
@@ -175,6 +203,12 @@ describe('environment manifest', () => {
       name: 'ZIP ffprobe path',
       mutate: (manifest, value) => {
         manifest.runtimes.sm89.ffprobePath = value;
+      },
+    },
+    {
+      name: 'ZIP ffmpeg path',
+      mutate: (manifest, value) => {
+        manifest.runtimes.sm89.ffmpegPath = value;
       },
     },
   ];

@@ -82,6 +82,7 @@ function requiredComfyNodesFor(config: EnvironmentConfig): string[] {
 const REQUIRED_RUNTIME_FILES = [
   'python_embeded/python.exe',
   'tools/launch.py',
+  'tools/ffmpeg/ffmpeg.exe',
   'tools/ffmpeg/ffprobe.exe',
 ] as const;
 const EXTRA_MODEL_PATH_KEYS = [
@@ -378,7 +379,7 @@ function runtimeTopLevel(runtime: EnvironmentRuntime): string {
   const topLevel = runtimeSegments[0];
   if (
     !topLevel ||
-    [runtime.launchScript, runtime.ffprobePath].some(
+    [runtime.launchScript, runtime.ffmpegPath, runtime.ffprobePath].some(
       (path) => path.split('/')[0] !== topLevel,
     )
   ) {
@@ -1189,6 +1190,7 @@ export class EnvironmentSetupService {
         healthy: false,
         error: null,
       };
+      await verifyRuntimeFiles(config.runtimeRoot, signal);
       const resolveRuntimePath = (path: string) =>
         win32.join(config.runtimeRoot, ...path.split('/').slice(1));
       const result = await this.options.startBackend({

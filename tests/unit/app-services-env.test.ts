@@ -1,8 +1,9 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -179,6 +180,29 @@ function writeMediaEnvironmentConfig(
       updatedAt: '2026-01-01T00:00:00+08:00',
     }),
   );
+}
+
+async function writeVerifiedRuntime(runtimeRoot: string): Promise<void> {
+  const files: Record<string, string> = {
+    'python_embeded/python.exe': 'python',
+    'tools/launch.py': 'launch',
+    'tools/ffmpeg/ffmpeg.exe': 'ffmpeg',
+    'tools/ffmpeg/ffprobe.exe': 'ffprobe',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    const destination = join(runtimeRoot, ...path.split('/'));
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, content);
+  }
+  const manifest = Object.entries(files)
+    .map(
+      ([path, content]) =>
+        `${createHash('sha256').update(content).digest('hex')}  ${path}`,
+    )
+    .join('\n');
+  const manifestPath = join(runtimeRoot, 'docs', 'file-manifest.sha256');
+  await mkdir(dirname(manifestPath), { recursive: true });
+  await writeFile(manifestPath, `${manifest}\n`);
 }
 
 describe('createAppServices defaults', () => {
@@ -579,6 +603,7 @@ describe('createAppServices environment integration', () => {
     const dataDirectory = await useDataDirectory();
     const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
     await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    await writeVerifiedRuntime(join(dataDirectory, 'runtime', 'sm120'));
     const objectInfo = Object.fromEntries(
       [
         ...REQUIRED_COMFY_NODES,
@@ -1291,6 +1316,7 @@ describe('createEnvironmentStartBackend', () => {
     test('validates a ready config through health and required nodes, then reports healthy', async () => {
       const dataDirectory = await useDataDirectory();
       await writeReadyConfig(dataDirectory);
+      await writeVerifiedRuntime(join(dataDirectory, 'runtime', 'sm120'));
       const upstream = await startBackendServer();
       cleanups.push(() => upstream.close());
 
@@ -1315,6 +1341,7 @@ describe('createEnvironmentStartBackend', () => {
     test('rejects validation when the backend misses required nodes without activating', async () => {
       const dataDirectory = await useDataDirectory();
       await writeReadyConfig(dataDirectory);
+      await writeVerifiedRuntime(join(dataDirectory, 'runtime', 'sm120'));
       const upstream = await startBackendServer({ objectInfoValue: {} });
       cleanups.push(() => upstream.close());
 

@@ -194,6 +194,7 @@ function makeManifest(
       estimatedExtractedBytes: 1024,
       pythonPath: `${TOP_LEVEL}/python_embeded/python.exe`,
       launchScript: `${TOP_LEVEL}/tools/launch.py`,
+      ffmpegPath: `${TOP_LEVEL}/tools/ffmpeg/ffmpeg.exe`,
       ffprobePath: `${TOP_LEVEL}/tools/ffmpeg/ffprobe.exe`,
     };
   }
@@ -259,14 +260,20 @@ describe('image runtime inspection', () => {
 
 async function writeRuntimeFiles(
   runtimeRoot: string,
-  options: { corruptLaunch?: boolean; omitManifestEntry?: boolean } = {},
+  options: {
+    corruptLaunch?: boolean;
+    omitFfmpeg?: boolean;
+    omitManifestEntry?: boolean;
+  } = {},
 ): Promise<void> {
   const files = new Map([
     ['python_embeded/python.exe', Buffer.from('python')],
     ['tools/launch.py', Buffer.from('launch')],
+    ['tools/ffmpeg/ffmpeg.exe', Buffer.from('ffmpeg')],
     ['tools/ffmpeg/ffprobe.exe', Buffer.from('ffprobe')],
   ]);
   for (const [path, content] of files) {
+    if (options.omitFfmpeg && path === 'tools/ffmpeg/ffmpeg.exe') continue;
     const destination = join(runtimeRoot, ...path.split('/'));
     await mkdir(dirname(destination), { recursive: true });
     await writeFile(
@@ -343,6 +350,7 @@ async function createHarness(
     configure?: (context: {
       failNextModel: { value: number };
       corruptLaunch: { value: boolean };
+      omitFfmpeg: { value: boolean };
       omitManifestEntry: { value: boolean };
       backend: BackendMock;
       downloadProgress: { current: (() => void) | undefined };
@@ -358,6 +366,7 @@ async function createHarness(
   const store = new EnvironmentStore(join(installRoot, 'environment.json'));
   const failNextModel = { value: -1 };
   const corruptLaunch = { value: false };
+  const omitFfmpeg = { value: false };
   const omitManifestEntry = { value: false };
   const downloadProgress = { current: undefined as (() => void) | undefined };
   const networkDownloads: string[] = [];
@@ -372,6 +381,7 @@ async function createHarness(
   overrides.configure?.({
     failNextModel,
     corruptLaunch,
+    omitFfmpeg,
     omitManifestEntry,
     backend,
     downloadProgress,
@@ -428,6 +438,7 @@ async function createHarness(
   const extract = vi.fn(async ({ stagingDirectory }: EnvironmentExtractInput) => {
     await writeRuntimeFiles(join(stagingDirectory, TOP_LEVEL), {
       corruptLaunch: corruptLaunch.value,
+      omitFfmpeg: omitFfmpeg.value,
       omitManifestEntry: omitManifestEntry.value,
     });
   });
@@ -758,6 +769,28 @@ describe('EnvironmentSetupService existing environment import', () => {
         join(harness.runtimeRoot, 'ComfyUI', 'extra_model_paths.yaml'),
       ),
     ).toBe(false);
+  });
+
+  test('rejects an existing runtime without ffmpeg before starting the backend', async () => {
+    const harness = await createHarness();
+    await seedExistingEnvironment(harness);
+    await rm(join(harness.runtimeRoot, 'tools', 'ffmpeg', 'ffmpeg.exe'));
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/ffmpeg\.exe.*missing|missing.*ffmpeg\.exe/i);
+
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.service.getState()).toMatchObject({
+      stage: 'verify',
+      active: false,
+      healthy: false,
+      config: null,
+    });
   });
 
   test('uses an external YAML model root without modifying the YAML', async () => {
@@ -1496,6 +1529,29 @@ describe('EnvironmentSetupService installation', () => {
       expect(yaml).toContain(`${key}: ${key}`);
     }
     expect(existsSync(join(harness.installRoot, '.smo-install', 'staging'))).toBe(false);
+  });
+
+  test('rejects an installed runtime without ffmpeg before becoming ready', async () => {
+    const harness = await createHarness({
+      configure: ({ omitFfmpeg }) => {
+        omitFfmpeg.value = true;
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/ffmpeg\.exe.*missing|missing.*ffmpeg\.exe/i);
+
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect((await harness.store.load())?.status).toBe('failed');
+    expect(harness.service.getState()).toMatchObject({
+      stage: 'verify',
+      active: false,
+      healthy: false,
+    });
   });
 
   test('records the normalized installRoot in the saved environment config', async () => {
@@ -2968,6 +3024,7 @@ describe('EnvironmentSetupService backend transactions', () => {
     const startBackend = vi.fn(async () => transaction.result);
     const previous = await createHarness();
     const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
     const harness = await createHarness({
       outputDirectory: previous.outputDirectory,
       service: { store: previous.store, startBackend },
@@ -3015,7 +3072,8 @@ describe('EnvironmentSetupService backend transactions', () => {
     });
     let observedSignal: AbortSignal | undefined;
     const previous = await createHarness();
-    await seedReadyConfig(previous);
+    const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
     const harness = await createHarness({
       outputDirectory: previous.outputDirectory,
       service: {
@@ -3065,6 +3123,7 @@ describe('EnvironmentSetupService backend transactions', () => {
     );
     const previous = await createHarness();
     const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
     const harness = await createHarness({
       outputDirectory: previous.outputDirectory,
       service: {
@@ -3085,6 +3144,28 @@ describe('EnvironmentSetupService backend transactions', () => {
     expect(harness.service.getState().error).toMatch(
       /missing required nodes[\s\S]*validation backend rollback exploded/i,
     );
+  });
+
+  test('rejects validation when the ready runtime is missing ffmpeg', async () => {
+    const previous = await createHarness();
+    const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
+    await rm(join(ready.runtimeRoot, 'tools', 'ffmpeg', 'ffmpeg.exe'));
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: { store: previous.store },
+    });
+
+    await expect(harness.service.validate()).rejects.toThrow(
+      /ffmpeg\.exe.*missing|missing.*ffmpeg\.exe/i,
+    );
+
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect(await previous.store.load()).toEqual(ready);
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+    });
   });
 });
 

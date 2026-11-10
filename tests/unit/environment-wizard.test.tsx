@@ -68,6 +68,7 @@ function environmentState(overrides: Partial<EnvironmentState> = {}): Environmen
         estimatedExtractedBytes: 2 * GIB,
         pythonPath: 'runtime/python.exe',
         launchScript: 'runtime/launch.py',
+        ffmpegPath: 'runtime/ffmpeg.exe',
         ffprobePath: 'runtime/ffprobe.exe',
       },
       profile: 'balanced-16gb',

@@ -53,6 +53,7 @@ export interface EnvironmentRuntime {
   estimatedExtractedBytes: number;
   pythonPath: string;
   launchScript: string;
+  ffmpegPath: string;
   ffprobePath: string;
 }
 
