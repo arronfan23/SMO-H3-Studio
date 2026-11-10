@@ -104,7 +104,7 @@ export class SpeechRuntime {
     await mkdir(toolsRoot, { recursive: true });
     const temporaryDirectory = await mkdtemp(join(toolsRoot, '.uv-'));
     try {
-      await this.execFile('tar', ['-xf', archivePath, '-C', temporaryDirectory], {
+      await this.execFile('tar', ['-m', '-xf', archivePath, '-C', temporaryDirectory], {
         cwd: this.options.runtimeDirectory,
         env: commandOptions.env,
         shell: false,
@@ -114,11 +114,11 @@ export class SpeechRuntime {
       if (!(await fileExists(temporaryUvPath))) {
         throw new Error('The verified uv archive did not contain uv.exe');
       }
-      if (!(await this.hasExpectedUvVersion(temporaryUvPath, commandOptions))) {
-        throw new Error(`The extracted uv.exe does not report version ${UV_VERSION}`);
-      }
       await rm(toolDirectory, { recursive: true, force: true });
       await rename(temporaryDirectory, toolDirectory);
+      if (!(await this.hasExpectedUvVersion(join(toolDirectory, 'uv.exe'), commandOptions))) {
+        throw new Error(`The extracted uv.exe does not report version ${UV_VERSION}`);
+      }
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
     }

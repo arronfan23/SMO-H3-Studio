@@ -145,6 +145,28 @@ describe('SpeechRuntime', () => {
     expect(result.environment.PYTHONHOME).toBeUndefined();
   });
 
+  test('extracts uv without restoring timestamps for exFAT compatibility', async () => {
+    const { runtime, calls } = createRuntime();
+
+    await runtime.prepare();
+
+    const tarCall = calls.find(({ command }) => command === 'tar');
+    expect(tarCall?.args.slice(0, 2)).toEqual(['-m', '-xf']);
+  });
+
+  test('activates the extracted uv before executing its version check', async () => {
+    const { runtime, calls } = createRuntime();
+
+    await runtime.prepare();
+
+    const versionCall = calls.find(
+      ({ command, args }) => command.endsWith('uv.exe') && args[0] === '--version',
+    );
+    expect(versionCall?.command).toBe(
+      join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`, 'uv.exe'),
+    );
+  });
+
   test('rejects a modified uv archive before executing any command', async () => {
     await writeFile(join(modelDirectory, ...UV_PATH.split('/')), 'tampered');
     const { runtime, execFile } = createRuntime();
