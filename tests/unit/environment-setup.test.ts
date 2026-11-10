@@ -32,6 +32,7 @@ import type {
   DownloadPartsOptions,
   DownloadReceipt,
 } from '../../src/main/download';
+import { modelDownloadUrls as sharedModelDownloadUrls } from '../../src/main/download';
 import type {
   EnvironmentConfig,
   EnvironmentManifest,
@@ -3457,27 +3458,13 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
   });
 });
 
-describe('production ZIP extraction', () => {
-  test('maps Hugging Face downloads to the mirror while preserving official fallback', () => {
-    expect(modelDownloadUrls({
-      url: 'https://huggingface.co/repo/resolve/main/model.safetensors?download=true',
-      path: 'models/model.safetensors',
-      size: 1,
-      sha256: '0'.repeat(64),
-      source: 'test',
-    })).toEqual([
-      'https://hf-mirror.com/repo/resolve/main/model.safetensors?download=true',
-      'https://huggingface.co/repo/resolve/main/model.safetensors?download=true',
-    ]);
-    expect(modelDownloadUrls({
-      url: 'https://models.test/model.safetensors',
-      path: 'models/model.safetensors',
-      size: 1,
-      sha256: '0'.repeat(64),
-      source: 'test',
-    })).toEqual(['https://models.test/model.safetensors']);
+describe('download source compatibility', () => {
+  test('re-exports the shared modelDownloadUrls helper', () => {
+    expect(modelDownloadUrls).toBe(sharedModelDownloadUrls);
   });
+});
 
+describe('production ZIP extraction', () => {
   test('extracts regular entries beneath staging', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-zip-valid-'));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

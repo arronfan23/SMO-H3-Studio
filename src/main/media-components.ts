@@ -1,3 +1,4 @@
+import { rm } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import defaultManifest from '../../resources/environment/media-components.json';
@@ -352,6 +353,12 @@ export class MediaComponentService {
           break;
         } catch (error) {
           if (signal.aborted || sourceIndex === sources.length - 1) throw error;
+          // Never resume bytes or chunk state written by a different source.
+          await Promise.all([
+            rm(`${destination}.part`, { force: true }),
+            rm(`${destination}.part.chunks.json`, { force: true }),
+            rm(`${destination}.part.chunks.json.tmp`, { force: true }),
+          ]);
         }
       }
       if (!receipt) throw new Error(`No download source available for ${file.path}`);

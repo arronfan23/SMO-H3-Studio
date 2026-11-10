@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from 'vit
 import {
   downloadFile,
   downloadParts,
+  modelDownloadUrls,
   type DownloadProgress,
 } from '../../src/main/download';
 import type { EnvironmentArchivePart } from '../../src/shared/environment';
@@ -994,6 +995,27 @@ describe('downloadFile', () => {
 
     expect(await readFile(`${destination}.part`)).toEqual(prefix);
     expect(await exists(destination)).toBe(false);
+  });
+});
+
+describe('modelDownloadUrls', () => {
+  test('maps Hugging Face downloads to the mirror while preserving official fallback', () => {
+    const model = {
+      url: 'https://huggingface.co/repo/resolve/main/model.safetensors?download=true',
+      path: 'models/model.safetensors',
+      size: 1,
+      sha256: '0'.repeat(64),
+      source: 'test',
+    };
+
+    expect(modelDownloadUrls(model)).toEqual([
+      'https://hf-mirror.com/repo/resolve/main/model.safetensors?download=true',
+      'https://huggingface.co/repo/resolve/main/model.safetensors?download=true',
+    ]);
+    expect(modelDownloadUrls({
+      ...model,
+      url: 'https://models.test/model.safetensors',
+    })).toEqual(['https://models.test/model.safetensors']);
   });
 });
 

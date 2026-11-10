@@ -443,6 +443,79 @@ describe('MediaComponentService', () => {
     });
   });
 
+  test('discards mirror partial files before falling back to the official source', async () => {
+    const manifest = makeManifest();
+    const originalUrl = 'https://huggingface.co/Qwen/Qwen3-TTS/resolve/main/model.bin';
+    const mirrorUrl = 'https://hf-mirror.com/Qwen/Qwen3-TTS/resolve/main/model.bin';
+    const mirrorPath = '/hf-mirror.com/Qwen/Qwen3-TTS/resolve/main/model.bin';
+    const officialPath = '/huggingface.co/Qwen/Qwen3-TTS/resolve/main/model.bin';
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    const fileDestination = destination(speechFile.path);
+    await mkdir(dirname(fileDestination), { recursive: true });
+    await writeFile(`${fileDestination}.part.chunks.json`, 'stale mirror ledger');
+    await writeFile(`${fileDestination}.part.chunks.json.tmp`, 'stale mirror ledger tmp');
+    const observedBytes: number[] = [];
+    let service: MediaComponentService;
+    const download = vi.fn<DownloadFile>(async (options) => {
+      const source = new URL(options.url);
+      return realDownloadFile({
+        ...options,
+        url: `${localOrigin}/${source.hostname}${source.pathname}`,
+        fetch: transport,
+        onProgress: (progress) => {
+          options.onProgress?.(progress);
+          observedBytes.push(service.getState('speech').downloadedBytes);
+        },
+      });
+    });
+    ({ service } = makeService(manifest, download));
+    handler = (request, response) => {
+      if (request.url === mirrorPath) {
+        response.writeHead(200, { 'Content-Length': speechFile.size });
+        response.write(Buffer.from('WRONG'), () => {
+          setTimeout(() => response.destroy(), 25);
+        });
+        return;
+      }
+      if (request.url === officialPath) {
+        serveBuffer(firstData)(request, response);
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    };
+
+    await service.install('speech');
+
+    expect(download.mock.calls.map(([options]) => options.url)).toEqual([
+      mirrorUrl,
+      originalUrl,
+    ]);
+    expect(requests).toEqual([
+      { path: mirrorPath, range: undefined },
+      { path: officialPath, range: undefined },
+    ]);
+    const installed = await readFile(fileDestination);
+    expect(installed).toEqual(firstData);
+    expect(sha256(installed)).toBe(speechFile.sha256);
+    for (const suffix of ['.part', '.part.chunks.json', '.part.chunks.json.tmp']) {
+      expect(await exists(`${fileDestination}${suffix}`)).toBe(false);
+    }
+    expect(observedBytes.length).toBeGreaterThanOrEqual(2);
+    for (let index = 1; index < observedBytes.length; index += 1) {
+      expect(observedBytes[index]).toBeGreaterThanOrEqual(observedBytes[index - 1]);
+    }
+    expect(service.getState('speech')).toMatchObject({
+      status: 'ready',
+      downloadedBytes: speechFile.size,
+      active: false,
+    });
+  });
+
   test('stops before the official URL when a mirror download is cancelled', async () => {
     const manifest = makeManifest();
     const originalUrl = 'https://huggingface.co/Qwen/Qwen3-TTS/resolve/main/model.bin';
@@ -451,6 +524,16 @@ describe('MediaComponentService', () => {
     manifest.components.speech.files = [speechFile];
     manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
     manifest.components.speech.totalBytes = speechFile.size;
+    const fileDestination = destination(speechFile.path);
+    const retainedFiles = [
+      `${fileDestination}.part`,
+      `${fileDestination}.part.chunks.json`,
+      `${fileDestination}.part.chunks.json.tmp`,
+    ];
+    await mkdir(dirname(fileDestination), { recursive: true });
+    for (const [index, path] of retainedFiles.entries()) {
+      await writeFile(path, `cancel retains file ${index}`);
+    }
     let notifyStarted: (() => void) | undefined;
     const started = new Promise<void>((resolve) => {
       notifyStarted = resolve;
@@ -479,6 +562,9 @@ describe('MediaComponentService', () => {
       active: false,
       error: null,
     });
+    for (const [index, path] of retainedFiles.entries()) {
+      expect(await readFile(path, 'utf8')).toBe(`cancel retains file ${index}`);
+    }
   });
 
   test('preserves the official source error after the mirror also fails', async () => {

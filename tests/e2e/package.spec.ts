@@ -252,7 +252,7 @@ async function scanSensitiveFiles(root: string): Promise<string[]> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const full = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === 'test-results' || entry.name === '.worktrees') {
+        if (['test-results', '.worktrees', '.venv', '__pycache__'].includes(entry.name)) {
           violations.push(full);
         } else {
           await walk(full);
@@ -263,10 +263,13 @@ async function scanSensitiveFiles(root: string): Promise<string[]> {
       if (/\.(sqlite|sqlite3|db|log)$/.test(lower)) {
         violations.push(full);
       }
-      if (/\.(mp4|webm|mov)$/.test(lower)) {
+      if (/\.(safetensors|gguf|ckpt|pt|pth|onnx|tflite|pb|bin)$/.test(lower)) {
         violations.push(full);
       }
-      if (/\.(md|txt|json|js|ts|yaml|yml|html|css)$/.test(lower)) {
+      if (/\.(mp4|webm|mov|wav|mp3|flac|ogg|m4a|aac|opus)$/.test(lower)) {
+        violations.push(full);
+      }
+      if (/\.(md|txt|json|js|ts|yaml|yml|html|css|py|toml|lock)$/.test(lower)) {
         const content = await readFile(full, 'utf8');
         if (content.includes(TEST_LLM_API_KEY)) {
           violations.push(`${full} (contains test API key)`);
@@ -340,8 +343,10 @@ async function assertViewWithinViewport(
   viewName: string,
   selectors: string[],
 ): Promise<void> {
+  // Windows fractional display scaling can round scrollIntoView to a subpixel.
+  const roundingTolerance = 1;
   const violations = await page.evaluate(
-    ({ view, selectors }) => {
+    ({ view, selectors, roundingTolerance }) => {
       const viewport = { width: window.innerWidth, height: window.innerHeight };
       const results: Array<{
         view: string;
@@ -365,10 +370,10 @@ async function assertViewWithinViewport(
         element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         const rect = element.getBoundingClientRect();
         if (
-          rect.left < 0 ||
-          rect.right > viewport.width ||
-          rect.top < 0 ||
-          rect.bottom > viewport.height
+          rect.left < -roundingTolerance ||
+          rect.right > viewport.width + roundingTolerance ||
+          rect.top < -roundingTolerance ||
+          rect.bottom > viewport.height + roundingTolerance
         ) {
           results.push({
             view,
@@ -380,7 +385,7 @@ async function assertViewWithinViewport(
       }
       return results;
     },
-    { view: viewName, selectors },
+    { view: viewName, selectors, roundingTolerance },
   );
   expect(violations).toEqual([]);
 }
@@ -698,6 +703,16 @@ test.describe('SMO.H3 Studio portable package', () => {
       .map((entry) => entry.name)
       .sort();
     expect(skillDirectories).toHaveLength(9);
+
+    const speechDirectory = join(packagedResourcesPath, 'resources', 'speech');
+    expect((await readdir(speechDirectory)).sort()).toEqual([
+      'pyproject.toml',
+      'qwen_tts_service.py',
+      'uv.lock',
+    ]);
+    for (const file of ['pyproject.toml', 'qwen_tts_service.py', 'uv.lock']) {
+      expect((await stat(join(speechDirectory, file))).size).toBeGreaterThan(0);
+    }
 
     const violations = await scanSensitiveFiles(packagedResourcesPath);
     expect(violations).toEqual([]);
