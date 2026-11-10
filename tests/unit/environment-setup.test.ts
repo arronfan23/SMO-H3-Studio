@@ -21,6 +21,7 @@ import {
   REQUIRED_COMFY_NODES,
   extractZipArchive,
   modelDownloadUrls,
+  runtimeDownloadUrls,
   resolveExistingModelRoot,
   type EnvironmentExtractInput,
   type EnvironmentSetupServiceOptions,
@@ -32,7 +33,10 @@ import type {
   DownloadPartsOptions,
   DownloadReceipt,
 } from '../../src/main/download';
-import { modelDownloadUrls as sharedModelDownloadUrls } from '../../src/main/download';
+import {
+  modelDownloadUrls as sharedModelDownloadUrls,
+  runtimeDownloadUrls as sharedRuntimeDownloadUrls,
+} from '../../src/main/download';
 import type {
   EnvironmentConfig,
   EnvironmentManifest,
@@ -3459,8 +3463,9 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
 });
 
 describe('download source compatibility', () => {
-  test('re-exports the shared modelDownloadUrls helper', () => {
+  test('re-exports the shared download source helpers', () => {
     expect(modelDownloadUrls).toBe(sharedModelDownloadUrls);
+    expect(runtimeDownloadUrls).toBe(sharedRuntimeDownloadUrls);
   });
 });
 

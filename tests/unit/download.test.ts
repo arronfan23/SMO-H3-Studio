@@ -17,6 +17,7 @@ import {
   downloadFile,
   downloadParts,
   modelDownloadUrls,
+  runtimeDownloadUrls,
   type DownloadProgress,
 } from '../../src/main/download';
 import type { EnvironmentArchivePart } from '../../src/shared/environment';
@@ -750,7 +751,7 @@ describe('downloadFile', () => {
     expect(await readFile(destination)).toEqual(payload);
   });
 
-  test('keeps the part file and never creates the destination on a hash mismatch', async () => {
+  test('discards the part file and never creates the destination on a hash mismatch', async () => {
     const payload = Buffer.from('untrusted contents');
     const destination = join(directory, 'model.bin');
     handler = serveBuffer(payload);
@@ -766,7 +767,7 @@ describe('downloadFile', () => {
     ).rejects.toThrow(/sha256|hash/i);
 
     expect(await exists(destination)).toBe(false);
-    expect(await readFile(`${destination}.part`)).toEqual(payload);
+    expect(await exists(`${destination}.part`)).toBe(false);
   });
 
   test('keeps the part file and never creates the destination on a size mismatch', async () => {
@@ -1016,6 +1017,25 @@ describe('modelDownloadUrls', () => {
       ...model,
       url: 'https://models.test/model.safetensors',
     })).toEqual(['https://models.test/model.safetensors']);
+  });
+});
+
+describe('runtimeDownloadUrls', () => {
+  test('preserves the official GitHub URL before the runtime mirror fallback', () => {
+    const officialUrl =
+      'https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip';
+
+    expect(runtimeDownloadUrls(officialUrl)).toEqual([
+      officialUrl,
+      `https://ghproxy.net/${officialUrl}`,
+    ]);
+  });
+
+  test.each([
+    'https://huggingface.co/repo/resolve/main/model.safetensors?download=true',
+    'https://downloads.test/runtime.zip?original=true',
+  ])('leaves non-GitHub downloads unchanged: %s', (url) => {
+    expect(runtimeDownloadUrls(url)).toEqual([url]);
   });
 });
 

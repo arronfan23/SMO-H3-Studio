@@ -9,6 +9,7 @@ import {
   downloadFile as defaultDownloadFile,
   downloadParts as defaultDownloadParts,
   modelDownloadUrls,
+  runtimeDownloadUrls,
 } from './download';
 import {
   selectEnvironmentProfile,
@@ -30,7 +31,7 @@ import type {
 import type { HardwareInfo } from '../shared/types';
 import { selectSparkAcceleration } from './spark-acceleration';
 
-export { modelDownloadUrls } from './download';
+export { modelDownloadUrls, runtimeDownloadUrls } from './download';
 
 export const REQUIRED_COMFY_NODES = [
   'SelfLiftH3Sampler',
@@ -576,13 +577,6 @@ async function writeExtraModelPaths(
     lines.join('\n'),
     'utf8',
   );
-}
-
-/** GitHub is preferred; the mirror is a fallback and SHA256 verifies every byte. */
-export function runtimeDownloadUrls(url: string): string[] {
-  const source = new URL(url);
-  if (source.hostname !== 'github.com') return [url];
-  return [url, `https://ghproxy.net/${url}`];
 }
 
 function readObjectInfo(result: unknown): Record<string, unknown> {

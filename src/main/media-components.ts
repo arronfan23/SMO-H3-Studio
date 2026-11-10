@@ -1,5 +1,5 @@
-import { rm } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import defaultManifest from '../../resources/environment/media-components.json';
 import type {
@@ -13,6 +13,7 @@ import {
   downloadFile as defaultDownloadFile,
   type DownloadReceipt,
   modelDownloadUrls,
+  runtimeDownloadUrls,
 } from './download';
 
 const WINDOWS_DEVICE_NAME_PATTERN =
@@ -70,13 +71,43 @@ function pathsCollide(first: string, second: string): boolean {
     .every((segment, index) => segment === secondSegments[index]);
 }
 
-function occupiedPaths(path: string): string[] {
+function temporaryDownloadPaths(destination: string): string[] {
   return [
-    path,
-    `${path}.part`,
-    `${path}.part.chunks.json`,
-    `${path}.part.chunks.json.tmp`,
+    `${destination}.part`,
+    `${destination}.part.chunks.json`,
+    `${destination}.part.chunks.json.tmp`,
+    `${destination}.part.source`,
   ];
+}
+
+function occupiedPaths(path: string): string[] {
+  return [path, ...temporaryDownloadPaths(path)];
+}
+
+async function clearTemporaryDownload(destination: string): Promise<void> {
+  await Promise.all(
+    temporaryDownloadPaths(destination).map((path) => rm(path, { force: true })),
+  );
+}
+
+async function prepareDownloadSource(destination: string, url: string): Promise<void> {
+  const sourcePath = `${destination}.part.source`;
+  let previousSource: string | undefined;
+  try {
+    previousSource = await readFile(sourcePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (previousSource !== url) await clearTemporaryDownload(destination);
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(sourcePath, url, 'utf8');
+}
+
+function isDownloadHashMismatch(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message === 'Downloaded SHA256 does not match the expected SHA256'
+  );
 }
 
 const mediaComponentFileSchema = z
@@ -327,11 +358,18 @@ export class MediaComponentService {
       signal.throwIfAborted();
       const destination = this.destination(id, file);
       this.setState(id, { currentFile: file.path });
-      const sources = modelDownloadUrls(file);
+      const hostname = new URL(file.url).hostname;
+      const sources =
+        hostname === 'huggingface.co'
+          ? modelDownloadUrls(file)
+          : hostname === 'github.com'
+            ? runtimeDownloadUrls(file.url)
+            : [file.url];
       let receipt: DownloadReceipt | undefined;
       for (const [sourceIndex, url] of sources.entries()) {
         signal.throwIfAborted();
         try {
+          await prepareDownloadSource(destination, url);
           receipt = await (this.options.downloadFile ?? defaultDownloadFile)({
             url,
             destination,
@@ -350,15 +388,16 @@ export class MediaComponentService {
               });
             },
           });
+          await clearTemporaryDownload(destination);
           break;
         } catch (error) {
-          if (signal.aborted || sourceIndex === sources.length - 1) throw error;
-          // Never resume bytes or chunk state written by a different source.
-          await Promise.all([
-            rm(`${destination}.part`, { force: true }),
-            rm(`${destination}.part.chunks.json`, { force: true }),
-            rm(`${destination}.part.chunks.json.tmp`, { force: true }),
-          ]);
+          if (signal.aborted) throw error;
+          const finalSource = sourceIndex === sources.length - 1;
+          if (!finalSource || isDownloadHashMismatch(error)) {
+            // A part can only be resumed by the exact source that wrote it.
+            await clearTemporaryDownload(destination);
+          }
+          if (finalSource) throw error;
         }
       }
       if (!receipt) throw new Error(`No download source available for ${file.path}`);

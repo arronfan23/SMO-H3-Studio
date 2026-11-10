@@ -62,6 +62,13 @@ export function modelDownloadUrls(model: EnvironmentModelFile): string[] {
   ];
 }
 
+/** GitHub is preferred; the mirror is a fallback and SHA256 verifies every byte. */
+export function runtimeDownloadUrls(url: string): string[] {
+  const source = new URL(url);
+  if (source.hostname !== 'github.com') return [url];
+  return [url, `https://ghproxy.net/${url}`];
+}
+
 function electronResponseHeaders(
   input: Record<string, string | string[]>,
 ): Headers {
@@ -1040,6 +1047,7 @@ async function downloadFileSequential(
     );
   }
   if (actualSha256 !== expectedSha256) {
+    await rm(partPath, { force: true });
     throw new Error('Downloaded SHA256 does not match the expected SHA256');
   }
 

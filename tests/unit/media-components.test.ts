@@ -280,6 +280,7 @@ describe('media component manifest', () => {
     ['a/b', 'a'],
     ['a', 'a.part'],
     ['a', 'a.part.chunks.json'],
+    ['a', 'a.part.source'],
     ['A', 'a.PART'],
   ])('rejects file and temporary-path collisions: %j and %j', (first, second) => {
     const manifest = makeManifest();
@@ -443,6 +444,46 @@ describe('MediaComponentService', () => {
     });
   });
 
+  test('falls back from a failed GitHub download to the runtime mirror with identical verification inputs', async () => {
+    const manifest = makeManifest();
+    const originalUrl =
+      'https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip';
+    const mirrorUrl = `https://ghproxy.net/${originalUrl}`;
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    const download = vi.fn<DownloadFile>(async (options) => {
+      if (options.url === originalUrl) throw new Error('GitHub connection failed');
+      return {
+        resumed: false,
+        bytes: options.expectedSize,
+        sha256: options.expectedSha256,
+      };
+    });
+    const { service } = makeService(manifest, download);
+
+    await service.install('speech');
+
+    expect(download.mock.calls.map(([options]) => options.url)).toEqual([
+      originalUrl,
+      mirrorUrl,
+    ]);
+    for (const [options] of download.mock.calls) {
+      expect(options).toMatchObject({
+        destination: destination(speechFile.path),
+        expectedSize: speechFile.size,
+        expectedSha256: speechFile.sha256,
+      });
+    }
+    expect(service.getState('speech')).toMatchObject({
+      status: 'ready',
+      downloadedBytes: speechFile.size,
+      active: false,
+    });
+  });
+
   test('discards mirror partial files before falling back to the official source', async () => {
     const manifest = makeManifest();
     const originalUrl = 'https://huggingface.co/Qwen/Qwen3-TTS/resolve/main/model.bin';
@@ -458,6 +499,7 @@ describe('MediaComponentService', () => {
     await mkdir(dirname(fileDestination), { recursive: true });
     await writeFile(`${fileDestination}.part.chunks.json`, 'stale mirror ledger');
     await writeFile(`${fileDestination}.part.chunks.json.tmp`, 'stale mirror ledger tmp');
+    await writeFile(`${fileDestination}.part.source`, mirrorUrl);
     const observedBytes: number[] = [];
     let service: MediaComponentService;
     const download = vi.fn<DownloadFile>(async (options) => {
@@ -502,7 +544,12 @@ describe('MediaComponentService', () => {
     const installed = await readFile(fileDestination);
     expect(installed).toEqual(firstData);
     expect(sha256(installed)).toBe(speechFile.sha256);
-    for (const suffix of ['.part', '.part.chunks.json', '.part.chunks.json.tmp']) {
+    for (const suffix of [
+      '.part',
+      '.part.chunks.json',
+      '.part.chunks.json.tmp',
+      '.part.source',
+    ]) {
       expect(await exists(`${fileDestination}${suffix}`)).toBe(false);
     }
     expect(observedBytes.length).toBeGreaterThanOrEqual(2);
@@ -516,9 +563,116 @@ describe('MediaComponentService', () => {
     });
   });
 
+  test('does not resume a failed mirror part from the official URL on the next install', async () => {
+    const manifest = makeManifest();
+    const originalUrl =
+      'https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip';
+    const officialPath =
+      '/github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip';
+    const mirrorPath =
+      '/ghproxy.net/https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip';
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    const fileDestination = destination(speechFile.path);
+    let officialShouldFail = true;
+    const download = vi.fn<DownloadFile>(async (options) => {
+      const source = new URL(options.url);
+      return realDownloadFile({
+        ...options,
+        url: `${localOrigin}/${source.hostname}${source.pathname}`,
+        fetch: transport,
+      });
+    });
+    const { service } = makeService(manifest, download);
+    handler = (request, response) => {
+      if (request.url === officialPath) {
+        if (officialShouldFail) {
+          response.writeHead(503);
+          response.end('official unavailable');
+        } else {
+          serveBuffer(firstData)(request, response);
+        }
+        return;
+      }
+      if (request.url === mirrorPath) {
+        response.writeHead(200, { 'Content-Length': speechFile.size });
+        response.write(Buffer.from('WRONG'), () => {
+          setTimeout(() => response.destroy(), 25);
+        });
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    };
+
+    await expect(service.install('speech')).rejects.toThrow();
+    expect(await readFile(`${fileDestination}.part`)).toEqual(Buffer.from('WRONG'));
+
+    requests = [];
+    officialShouldFail = false;
+    await service.install('speech');
+
+    expect(requests).toEqual([{ path: officialPath, range: undefined }]);
+    expect(await readFile(fileDestination)).toEqual(firstData);
+    expect(sha256(await readFile(fileDestination))).toBe(speechFile.sha256);
+    expect(service.getState('speech')).toMatchObject({
+      status: 'ready',
+      downloadedBytes: speechFile.size,
+      active: false,
+    });
+    for (const suffix of [
+      '.part',
+      '.part.chunks.json',
+      '.part.chunks.json.tmp',
+      '.part.source',
+    ]) {
+      expect(await exists(`${fileDestination}${suffix}`)).toBe(false);
+    }
+  });
+
+  test('resumes a same-source network partial on the next install', async () => {
+    const manifest = makeManifest();
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    const fileDestination = destination(speechFile.path);
+    const prefix = firstData.subarray(0, 8);
+    let shouldFail = true;
+    const { service } = makeService(manifest);
+    handler = (request, response) => {
+      if (!shouldFail) {
+        serveBuffer(firstData)(request, response);
+        return;
+      }
+      response.writeHead(200, { 'Content-Length': speechFile.size });
+      response.write(prefix, () => {
+        setTimeout(() => response.destroy(), 25);
+      });
+    };
+
+    await expect(service.install('speech')).rejects.toThrow();
+    expect(await readFile(`${fileDestination}.part`)).toEqual(prefix);
+
+    requests = [];
+    shouldFail = false;
+    await service.install('speech');
+
+    expect(requests).toEqual([
+      { path: `/${speechFile.path}`, range: `bytes=${prefix.length}-` },
+    ]);
+    expect(await readFile(fileDestination)).toEqual(firstData);
+    expect(service.getState('speech')).toMatchObject({ status: 'ready', active: false });
+    expect(await exists(`${fileDestination}.part.source`)).toBe(false);
+  });
+
   test('stops before the official URL when a mirror download is cancelled', async () => {
     const manifest = makeManifest();
     const originalUrl = 'https://huggingface.co/Qwen/Qwen3-TTS/resolve/main/model.bin';
+    const mirrorUrl = 'https://hf-mirror.com/Qwen/Qwen3-TTS/resolve/main/model.bin';
     const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
     speechFile.url = originalUrl;
     manifest.components.speech.files = [speechFile];
@@ -534,6 +688,7 @@ describe('MediaComponentService', () => {
     for (const [index, path] of retainedFiles.entries()) {
       await writeFile(path, `cancel retains file ${index}`);
     }
+    await writeFile(`${fileDestination}.part.source`, mirrorUrl);
     let notifyStarted: (() => void) | undefined;
     const started = new Promise<void>((resolve) => {
       notifyStarted = resolve;
@@ -565,6 +720,49 @@ describe('MediaComponentService', () => {
     for (const [index, path] of retainedFiles.entries()) {
       expect(await readFile(path, 'utf8')).toBe(`cancel retains file ${index}`);
     }
+    expect(await readFile(`${fileDestination}.part.source`, 'utf8')).toBe(mirrorUrl);
+  });
+
+  test('stops before the GitHub mirror when the official download is cancelled', async () => {
+    const manifest = makeManifest();
+    const originalUrl =
+      'https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip';
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    const fileDestination = destination(speechFile.path);
+    await mkdir(dirname(fileDestination), { recursive: true });
+    await writeFile(fileDestination, firstData);
+    let notifyStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const download = vi.fn<DownloadFile>(async (options) => {
+      notifyStarted?.();
+      return new Promise((resolve, reject) => {
+        const rejectAbort = () => reject(options.signal?.reason);
+        if (options.signal?.aborted) rejectAbort();
+        options.signal?.addEventListener('abort', rejectAbort, { once: true });
+      });
+    });
+    const { service } = makeService(manifest, download);
+
+    const installing = service.install('speech');
+    await started;
+    service.cancel('speech');
+
+    await expect(installing).rejects.toThrow(/cancel|abort/i);
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(download.mock.calls[0][0].url).toBe(originalUrl);
+    expect(service.getState('speech')).toMatchObject({
+      status: 'missing',
+      active: false,
+      error: null,
+    });
+    expect(await readFile(fileDestination)).toEqual(firstData);
+    expect(await readFile(`${fileDestination}.part.source`, 'utf8')).toBe(originalUrl);
   });
 
   test('preserves the official source error after the mirror also fails', async () => {
@@ -676,11 +874,14 @@ describe('MediaComponentService', () => {
   });
 
   test('resumes a partial file and includes its existing bytes in component progress', async () => {
+    const manifest = makeManifest();
+    const speechFile = manifest.components.speech.files[1] as MediaComponentFile;
     const prefix = secondData.subarray(0, 11);
     const partialPath = `${destination('Base/tokenizer.txt')}.part`;
     await mkdir(dirname(partialPath), { recursive: true });
     await writeFile(partialPath, prefix);
-    const { service } = makeService();
+    await writeFile(`${partialPath}.source`, speechFile.url);
+    const { service } = makeService(manifest);
 
     await service.install('speech');
 
@@ -868,6 +1069,8 @@ describe('MediaComponentService', () => {
     });
     expect(service.getState('speech').status).not.toBe('ready');
     expect(await exists(destination('CustomVoice/config.json'))).toBe(false);
+    expect(await exists(`${destination('CustomVoice/config.json')}.part`)).toBe(false);
+    expect(await exists(`${destination('CustomVoice/config.json')}.part.source`)).toBe(false);
   });
 
   test('keeps a failed component independent from another component', async () => {
