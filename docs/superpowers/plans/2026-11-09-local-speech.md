@@ -365,3 +365,32 @@ git commit -m "Use speech works in audio digital human"
 
 **剩余风险：** 网络阻塞使真实语音主链路仍未得到本轮验收；打包结果不能替代真实模型加载、推理、音频有效性和任务调度验证。允许的 5 个环境导入测试失败仍使原始回归串联命令返回 1。
 
+#### 2026-11-10 续验记录（HEAD `3e5ce70d`）
+
+**结论：BLOCKED。** 复验 HEAD 为 `3e5ce70d507cc19949cea1a18b7dbef37f04b918`。既有 23 个文件全部复用，hf-mirror 已补齐 3 个 Tokenizer 文件；最终仅剩 GitHub uv 归档未完成。两次有界网络尝试均失败，未继续重试、未更换来源，也未修改生产代码。
+
+**1. 真实组件安装：26/27 文件，uv 下载阻塞**
+
+- 独立验收目录仍为 `G:\SMO-H3-Speech-Verification-20261110`。最终独立复算确认 **26/27** 个文件的预期大小和 SHA256 全部匹配，共 `5,696,780,240 / 5,720,134,760` 字节（**99.591714%**）；证据为 `reports/cache-verification.json`。
+- 本次通过 hf-mirror 新补齐 `Qwen3-TTS-Tokenizer-12Hz/configuration.json`（76 字节）、`model.safetensors`（682,293,092 字节）和 `preprocessor_config.json`（234 字节）。未删除或替换任何已完成的大模型。
+- 唯一缺失文件为 `runtime/uv-0.11.13-x86_64-pc-windows-msvc.zip`，大小 `23,354,520` 字节，清单 SHA256 为 `0953ac2ef4fbe47ad469bfa80b658a577a02c4d73a2fb9c4c7c70dda432efded`。本地目标缓存核查没有找到可复用归档；虽然系统存在独立 uv 命令，但未用它绕过清单归档校验。
+- 第 1 次续装运行 `44.813` 秒，在 uv 下载阶段失败：`TypeError: fetch failed`，原因 `read ECONNRESET`。第 2 次续装运行 `16.360` 秒，仍在 uv 下载阶段失败：`ConnectTimeoutError / UND_ERR_CONNECT_TIMEOUT`，目标 `github.com:443`，超时 `10000ms`。
+- 两次错误及进度快照分别保存在 `reports/install-attempt-1.log`、`install-attempt-2.log`、`install-failure-attempt-1.txt`、`install-failure-attempt-2.txt`、`install-progress-attempt-1.json` 和 `install-progress-attempt-2.json`。达到两次上限后未再联网重试，组件未进入 ready 状态。
+
+**2. 锁定环境、真实推理与四格式：未执行**
+
+- 因 uv 归档缺失，未执行 `SpeechRuntime.prepare()`，未创建或同步锁定 Python 3.12 环境，未加载 Qwen3-TTS，也未启动固定音色或克隆任务。
+- **真实输出仍为空。** 固定音色 WAV、以该 WAV 和已知文本为参考的克隆 WAV、MP3、FLAC、M4A 均未生成；`output` 文件数为 0，没有推理耗时、ffprobe 编码/采样率/时长、非静音检测或输出 SHA256 结果。
+- 固定音色与克隆切换时的单模型实例、任务锁释放及立即启动另一任务仍未得到真实验证，任务 6 步骤 2 保持未勾选。
+
+**3. 限定自动回归：PASS**
+
+- `npm run typecheck`：PASS。
+- 相关语音/组件测试：`media-components`、`download`、`speech-runtime`、`speech-process`、`speech-generation`、`speech-form`、`studio`、`ipc`、`jobs` 共 **9 个测试文件、639 项测试全部通过**。
+- `npm run build`：PASS；`npx playwright test tests/e2e/studio.spec.ts`：**20 通过、0 失败**。按要求未重复完整 `npm test` 或完整 E2E，本轮限定回归没有环境导入失败。
+
+**4. 进程与 GPU 健康**
+
+- 开始快照：RTX 5080，总计 `16303 MiB`，已用 `1244 MiB`，利用率 `2%`，温度 `44.50 C`。结束快照：已用 `1239 MiB`，利用率 `2%`，温度 `44.89 C`；没有 Qwen 推理负载。
+- 验收目录下 Python 进程数为 0，锁定 venv、模型事件审计和真实验收结果文件均不存在。未终止或修改既有 ComfyUI/Python 进程，未读取用户素材或密钥。
+
