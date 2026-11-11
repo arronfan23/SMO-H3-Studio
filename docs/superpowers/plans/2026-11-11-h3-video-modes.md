@@ -64,15 +64,15 @@ git commit -m "Allow H3 text to video without a reference image"
 
 **文件：** `src/main/generation.ts`、`src/shared/workflow-nodes.ts`、`tests/unit/generation.test.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 用 1 张和 9 张验证扁平键 `ref_images.ref_image_0..8` 顺序、`MiniMaxH3ReferenceToVideo` 保留、上传授权、临时文件清理、取消和重试不重复节点。超过 9、空数组元素和未授权路径拒绝。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/generation.test.ts -t "reference images|参考图"`
 
-- [ ] **步骤 3：实现多图上传与动态节点**
+- [x] **步骤 3：实现多图上传与动态节点**
 
 参考路径长度 1-9 时按顺序调用 `comfy.uploadFile({kind:'image'})`，首图使用现有节点 226，其他 LoadImage 节点使用 `ref2..ref9`：
 
@@ -89,16 +89,18 @@ uploaded.forEach((name, index) => {
 
 注意：本机 Autogrow 诊断已证实嵌套 `ref_images` 会被忽略，扁平 `ref_images.ref_image_N` 才进入执行图；前缀索引为 0-8，对应第 1-9 张图，提示词标签仍是 `<Picture 1>` 至 `<Picture 9>`。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/generation.test.ts tests/unit/ipc.test.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/main/generation.ts src/shared/workflow-nodes.ts tests/unit/generation.test.ts tests/unit/ipc.test.ts
 git commit -m "Support up to nine H3 reference images"
 ```
+
+实际完成：`898ba9be`。参考图专项 15/15、generation+IPC 426/426，类型检查通过；规格与代码质量审查均通过。数组存在时只使用数组，works.avatarId=null 以避免弃用模特关联，原 avatarId 与有序 refs 保留在 metadata；重启重试会重新验证并授权参考图。
 
 ### 任务 3：三类视频 UI 与提示词润色
 
