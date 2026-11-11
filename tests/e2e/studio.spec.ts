@@ -125,6 +125,10 @@ async function installImageBackendProbe(
     type ProbeServices = {
       components: { getState: (id: 'speech' | 'image') => unknown };
       comfy: {
+        uploadFile: (input: {
+          filePath: string;
+          kind: 'image' | 'audio';
+        }) => Promise<string>;
         submit: (graph: Graph) => Promise<{
           prompt_id: string;
           number: number;
@@ -143,6 +147,7 @@ async function installImageBackendProbe(
     const probeGlobal = process as unknown as {
       __smoImageE2eServices?: ProbeServices;
       __smoImageE2eGraph?: Graph;
+      __smoImageE2eUploads?: Array<{ filePath: string; kind: string }>;
     };
     const services = probeGlobal.__smoImageE2eServices;
     if (!services) {
@@ -163,6 +168,11 @@ async function installImageBackendProbe(
         : originalGetState(id);
 
     let workId = '';
+    services.comfy.uploadFile = async ({ filePath, kind }) => {
+      const uploads = probeGlobal.__smoImageE2eUploads ??= [];
+      uploads.push({ filePath, kind });
+      return `uploaded-${uploads.length}.png`;
+    };
     services.comfy.submit = async (graph) => {
       const prefix = graph['461']?.inputs.filename_prefix;
       if (typeof prefix !== 'string') {
@@ -624,6 +634,34 @@ async function readVisibleTextJobId(page: Page): Promise<string> {
   );
   await expect(jobId).toHaveText(/^[0-9a-f-]{36}$/);
   return (await jobId.textContent())!;
+}
+
+function reachableImageNodeIds(
+  graph: Record<string, { inputs: Record<string, unknown> }>,
+  entryId: string,
+): Set<string> {
+  const reachable = new Set<string>();
+  const visitInput = (value: unknown): void => {
+    if (
+      Array.isArray(value) &&
+      value.length === 2 &&
+      typeof value[0] === 'string' &&
+      typeof value[1] === 'number'
+    ) {
+      visitNode(value[0]);
+      return;
+    }
+    if (typeof value === 'object' && value !== null) {
+      for (const nested of Object.values(value)) visitInput(nested);
+    }
+  };
+  const visitNode = (id: string): void => {
+    if (reachable.has(id) || !graph[id]) return;
+    reachable.add(id);
+    visitInput(graph[id].inputs);
+  };
+  visitNode(entryId);
+  return reachable;
 }
 
 test.describe('SMO.H3 Studio end-to-end', () => {
@@ -1143,6 +1181,147 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       expect(await readFile(join(dataDirectory, 'avatars', photo))).toEqual(originalBytes);
     }
     expect(await readFile(outputPath)).toEqual(originalBytes);
+  });
+
+  test('参考生图 1 张横图按 1MP 端到端验收', async () => {
+    const referenceDirectory = join(tempDirectory!, 'references');
+    await mkdir(referenceDirectory, { recursive: true });
+    const referencePath = join(referenceDirectory, 'reference-1.png');
+    await sharp({
+      create: {
+        width: 1600,
+        height: 900,
+        channels: 3,
+        background: { r: 32, g: 120, b: 196 },
+      },
+    }).png().toFile(referencePath);
+    const originalReference = await readFile(referencePath);
+    const outputPng = await sharp({
+      create: {
+        width: 1376,
+        height: 768,
+        channels: 3,
+        background: { r: 24, g: 150, b: 112 },
+      },
+    }).png().toBuffer();
+
+    await app!.close();
+    app = undefined;
+    page = undefined;
+    imageServiceProbeEntry = await createImageServiceProbeEntry();
+    app = await launchApp({
+      ...launchOptions,
+      appPath: imageServiceProbeEntry,
+      fileDialogPaths: [referencePath],
+    });
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    await installImageBackendProbe(app, {
+      outputDirectory,
+      pngBase64: outputPng.toString('base64'),
+    });
+    await page.reload();
+    await expect(page).toHaveTitle('SMO.H3 Studio');
+
+    const prompt = 'One ordered landscape reference at 1MP.';
+    await page.click('#studio-image-button');
+    await page.fill('#image-prompt', prompt);
+    await page.click('#reference-image-tab');
+    await page.getByRole('button', { name: '选择参考图', exact: true }).click();
+    const referencePreview = page.getByRole('img', {
+      name: '参考图 1：reference-1.png',
+    });
+    await expect(referencePreview).toBeVisible();
+    await expect.poll(() =>
+      referencePreview.evaluate((element) => (element as HTMLImageElement).naturalWidth),
+    ).toBe(1600);
+
+    await page.click('#text-image-tab');
+    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await page.click('#reference-image-tab');
+    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await expect(page.locator('.reference-image-preview img')).toHaveCount(1);
+    await expect(referencePreview).toBeVisible();
+    await page.selectOption('#image-resolution', '1');
+    await expect(page.locator('#image-resolution')).toHaveValue('1');
+    await expect(page.locator('#image-main-panel .form-notice')).toContainText(
+      '输出 1376 × 768 px',
+    );
+    await page.fill('#image-seed', '71');
+    await page.fill('#image-steps', '28');
+    await expect(page.locator('#image-main-panel .button-generate')).toBeEnabled();
+    await page.locator('#image-main-panel .button-generate').click();
+
+    const jobLocator = page.locator(
+      '#image-main-panel section[aria-label="任务状态"] code',
+    );
+    await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
+    const jobId = (await jobLocator.textContent())!;
+    await waitForStableStatus(page, jobId, 'done');
+    const outputPath = join(outputDirectory, 'SMO-Image', `${jobId}_00001.png`);
+    expect(existsSync(outputPath)).toBe(true);
+
+    const probe = await app.evaluate(() => {
+      const probeGlobal = process as unknown as {
+        __smoImageE2eGraph?: Record<string, {
+          class_type: string;
+          inputs: Record<string, unknown>;
+        }>;
+        __smoImageE2eUploads?: Array<{
+          filePath: string;
+          kind: string;
+        }>;
+      };
+      return {
+        graph: probeGlobal.__smoImageE2eGraph,
+        uploads: probeGlobal.__smoImageE2eUploads,
+      };
+    });
+    expect(probe.graph).toBeDefined();
+    expect(probe.uploads).toEqual([
+      {
+        filePath: join(dataDirectory, 'uploads', `${jobId}-0.png`),
+        kind: 'image',
+      },
+    ]);
+    expect(await readdir(join(dataDirectory, 'uploads'))).toEqual([]);
+    expect(await readFile(referencePath)).toEqual(originalReference);
+
+    const graph = probe.graph!;
+    expect(graph.ref1).toEqual({
+      class_type: 'LoadImage',
+      inputs: { image: 'uploaded-1.png' },
+    });
+    expect(graph.ref2).toBeUndefined();
+    expect(graph['452'].inputs).toMatchObject({
+      prompt,
+      vae: ['454', 0],
+      resolution: 1024,
+      images: { image_1: ['ref1', 0] },
+    });
+    expect(graph['458'].inputs).toMatchObject({
+      latent_image: ['452', 2],
+      seed: 71,
+      steps: 28,
+    });
+    expect(graph['461'].inputs).toMatchObject({
+      filename_prefix: `SMO-Image/${jobId}`,
+      format: 'png',
+    });
+    expect(reachableImageNodeIds(graph, '461')).not.toContain('456');
+
+    await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page.locator('.works-list article').filter({ hasText: jobId });
+    await expect(work).toBeVisible();
+    const outputImage = work.getByRole('img', { name: `作品图像 ${jobId}` });
+    await expect(outputImage).toBeVisible();
+    await expect.poll(() => outputImage.evaluate((element) => ({
+      width: (element as HTMLImageElement).naturalWidth,
+      height: (element as HTMLImageElement).naturalHeight,
+    }))).toEqual({ width: 1376, height: 768 });
   });
 
   test('works list combines hierarchical mode and status filters', async () => {
