@@ -73,17 +73,17 @@ git commit -m "Add Qwen reference image controls and 2K options"
 
 **文件：** `src/main/image-workflow.ts`、`src/main/image-generation.ts`、`tests/unit/image-workflow.test.ts`、`tests/unit/image-generation.test.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 用 1 张和 4 张图验证 `TextEncodeQwenImage21.images.image_N` 连接、VAE 连接、采样 latent `['452',2]`、prompt、seed、steps、输出前缀，且不经过 EmptyLatent。0 张保持原纯文字图。上传必须按顺序、按授权调用 `comfy.uploadFile`，失败/取消删除暂存文件，重试不重复节点。
 
 参考分辨率按 `round(sqrt(width*height)/32)*32` 写入 TextEncode，4MP 时为 2048。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/image-workflow.test.ts tests/unit/image-generation.test.ts`
 
-- [ ] **步骤 3：实现参考工作流和上传生命周期**
+- [x] **步骤 3：实现参考工作流和上传生命周期**
 
 新增 `patchQwenReferenceImageWorkflow(frozen, request, uploadedNames)`：
 
@@ -98,16 +98,18 @@ sampler.inputs.latent_image = ['452', 2];
 
 主进程按 workId 暂存参考图并逐个上传， LoadImage ID 使用 `ref1..ref4`。清理临时副本与节点只针对当前 workId。旧请求无 `referenceImagePaths` 时仍走原路径，旧作品重试不需要重新上传。
 
-- [ ] **步骤 4：运行测试**
+- [x] **步骤 4：运行测试**
 
 运行：`npx vitest run tests/unit/image-workflow.test.ts tests/unit/image-generation.test.ts tests/unit/ipc.test.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/main/image-workflow.ts src/main/image-generation.ts tests/unit/image-workflow.test.ts tests/unit/image-generation.test.ts tests/unit/ipc.test.ts
 git commit -m "Generate Qwen images from multiple references"
 ```
+
+实际完成：工作流补丁 `b27ee5cb`，多图生成与装配 `83144759`，重启重试授权 `ba1268ed`。最终图像生成 50/50、工作流/分辨率 121/121、重启授权相关四组 482/482，类型检查通过；规格与代码质量审查均通过。
 
 ### 任务 3：多图与 2K 的真实验收
 
