@@ -63,6 +63,7 @@ describe('SpeechRuntime', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -70,6 +71,7 @@ describe('SpeechRuntime', () => {
     harness: {
       invalidInitialVersion?: 'mismatch' | 'error';
       execFileImpl?: SpeechExecFile;
+      pythonInstallDirectory?: string;
     } = {},
   ) {
     const calls: Array<{
@@ -109,6 +111,7 @@ describe('SpeechRuntime', () => {
       projectDirectory,
       manifest,
       execFile,
+      pythonInstallDirectory: harness.pythonInstallDirectory,
     });
     return { runtime, execFile, calls, versionChecks: () => versionChecks };
   }
@@ -144,7 +147,6 @@ describe('SpeechRuntime', () => {
     }
     expect(uvCalls[3]?.options.env).toMatchObject({
       UV_PROJECT_ENVIRONMENT: venvDirectory,
-      UV_PYTHON_INSTALL_DIR: join(runtimeDirectory, 'python'),
     });
     expect(result).toEqual({
       pythonPath: join(venvDirectory, 'Scripts', 'python.exe'),
@@ -156,6 +158,57 @@ describe('SpeechRuntime', () => {
     });
     expect(result.environment.PYTHONHOME).toBeUndefined();
   });
+
+  test('NTFS Python defaults to LOCALAPPDATA without moving component paths', async () => {
+    const localAppData = join(directory, 'NTFS LocalAppData');
+    vi.stubEnv('LOCALAPPDATA', localAppData);
+    const { runtime, calls } = createRuntime();
+
+    const result = await runtime.prepare();
+
+    const venvDirectory = join(runtimeDirectory, 'venv');
+    for (const call of calls.filter(({ command }) => command.endsWith('uv.exe'))) {
+      expect(call.options.env).toMatchObject({
+        UV_PYTHON_INSTALL_DIR: join(localAppData, 'SMO-H3-Runtime', 'python'),
+        UV_PROJECT_ENVIRONMENT: venvDirectory,
+        UV_CACHE_DIR: join(runtimeDirectory, 'uv-cache'),
+      });
+    }
+    expect(result.pythonPath).toBe(join(venvDirectory, 'Scripts', 'python.exe'));
+    expect(calls.find(({ command }) => command === 'tar')?.args).toContain(
+      join(modelDirectory, ...UV_PATH.split('/')),
+    );
+  });
+
+  test('NTFS Python install directory supports an explicit override', async () => {
+    const pythonInstallDirectory = join(directory, 'explicit NTFS Python');
+    vi.stubEnv('LOCALAPPDATA', join(directory, 'ignored LocalAppData'));
+    const { runtime, calls } = createRuntime({ pythonInstallDirectory });
+
+    await runtime.prepare();
+
+    const installCall = calls.find(({ args }) => args[0] === 'python');
+    expect(installCall?.options.env).toMatchObject({
+      UV_PYTHON_INSTALL_DIR: pythonInstallDirectory,
+      UV_PROJECT_ENVIRONMENT: join(runtimeDirectory, 'venv'),
+      UV_CACHE_DIR: join(runtimeDirectory, 'uv-cache'),
+    });
+  });
+
+  test.each(['', 'relative-local-app-data'])(
+    'NTFS Python falls back to the component directory when LOCALAPPDATA is %s',
+    async (localAppData) => {
+      vi.stubEnv('LOCALAPPDATA', localAppData);
+      const { runtime, calls } = createRuntime();
+
+      await runtime.prepare();
+
+      const installCall = calls.find(({ args }) => args[0] === 'python');
+      expect(installCall?.options.env).toMatchObject({
+        UV_PYTHON_INSTALL_DIR: join(runtimeDirectory, 'python'),
+      });
+    },
+  );
 
   test('extracts uv without restoring timestamps for exFAT compatibility', async () => {
     const { runtime, calls } = createRuntime();

@@ -8,6 +8,7 @@ import type {
   SpeechMode,
 } from '../shared/types';
 import { AudioInput } from './AudioInput';
+import { AudioRecorder } from './AudioRecorder';
 import { ComponentGate } from './ComponentGate';
 import { JobStatus } from './JobStatus';
 import { errorMessage } from './ui';
@@ -57,6 +58,7 @@ export function SpeechForm({
     'install' | 'cancel' | null
   >(null);
   const [submitting, setSubmitting] = useState(false);
+  const [recordingBusy, setRecordingBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const { url: referenceAudioUrl, error: referenceMediaError } = useMediaUrl(referenceAudioPath);
@@ -295,6 +297,7 @@ export function SpeechForm({
   const generationDisabled =
     submitting ||
     busy ||
+    recordingBusy ||
     component?.status !== 'ready' ||
     componentOperation !== null ||
     capabilitiesLoading ||
@@ -305,6 +308,7 @@ export function SpeechForm({
     if (
       generationRef.current ||
       busy ||
+      recordingBusy ||
       component?.status !== 'ready' ||
       componentOperation !== null ||
       capabilitiesLoading
@@ -567,8 +571,16 @@ export function SpeechForm({
             <span className="field-caption">参考音频</span>
             <AudioInput
               path={referenceAudioPath}
-              disabled={submitting || busy}
+              disabled={submitting || busy || recordingBusy}
               onSelected={handleReferenceAudioSelected}
+              onError={setError}
+            />
+            <AudioRecorder
+              active={active && pageActive && speechMode === 'clone'}
+              disabled={submitting || busy}
+              hasAudio={referenceAudioPath !== null}
+              onBusyChange={setRecordingBusy}
+              onRecorded={handleReferenceAudioSelected}
               onError={setError}
             />
           </div>

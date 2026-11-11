@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rename, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import defaultManifest from '../../resources/environment/media-components.json';
 import type { MediaComponentManifest } from '../shared/media-components';
 
@@ -31,6 +31,7 @@ export interface SpeechRuntimeOptions {
   modelDirectory: string;
   runtimeDirectory: string;
   projectDirectory: string;
+  pythonInstallDirectory?: string;
   manifest?: MediaComponentManifest;
   execFile?: SpeechExecFile;
 }
@@ -209,7 +210,12 @@ export class SpeechRuntime {
     const toolDirectory = join(toolsRoot, `uv-${UV_VERSION}`);
     const uvPath = join(toolDirectory, 'uv.exe');
     const venvDirectory = join(this.options.runtimeDirectory, 'venv');
-    const pythonInstallDirectory = join(this.options.runtimeDirectory, 'python');
+    const localAppData = process.env.LOCALAPPDATA;
+    const pythonInstallDirectory =
+      this.options.pythonInstallDirectory ??
+      (localAppData !== undefined && isAbsolute(localAppData)
+        ? join(localAppData, 'SMO-H3-Runtime', 'python')
+        : join(this.options.runtimeDirectory, 'python'));
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
       UV_CACHE_DIR: join(this.options.runtimeDirectory, 'uv-cache'),
