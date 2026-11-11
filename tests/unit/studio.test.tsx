@@ -116,6 +116,19 @@ function studioModePanel(label: '语音' | '图像' | '视频') {
   return panel;
 }
 
+function textVideoField(label: string): HTMLElement {
+  const panel = document.getElementById('text-mode-panel');
+  if (panel === null) {
+    throw new Error('Missing text video panel');
+  }
+  return within(panel).getByLabelText(label);
+}
+
+async function openEmptyAvatarCreation(): Promise<void> {
+  fireEvent.click(await screen.findByRole('tab', { name: '音频数字人' }));
+  fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   window.smo = smo as unknown as SmoApi;
@@ -254,14 +267,14 @@ describe('SMO.H3 Studio navigation and avatars', () => {
 
   test('切换导航页面时保留未提交文字草稿', async () => {
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '切换模块后保留这段草稿' },
     });
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
       fireEvent.click(studioModeButton('视频'));
-      expect(screen.getByLabelText('原始文字')).toHaveValue('切换模块后保留这段草稿');
+      expect(textVideoField('原始文字')).toHaveValue('切换模块后保留这段草稿');
     }
   });
 
@@ -269,7 +282,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     expect(screen.getByRole('heading', { name: '数字模特' })).toBeInTheDocument();
     expect(screen.getByLabelText('模特名称')).toBeInTheDocument();
@@ -286,7 +299,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.files.selectImage.mockResolvedValue('G:\\photos\\new-photo.png');
     smo.avatars.create.mockResolvedValue(created);
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '新模特' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -307,7 +320,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\preview-photo.png');
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
     expect(screen.queryByRole('img', { name: '待保存模特照片预览' })).not.toBeInTheDocument();
@@ -338,7 +351,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValueOnce([]).mockResolvedValueOnce([created]);
     smo.avatars.create.mockResolvedValue(created);
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
     fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
@@ -372,7 +385,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
   test('keeps the drop highlight when moving into a child element', async () => {
     smo.avatars.list.mockResolvedValue([]);
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
     const child = screen.getByText('尚未选择照片');
@@ -406,7 +419,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
       () => new Promise<string | null>((resolve) => { resolveSelect = resolve; }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
@@ -433,7 +446,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
   test('rejects dropping multiple files with a clear error', async () => {
     smo.avatars.list.mockResolvedValue([]);
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
     fireEvent.drop(dropzone, {
@@ -452,7 +465,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     async (name) => {
       smo.avatars.list.mockResolvedValue([]);
       render(<App />);
-      fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+      await openEmptyAvatarCreation();
 
       const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
       fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], name)] } });
@@ -469,7 +482,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.authorizeDroppedImage.mockRejectedValue(new Error('文件不存在'));
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
     fireEvent.drop(dropzone, {
@@ -491,7 +504,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
         async (file: { name: string }) => `G:\\dropped\\${file.name}`,
       );
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
 
     fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'first.png')] } });
@@ -523,7 +536,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
       () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
     await screen.findByRole('img', { name: '待保存模特照片预览' });
@@ -555,7 +568,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
       () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
     fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], 'dropped.png')] } });
@@ -593,7 +606,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
       () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '待定模特' } });
     const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
@@ -631,7 +644,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
       () => new Promise<Avatar>((resolve) => { resolveCreate = resolve; }),
     );
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '模特甲' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -674,7 +687,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.files.selectImage.mockResolvedValue('G:\\photos\\clear-error.png');
     smo.avatars.create.mockRejectedValue(new Error('保存失败：磁盘已满'));
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '清错' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -695,7 +708,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.files.selectImage.mockResolvedValue('G:\\photos\\keep-photo.png');
     smo.avatars.create.mockRejectedValue(new Error('保存失败：磁盘已满'));
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '保留预览' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -711,7 +724,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValueOnce('G:\\photos\\first.png');
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
     await screen.findByRole('img', { name: '待保存模特照片预览' });
@@ -752,7 +765,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\saving.png');
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '保存中' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -836,7 +849,334 @@ describe('SMO.H3 Studio navigation and avatars', () => {
 });
 
 describe('text-to-video studio', () => {
-  test('二级制作目录提供语音、图像、视频按钮和完整面板 ARIA', async () => {
+  function videoSubpanel(mode: 'text' | 'reference' | 'audio'): HTMLElement {
+    const panel = document.getElementById(`${mode}-mode-panel`);
+    if (panel === null) {
+      throw new Error(`Missing ${mode} video panel`);
+    }
+    return panel;
+  }
+
+  async function openReferenceStudio() {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    return within(videoSubpanel('reference'));
+  }
+
+  function dropReferences(panel: ReturnType<typeof within>, count: number): string[] {
+    const files = Array.from(
+      { length: count },
+      (_, index) => new File(['image'], `ref-${index + 1}.png`, { type: 'image/png' }),
+    );
+    fireEvent.drop(panel.getByRole('group', { name: '参考图拖放区' }), {
+      dataTransfer: { files },
+    });
+    return files.map((file) => `G:\\dropped\\${file.name}`);
+  }
+
+  test('无模特也显示文生视频而非全页空状态', () => {
+    render(
+      <StudioPage
+        avatar={null}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('tab', { name: '文生视频' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByRole('tabpanel', { name: '文生视频' })).toBeVisible();
+    expect(within(videoSubpanel('text')).getByLabelText('原始文字')).toBeInTheDocument();
+    expect(
+      document.querySelector('#video-main-panel > .empty-state'),
+    ).not.toBeInTheDocument();
+  });
+
+  test('无模特文生视频提交 null avatar 和空参考数组', async () => {
+    render(
+      <StudioPage
+        avatar={null}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={vi.fn()}
+      />,
+    );
+    fireEvent.change(within(videoSubpanel('text')).getByLabelText('原始文字'), {
+      target: { value: '无模特文生视频' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'text',
+      avatarId: null,
+      prompt: '无模特文生视频',
+      duration: 8,
+      seed: 42,
+      steps: 8,
+      referenceImagePaths: [],
+    });
+  });
+
+  test('无模特图片生视频可用且只有音频数字人显示新建模特空状态', async () => {
+    const onCreateAvatar = vi.fn();
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\no-avatar.png');
+    render(
+      <StudioPage
+        avatar={null}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={onCreateAvatar}
+      />,
+    );
+    expect(document.querySelector('.person-preview')).not.toBeInTheDocument();
+    expect(document.querySelector('.studio-layout')).toHaveClass(
+      'studio-layout-without-avatar',
+    );
+    expect(videoSubpanel('text')).not.toHaveTextContent('还没有数字模特');
+    expect(videoSubpanel('reference')).not.toHaveTextContent('还没有数字模特');
+    expect(videoSubpanel('audio')).toHaveTextContent('还没有数字模特');
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const panel = within(videoSubpanel('reference'));
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('no-avatar.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '无模特参考视频' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        avatarId: null,
+        referenceImagePaths: ['G:\\refs\\no-avatar.png'],
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '新建数字模特' }));
+    expect(onCreateAvatar).toHaveBeenCalledTimes(1);
+  });
+
+  test('文生视频与图片生视频保持独立草稿并使用唯一 IDs', async () => {
+    await renderStudio();
+    const textPanel = within(videoSubpanel('text'));
+    const textDraft = textPanel.getByLabelText('原始文字');
+    fireEvent.change(textDraft, { target: { value: '文生独立草稿' } });
+    fireEvent.change(textPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '13' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(videoSubpanel('reference'));
+    const referenceDraft = referencePanel.getByLabelText('原始文字');
+    fireEvent.change(referenceDraft, { target: { value: '参考独立草稿' } });
+    fireEvent.change(referencePanel.getByLabelText('视频时长（秒）'), {
+      target: { value: '9' },
+    });
+    fireEvent.change(referencePanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '21' },
+    });
+
+    expect(textDraft).toHaveAttribute('id', 'original-text');
+    expect(referenceDraft).toHaveAttribute('id', 'reference-original-text');
+    for (const id of [
+      'reference-skill',
+      'reference-model',
+      'reference-aspect',
+      'reference-resolution',
+      'reference-duration',
+      'reference-seed',
+      'reference-steps',
+      'reference-original-tab',
+      'reference-original-panel',
+      'reference-polished-tab',
+    ]) {
+      expect(document.getElementById(id)).toBeInTheDocument();
+    }
+    const ids = Array.from(document.querySelectorAll('[id]')).map((element) => element.id);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    expect(textPanel.getByLabelText('原始文字')).toBe(textDraft);
+    expect(textDraft).toHaveValue('文生独立草稿');
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(13);
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    expect(referencePanel.getByLabelText('原始文字')).toBe(referenceDraft);
+    expect(referenceDraft).toHaveValue('参考独立草稿');
+    expect(referencePanel.getByLabelText('视频时长（秒）')).toHaveValue(9);
+    expect(referencePanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(21);
+  });
+
+  test('图片生视频 0 张参考图时润色和生成都先提示且不发请求', async () => {
+    const panel = await openReferenceStudio();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '零参考图不能直接处理' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByRole('alert')).toHaveTextContent('请至少添加 1 张参考图后再润色');
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() =>
+      expect(panel.getByRole('alert')).toHaveTextContent('请至少添加 1 张参考图后再生成'),
+    );
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test('图片生视频 1 张参考图按顺序提交', async () => {
+    const referencePath = 'G:\\refs\\single.png';
+    smo.files.selectImage.mockResolvedValue(referencePath);
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('single.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '单图参考生成' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'text',
+      avatarId: avatar.id,
+      prompt: '单图参考生成',
+      duration: 8,
+      seed: 42,
+      steps: 8,
+      referenceImagePaths: [referencePath],
+    });
+  });
+
+  test('图片生视频 9 张参考图保持顺序并拒绝加入第 10 张当前模特', async () => {
+    const panel = await openReferenceStudio();
+    const referencePaths = dropReferences(panel, 9);
+    expect(await panel.findByText('ref-9.png')).toBeInTheDocument();
+    expect(panel.getByText('9 / 9')).toBeInTheDocument();
+    expect(panel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+    expect(await panel.findByRole('alert')).toHaveTextContent('最多 9 张参考图');
+    expect(panel.getByText('9 / 9')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '九图参考生成' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceImagePaths: referencePaths }),
+    );
+  });
+
+  test('图片生视频润色发送 N 个图片标签且不泄露本地路径', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '三图参考润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    const panel = await openReferenceStudio();
+    const referencePaths = dropReferences(panel, 3);
+    expect(await panel.findByText('ref-3.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '根据三张参考图设计镜头' },
+    });
+    fireEvent.change(panel.getByLabelText('视频时长（秒）'), {
+      target: { value: '11' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '三图参考润色结果',
+    );
+    expect(smo.llm.polish).toHaveBeenCalledWith({
+      text: '根据三张参考图设计镜头',
+      duration: 11,
+      imageCount: 3,
+      mode: 'ref2va',
+      referenceLabels: ['<Picture 1>', '<Picture 2>', '<Picture 3>'],
+      skill: 'h3-prompt-writing',
+    });
+    const payload = smo.llm.polish.mock.calls[0][0];
+    for (const path of referencePaths) {
+      expect(JSON.stringify(payload)).not.toContain(path);
+    }
+    expect(document.getElementById('reference-polished-panel')).toBeInTheDocument();
+    expect(document.getElementById('reference-polished-text')).toHaveValue(
+      '三图参考润色结果',
+    );
+  });
+
+  test('图片生视频仅在点击后显式加入当前模特并处理重复', async () => {
+    const panel = await openReferenceStudio();
+    expect(panel.getByText('尚未选择参考图')).toBeInTheDocument();
+    expect(panel.queryByText('avatar-1.png')).not.toBeInTheDocument();
+
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+    expect(await panel.findByText('avatar-1.png')).toBeInTheDocument();
+    expect(panel.getByText('1 / 9')).toBeInTheDocument();
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('当前模特已在参考图中');
+    expect(panel.getByText('1 / 9')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '显式人物参考' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          avatarId: avatar.id,
+          referenceImagePaths: [avatar.photoPath],
+        }),
+      ),
+    );
+  });
+
+  test('图片生视频提交锁阻止重复任务并互斥润色', async () => {
+    let resolveStart: ((value: { id: string }) => void) | undefined;
+    smo.jobs.start.mockImplementation(
+      () => new Promise<{ id: string }>((resolve) => { resolveStart = resolve; }),
+    );
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\locked.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('locked.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '提交期间保持参考图' },
+    });
+    const generateButton = panel.getByRole('button', { name: '生成视频' });
+
+    fireEvent.click(generateButton);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '使用当前模特' })).toBeDisabled();
+
+    await act(async () => {
+      resolveStart?.({ id: 'reference-lock-job' });
+    });
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
+  });
+
+  test('二级制作目录提供文生视频、图片生视频、音频数字人及完整面板 ARIA', async () => {
     await renderStudio();
 
     const parent = screen.getByRole('button', { name: '制作台', exact: true });
@@ -870,28 +1210,42 @@ describe('text-to-video studio', () => {
     const controls = screen.getByRole('region', { name: '制作控制区' });
     const modeTabs = within(controls).getByRole('tablist', { name: '制作模式' });
     expect(within(modeTabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
-      '文字生视频',
+      '文生视频',
+      '图片生视频',
       '音频数字人',
     ]);
-    const textTab = within(modeTabs).getByRole('tab', { name: '文字生视频' });
+    const textTab = within(modeTabs).getByRole('tab', { name: '文生视频' });
+    const referenceTab = within(modeTabs).getByRole('tab', { name: '图片生视频' });
     const audioTab = within(modeTabs).getByRole('tab', { name: '音频数字人' });
     const textPanel = document.getElementById('text-mode-panel');
+    const referencePanel = document.getElementById('reference-mode-panel');
     const audioPanel = document.getElementById('audio-mode-panel');
     expect(textTab).toHaveAttribute('aria-controls', 'text-mode-panel');
+    expect(referenceTab).toHaveAttribute('aria-controls', 'reference-mode-panel');
     expect(audioTab).toHaveAttribute('aria-controls', 'audio-mode-panel');
     expect(textPanel).toHaveAttribute('role', 'tabpanel');
     expect(textPanel).toHaveAttribute('aria-labelledby', 'text-mode-tab');
+    expect(referencePanel).toHaveAttribute('role', 'tabpanel');
+    expect(referencePanel).toHaveAttribute('aria-labelledby', 'reference-mode-tab');
     expect(audioPanel).toHaveAttribute('role', 'tabpanel');
     expect(audioPanel).toHaveAttribute('aria-labelledby', 'audio-mode-tab');
     expect(textPanel).toBeVisible();
+    expect(referencePanel).not.toBeVisible();
     expect(audioPanel).not.toBeVisible();
     expect(preview).not.toBeNull();
     expect(controls).not.toContainElement(preview);
 
+    fireEvent.click(referenceTab);
+    expect(textPanel).not.toBeVisible();
+    expect(referencePanel).toBeVisible();
+    expect(audioPanel).not.toBeVisible();
+    expect(referenceTab).toHaveAttribute('aria-selected', 'true');
+
     fireEvent.click(audioTab);
     expect(textPanel).not.toBeVisible();
+    expect(referencePanel).not.toBeVisible();
     expect(audioPanel).toBeVisible();
-    expect(textTab).toHaveAttribute('aria-selected', 'false');
+    expect(referenceTab).toHaveAttribute('aria-selected', 'false');
     expect(audioTab).toHaveAttribute('aria-selected', 'true');
   });
 
@@ -1001,7 +1355,7 @@ describe('text-to-video studio', () => {
 
   test('收起二级目录不卸载语音、图像和视频草稿', async () => {
     await renderStudio();
-    const videoDraft = screen.getByLabelText('原始文字');
+    const videoDraft = textVideoField('原始文字');
     fireEvent.change(videoDraft, { target: { value: '收起目录后保留视频草稿' } });
 
     fireEvent.click(studioModeButton('图像'));
@@ -1024,7 +1378,7 @@ describe('text-to-video studio', () => {
     expect(screen.getByLabelText('图像提示词')).toBe(imageDraft);
     expect(imageDraft).toHaveValue('收起目录后保留图像草稿');
     fireEvent.click(studioModeButton('视频'));
-    expect(screen.getByLabelText('原始文字')).toBe(videoDraft);
+    expect(textVideoField('原始文字')).toBe(videoDraft);
     expect(videoDraft).toHaveValue('收起目录后保留视频草稿');
     fireEvent.click(studioModeButton('语音'));
     expect(studioSpeechField('口播文字')).toBe(speechDraft);
@@ -1075,7 +1429,7 @@ describe('text-to-video studio', () => {
     fireEvent.click(studioModeButton('语音'));
     expect(document.getElementById('image-main-panel')).not.toBeVisible();
     fireEvent.click(studioModeButton('视频'));
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '图像切换后仍保留的视频草稿' },
     });
 
@@ -1092,7 +1446,7 @@ describe('text-to-video studio', () => {
     }
 
     fireEvent.click(studioModeButton('视频'));
-    expect(screen.getByLabelText('原始文字')).toHaveValue('图像切换后仍保留的视频草稿');
+    expect(textVideoField('原始文字')).toHaveValue('图像切换后仍保留的视频草稿');
     fireEvent.click(studioModeButton('图像'));
     expect(screen.getByLabelText('图像提示词')).toHaveValue('切换后保留的图像草稿');
   });
@@ -1101,7 +1455,7 @@ describe('text-to-video studio', () => {
     smo.files.selectAudio.mockResolvedValue('G:\\recordings\\speech-clone.wav');
     await renderStudio();
 
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '主模式切换后保留的视频草稿' },
     });
     fireEvent.click(studioModeButton('语音'));
@@ -1122,7 +1476,7 @@ describe('text-to-video studio', () => {
     });
 
     fireEvent.click(studioModeButton('视频'));
-    expect(screen.getByLabelText('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
+    expect(textVideoField('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
     fireEvent.click(studioModeButton('语音'));
     expect(studioSpeechField('口播文字', 'clone')).toHaveValue('主模式切换后保留的口播草稿');
     expect(studioSpeechField('输出格式', 'clone')).toHaveValue('mp3');
@@ -1140,7 +1494,7 @@ describe('text-to-video studio', () => {
     }
 
     fireEvent.click(studioModeButton('视频'));
-    expect(screen.getByLabelText('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
+    expect(textVideoField('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
   });
 
   test('语音 capabilities 默认视频和切应用页面不调用，返回后只应用新结果', async () => {
@@ -1175,19 +1529,26 @@ describe('text-to-video studio', () => {
     expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled();
   });
 
-  test('视频子 tab 支持 roving tabindex 和键盘循环导航', async () => {
+  test('文生视频与图片生视频子 tab 支持 roving tabindex 和键盘循环导航', async () => {
     await renderStudio();
 
     const controls = screen.getByRole('region', { name: '制作控制区' });
     const modeTabs = within(controls).getByRole('tablist', { name: '制作模式' });
-    const textTab = within(modeTabs).getByRole('tab', { name: '文字生视频' });
+    const textTab = within(modeTabs).getByRole('tab', { name: '文生视频' });
+    const referenceTab = within(modeTabs).getByRole('tab', { name: '图片生视频' });
     const audioTab = within(modeTabs).getByRole('tab', { name: '音频数字人' });
 
     textTab.focus();
     fireEvent.keyDown(textTab, { key: 'ArrowRight' });
+    expect(referenceTab).toHaveFocus();
+    expect(referenceTab).toHaveAttribute('aria-selected', 'true');
+    expect(textTab).toHaveAttribute('tabindex', '-1');
+    expect(referenceTab).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(referenceTab, { key: 'ArrowRight' });
     expect(audioTab).toHaveFocus();
     expect(audioTab).toHaveAttribute('aria-selected', 'true');
-    expect(textTab).toHaveAttribute('tabindex', '-1');
+    expect(referenceTab).toHaveAttribute('tabindex', '-1');
     expect(audioTab).toHaveAttribute('tabindex', '0');
 
     fireEvent.keyDown(audioTab, { key: 'ArrowRight' });
@@ -1197,6 +1558,10 @@ describe('text-to-video studio', () => {
     fireEvent.keyDown(textTab, { key: 'ArrowLeft' });
     expect(audioTab).toHaveFocus();
     expect(audioTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(audioTab, { key: 'ArrowLeft' });
+    expect(referenceTab).toHaveFocus();
+    expect(referenceTab).toHaveAttribute('aria-selected', 'true');
 
     fireEvent.keyDown(audioTab, { key: 'Home' });
     expect(textTab).toHaveFocus();
@@ -1209,7 +1574,7 @@ describe('text-to-video studio', () => {
     expect(audioTab).toHaveAttribute('tabindex', '0');
   });
 
-  test('polishes without media payloads, edits the result, and starts the confirmed text', async () => {
+  test('文生视频润色使用 t2va，编辑结果后无参考提交', async () => {
     smo.llm.polish.mockResolvedValue({
       text: '润色后的镜头',
       skill: 'h3-prompt-writing',
@@ -1217,17 +1582,16 @@ describe('text-to-video studio', () => {
       attempts: 1,
     });
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    const panel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
+    fireEvent.change(panel.getByLabelText('原始文字'), {
       target: { value: '主播转身并挥手' },
     });
     fireEvent.change(
-      within(screen.getByRole('tabpanel', { name: '文字生视频' })).getByLabelText(
-        '视频风格（Skill）',
-      ),
+      panel.getByLabelText('视频风格（Skill）'),
       { target: { value: 'h3-prompt-writing' } },
     );
-    fireEvent.change(screen.getByLabelText('视频时长（秒）'), { target: { value: '9' } });
-    fireEvent.change(screen.getByRole('spinbutton', { name: '随机种子' }), { target: { value: '42' } });
+    fireEvent.change(panel.getByLabelText('视频时长（秒）'), { target: { value: '9' } });
+    fireEvent.change(panel.getByRole('spinbutton', { name: '随机种子' }), { target: { value: '42' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
 
@@ -1235,9 +1599,9 @@ describe('text-to-video studio', () => {
     expect(smo.llm.polish).toHaveBeenCalledWith({
       text: '主播转身并挥手',
       duration: 9,
-      imageCount: 1,
-      mode: 'ref2va',
-      referenceLabels: ['<Picture 1>'],
+      imageCount: 0,
+      mode: 't2va',
+      referenceLabels: [],
       skill: 'h3-prompt-writing',
     });
     expect(smo.llm.polish.mock.calls[0][0]).not.toHaveProperty('audioPath');
@@ -1255,11 +1619,12 @@ describe('text-to-video studio', () => {
     await waitFor(() =>
       expect(smo.jobs.start).toHaveBeenCalledWith({
         mode: 'text',
-        avatarId: avatar.id,
+        avatarId: null,
         prompt: '用户最终确认的镜头文本',
         duration: 9,
         seed: 42,
         steps: 8,
+        referenceImagePaths: [],
       }),
     );
     expect(await screen.findByText('job-1')).toBeInTheDocument();
@@ -1268,10 +1633,10 @@ describe('text-to-video studio', () => {
 
   test('rejects an explicit 4.5 second text duration without submitting', async () => {
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '显式时长必须保持整数约束' },
     });
-    fireEvent.change(screen.getByLabelText('视频时长（秒）'), {
+    fireEvent.change(textVideoField('视频时长（秒）'), {
       target: { value: '4.5' },
     });
 
@@ -1286,10 +1651,10 @@ describe('text-to-video studio', () => {
 
   test('rejects an explicit 4.5 second text duration without polishing', async () => {
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '润色也保持显式整数时长约束' },
     });
-    fireEvent.change(screen.getByLabelText('视频时长（秒）'), {
+    fireEvent.change(textVideoField('视频时长（秒）'), {
       target: { value: '4.5' },
     });
 
@@ -1303,10 +1668,10 @@ describe('text-to-video studio', () => {
 
   test('allows a fractional estimated duration when the text duration is blank', async () => {
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '汉'.repeat(10) },
     });
-    fireEvent.change(screen.getByLabelText('视频时长（秒）'), {
+    fireEvent.change(textVideoField('视频时长（秒）'), {
       target: { value: '' },
     });
 
@@ -1333,10 +1698,10 @@ describe('text-to-video studio', () => {
         }),
     );
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: originalText },
     });
-    const durationInput = screen.getByLabelText('视频时长（秒）');
+    const durationInput = textVideoField('视频时长（秒）');
     fireEvent.change(durationInput, { target: { value: '' } });
 
     expect(durationInput).toHaveAttribute('aria-describedby', 'text-duration-hint');
@@ -1350,7 +1715,7 @@ describe('text-to-video studio', () => {
     await waitFor(() =>
       expect(smo.llm.polish).toHaveBeenCalledWith(expect.objectContaining({ duration: 6 })),
     );
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: changedOriginalText },
     });
     expect(screen.getByText('留空自动：约 15 秒（含 2 秒收尾）')).toBeInTheDocument();
@@ -1383,13 +1748,13 @@ describe('text-to-video studio', () => {
   test('keeps the original text after a polish failure and can generate it', async () => {
     smo.llm.polish.mockRejectedValue(new Error('LLM 暂时不可用'));
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '保留这段原文' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('LLM 暂时不可用');
-    expect(screen.getByLabelText('原始文字')).toHaveValue('保留这段原文');
+    expect(textVideoField('原始文字')).toHaveValue('保留这段原文');
     expect(screen.getByRole('tab', { name: '原文' })).toHaveAttribute(
       'aria-selected',
       'true',
@@ -1412,7 +1777,7 @@ describe('text-to-video studio', () => {
         }),
     );
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '润色期间不能生成' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
@@ -1443,7 +1808,7 @@ describe('text-to-video studio', () => {
         }),
     );
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '生成期间不能润色' },
     });
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
@@ -1462,14 +1827,14 @@ describe('text-to-video studio', () => {
 
   test('keeps an unsubmitted text draft when switching production modes', async () => {
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '尚未提交的草稿' },
     });
 
     fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
 
-    expect(screen.getByLabelText('原始文字')).toHaveValue('尚未提交的草稿');
+    expect(textVideoField('原始文字')).toHaveValue('尚未提交的草稿');
     expect(screen.getByRole('heading', { name: avatar.name })).toBeInTheDocument();
   });
 
@@ -1483,7 +1848,7 @@ describe('text-to-video studio', () => {
     smo.files.selectAudio.mockResolvedValue('G:\\recordings\\video-submode.mp3');
     await renderStudio();
 
-    let textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    let textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
     fireEvent.change(textPanel.getByLabelText('原始文字'), {
       target: { value: '视频子模式原文' },
     });
@@ -1518,8 +1883,8 @@ describe('text-to-video studio', () => {
       target: { value: '编辑后的音频子模式润色文本' },
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
-    textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
     expect(textPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
       '编辑后的视频子模式润色文本',
     );
@@ -1551,8 +1916,8 @@ describe('text-to-video studio', () => {
       expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(9);
     }
 
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
-    textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
     expect(textPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
       '编辑后的视频子模式润色文本',
     );
@@ -1565,7 +1930,7 @@ describe('text-to-video studio', () => {
     ]);
     smo.jobs.start.mockResolvedValue({ id: 'job-real' });
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '真实任务状态' },
     });
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
@@ -1670,7 +2035,7 @@ describe('用于音频数字人', () => {
         '0',
       );
       expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveFocus();
-      expect(screen.getByRole('tab', { name: '文字生视频' })).toHaveAttribute(
+      expect(screen.getByRole('tab', { name: '文生视频' })).toHaveAttribute(
         'aria-selected',
         'false',
       );
@@ -1699,7 +2064,7 @@ describe('用于音频数字人', () => {
     smo.works.list.mockResolvedValue([doneSpeechWork('speech-drafts', audioPath)]);
     await renderStudio();
 
-    const textPanel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    const textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
     fireEvent.change(textPanel.getByLabelText('原始文字'), {
       target: { value: '保留文字视频草稿' },
     });
@@ -1740,10 +2105,10 @@ describe('用于音频数字人', () => {
     loadDuration(await audioPanel.findByLabelText('所选音频'), 8.5);
     expect(audioPanel.getByLabelText('截取时长（秒）')).toHaveValue(8.5);
 
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
-    expect(screen.getByLabelText('原始文字')).toHaveValue('保留文字视频草稿');
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    expect(textVideoField('原始文字')).toHaveValue('保留文字视频草稿');
     expect(
-      within(screen.getByRole('tabpanel', { name: '文字生视频' })).getByRole('spinbutton', {
+      within(screen.getByRole('tabpanel', { name: '文生视频' })).getByRole('spinbutton', {
         name: '采样步数',
       }),
     ).toHaveValue(13);
@@ -2065,7 +2430,7 @@ describe('录音', () => {
     fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
     await waitFor(() => expect(smo.recordings.save).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
     await act(async () => {
       resolveSave('G:\\data\\recordings\\hidden-save.wav');
     });
@@ -2366,7 +2731,7 @@ describe('audio digital human studio', () => {
     fireEvent.loadedMetadata(audio);
     expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(7.25);
 
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
     fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
     expect(panel.getByText('dropped.mp3')).toBeInTheDocument();
     expect(panel.getByLabelText('所选音频')).toBe(audio);
@@ -2747,7 +3112,7 @@ describe('audio digital human studio', () => {
       '跨模块保留的润色草稿',
     );
 
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
     fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
     expect(panel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
       '跨模块保留的润色草稿',
@@ -3341,7 +3706,7 @@ describe('audio digital human studio', () => {
     try {
       expect(pauseSpy).not.toHaveBeenCalled();
 
-      fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+      fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
 
       expect(pauseSpy).toHaveBeenCalled();
     } finally {
@@ -3355,7 +3720,7 @@ describe('采样步数与 busy', () => {
 
   function panelFor(mode: Mode): HTMLElement {
     return screen.getByRole('tabpanel', {
-      name: mode === 'text' ? '文字生视频' : '音频数字人',
+      name: mode === 'text' ? '文生视频' : '音频数字人',
     });
   }
 
@@ -3373,7 +3738,7 @@ describe('采样步数与 busy', () => {
       });
     } else {
       await renderStudio();
-      fireEvent.change(screen.getByLabelText('原始文字'), {
+      fireEvent.change(textVideoField('原始文字'), {
         target: { value: '主播转身并挥手' },
       });
     }
@@ -3498,7 +3863,7 @@ describe('采样步数与 busy', () => {
     },
   );
 
-  test('全局 busy 禁用两个表单的生成和操作按钮，但保留纯文本草稿输入', async () => {
+  test('图片生视频与现有表单全局 busy 禁用操作但保留纯文本草稿', async () => {
     smo.jobs.getState.mockResolvedValue({ activeId: 'existing-job' });
     await renderStudio();
     const textPanel = within(panelFor('text'));
@@ -3512,6 +3877,20 @@ describe('采样步数与 busy', () => {
       target: { value: 'busy 时仍能编辑文字草稿' },
     });
     expect(textPanel.getByLabelText('原始文字')).toHaveValue('busy 时仍能编辑文字草稿');
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(screen.getByRole('tabpanel', { name: '图片生视频' }));
+    expect(referencePanel.getByRole('button', { name: '生成视频' })).toBeDisabled();
+    expect(referencePanel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(referencePanel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+    expect(referencePanel.getByRole('button', { name: '使用当前模特' })).toBeDisabled();
+    expect(referencePanel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+    fireEvent.change(referencePanel.getByLabelText('原始文字'), {
+      target: { value: 'busy 时仍能编辑参考草稿' },
+    });
+    expect(referencePanel.getByLabelText('原始文字')).toHaveValue(
+      'busy 时仍能编辑参考草稿',
+    );
 
     fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
     const audioPanel = within(panelFor('audio'));
@@ -3530,7 +3909,7 @@ describe('采样步数与 busy', () => {
 
 describe('generation options and hardware apply', () => {
   function textPanel(): HTMLElement {
-    return screen.getByRole('tabpanel', { name: '文字生视频' });
+    return screen.getByRole('tabpanel', { name: '文生视频' });
   }
 
   test('defaults to general video writing while keeping auto selection available', async () => {
@@ -3624,11 +4003,12 @@ describe('generation options and hardware apply', () => {
     expect(applyOrder).toBeLessThan(startOrder);
     expect(smo.jobs.start).toHaveBeenCalledWith({
       mode: 'text',
-      avatarId: avatar.id,
+      avatarId: null,
       prompt: '默认选项直接生成',
       duration: 8,
       seed: 42,
       steps: 8,
+      referenceImagePaths: [],
     });
   });
 
@@ -3687,7 +4067,7 @@ describe('generation options and hardware apply', () => {
     fireEvent.change(directoryInput, { target: { value: 'D:\\自定义模型目录' } });
 
     fireEvent.click(studioModeButton('视频'));
-    const panel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    const panel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
     fireEvent.change(panel.getByLabelText('原始文字'), {
       target: { value: '共享目录后的生成' },
     });

@@ -10,6 +10,8 @@ import { TextToVideoForm } from './TextToVideoForm';
 import { useActiveJob } from './useActiveJob';
 
 const STUDIO_MODES: readonly StudioMode[] = ['speech', 'image', 'video'];
+type VideoSubmode = 'text' | 'reference' | 'audio';
+const VIDEO_SUBMODES: readonly VideoSubmode[] = ['text', 'reference', 'audio'];
 
 export function StudioPage({
   avatar,
@@ -34,11 +36,12 @@ export function StudioPage({
 }) {
   const [internalMode, setInternalMode] = useState<StudioMode>('video');
   const mode = controlledMode ?? internalMode;
-  const [videoMode, setVideoMode] = useState<'text' | 'audio'>('text');
+  const [videoMode, setVideoMode] = useState<VideoSubmode>('text');
   const speechModeTabRef = useRef<HTMLButtonElement | null>(null);
   const imageModeTabRef = useRef<HTMLButtonElement | null>(null);
   const videoModeTabRef = useRef<HTMLButtonElement | null>(null);
   const textModeTabRef = useRef<HTMLButtonElement | null>(null);
+  const referenceModeTabRef = useRef<HTMLButtonElement | null>(null);
   const audioModeTabRef = useRef<HTMLButtonElement | null>(null);
   const handledIntentTokenRef = useRef<number | null>(null);
   const pendingIntentFocusTokenRef = useRef<number | null>(null);
@@ -122,23 +125,34 @@ export function StudioPage({
     focusMode(nextMode);
   };
 
-  const focusVideoMode = (nextMode: 'text' | 'audio'): void => {
+  const focusVideoMode = (nextMode: VideoSubmode): void => {
     setVideoMode(nextMode);
-    (nextMode === 'text' ? textModeTabRef : audioModeTabRef).current?.focus();
+    const refs = {
+      text: textModeTabRef,
+      reference: referenceModeTabRef,
+      audio: audioModeTabRef,
+    };
+    refs[nextMode].current?.focus();
   };
 
   const handleVideoModeKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    const currentMode =
-      event.target === audioModeTabRef.current
+    const currentMode = event.target === referenceModeTabRef.current
+      ? 'reference'
+      : event.target === audioModeTabRef.current
         ? 'audio'
         : event.target === textModeTabRef.current
           ? 'text'
           : videoMode;
-    let nextMode: 'text' | 'audio';
+    const currentIndex = VIDEO_SUBMODES.indexOf(currentMode);
+    let nextMode: VideoSubmode;
     switch (event.key) {
       case 'ArrowLeft':
+        nextMode = VIDEO_SUBMODES[
+          (currentIndex - 1 + VIDEO_SUBMODES.length) % VIDEO_SUBMODES.length
+        ];
+        break;
       case 'ArrowRight':
-        nextMode = currentMode === 'text' ? 'audio' : 'text';
+        nextMode = VIDEO_SUBMODES[(currentIndex + 1) % VIDEO_SUBMODES.length];
         break;
       case 'Home':
         nextMode = 'text';
@@ -249,28 +263,21 @@ export function StudioPage({
         {error && <p className="form-error" role="alert">模特列表加载失败：{error}</p>}
         {loading ? (
           <div className="page-state">正在读取数字模特…</div>
-        ) : avatar === null ? (
-          <section className="empty-state">
-            <UserPlus size={32} aria-hidden="true" />
-            <h2>还没有数字模特</h2>
-            <p>先添加一张人物照片，再开始制作视频。</p>
-            <button className="button button-primary" type="button" onClick={onCreateAvatar}>
-              新建数字模特
-            </button>
-          </section>
         ) : (
-          <div className="studio-layout">
-            <section className="person-preview" aria-label="当前人物预览">
-              <div className="section-heading">
-                <span>当前模特</span>
-                <h2>{avatar.name}</h2>
-              </div>
-              <AvatarImage avatar={avatar} />
-              <p className="reference-label">参考人物：&lt;Picture 1&gt;</p>
-            </section>
+          <div className={`studio-layout${avatar === null ? ' studio-layout-without-avatar' : ''}`}>
+            {avatar !== null && (
+              <section className="person-preview" aria-label="当前人物预览">
+                <div className="section-heading">
+                  <span>当前模特</span>
+                  <h2>{avatar.name}</h2>
+                </div>
+                <AvatarImage avatar={avatar} />
+                <p className="reference-label">参考人物：&lt;Picture 1&gt;</p>
+              </section>
+            )}
             <section className="production-controls" aria-label="制作控制区">
               <div
-                className="tab-list mode-tabs"
+                className="tab-list mode-tabs video-mode-tabs"
                 role="tablist"
                 aria-label="制作模式"
                 onKeyDown={handleVideoModeKeyDown}
@@ -285,7 +292,19 @@ export function StudioPage({
                   tabIndex={videoMode === 'text' ? 0 : -1}
                   onClick={() => setVideoMode('text')}
                 >
-                  文字生视频
+                  文生视频
+                </button>
+                <button
+                  ref={referenceModeTabRef}
+                  id="reference-mode-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected={videoMode === 'reference'}
+                  aria-controls="reference-mode-panel"
+                  tabIndex={videoMode === 'reference' ? 0 : -1}
+                  onClick={() => setVideoMode('reference')}
+                >
+                  图片生视频
                 </button>
                 <button
                   ref={audioModeTabRef}
@@ -307,9 +326,25 @@ export function StudioPage({
                 hidden={videoMode !== 'text'}
               >
                 <TextToVideoForm
-                  avatarId={avatar.id}
+                  avatar={avatar}
+                  mode="text"
                   modelDirectory={modelDirectory}
                   active={mode === 'video' && videoMode === 'text'}
+                  busy={busy}
+                  onJobStarted={refresh}
+                />
+              </div>
+              <div
+                id="reference-mode-panel"
+                role="tabpanel"
+                aria-labelledby="reference-mode-tab"
+                hidden={videoMode !== 'reference'}
+              >
+                <TextToVideoForm
+                  avatar={avatar}
+                  mode="reference"
+                  modelDirectory={modelDirectory}
+                  active={mode === 'video' && videoMode === 'reference'}
                   busy={busy}
                   onJobStarted={refresh}
                 />
@@ -320,15 +355,26 @@ export function StudioPage({
                 aria-labelledby="audio-mode-tab"
                 hidden={videoMode !== 'audio'}
               >
-                <AudioDigitalHumanForm
-                  avatarId={avatar.id}
-                  modelDirectory={modelDirectory}
-                  active={mode === 'video' && videoMode === 'audio'}
-                  pageActive={pageActive && mode === 'video'}
-                  busy={busy}
-                  onJobStarted={refresh}
-                  intent={intent}
-                />
+                {avatar === null ? (
+                  <section className="empty-state">
+                    <UserPlus size={32} aria-hidden="true" />
+                    <h2>还没有数字模特</h2>
+                    <p>先添加一张人物照片，再开始制作音频数字人视频。</p>
+                    <button className="button button-primary" type="button" onClick={onCreateAvatar}>
+                      新建数字模特
+                    </button>
+                  </section>
+                ) : (
+                  <AudioDigitalHumanForm
+                    avatarId={avatar.id}
+                    modelDirectory={modelDirectory}
+                    active={mode === 'video' && videoMode === 'audio'}
+                    pageActive={pageActive && mode === 'video'}
+                    busy={busy}
+                    onJobStarted={refresh}
+                    intent={intent}
+                  />
+                )}
               </div>
             </section>
           </div>

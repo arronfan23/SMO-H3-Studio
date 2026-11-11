@@ -364,6 +364,10 @@ body[data-window-maximized='true'] .window-resize-handle {
   align-items: start;
 }
 
+.studio-layout.studio-layout-without-avatar {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .person-preview,
 .production-controls,
 .avatar-form,
@@ -474,6 +478,10 @@ body[data-window-maximized='true'] .window-resize-handle {
 
 .mode-tabs {
   margin-bottom: 18px;
+}
+
+.video-mode-tabs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .main-mode-tabs {
