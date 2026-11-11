@@ -26,15 +26,15 @@
 
 **文件：** `src/shared/types.ts`、`src/shared/ipc.ts`、`src/main/generation.ts`、`src/shared/workflow-nodes.ts`、`tests/unit/ipc.test.ts`、`tests/unit/generation.test.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 验证 `mode:'text'`、`avatarId:null`、`referenceImagePaths:[]` 合法且不上传图片；提交图中 `MiniMaxH3ImageToVideo` 没有任何 `ref_images.*`，其他调度、Spark、步数、输出不变。旧请求含 avatarId 仍走原 Ref2VA。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/generation.test.ts -t "no reference|无参考"`
 
-- [ ] **步骤 3：实现可空输入和无参考替换**
+- [x] **步骤 3：实现可空输入和无参考替换**
 
 ```ts
 interface VideoGenerationRequest {
@@ -47,16 +47,18 @@ interface VideoGenerationRequest {
 
 `referenceImagePaths` 缺省为 `[]`。无参考且 avatarId 为空时不再读取模特，work.avatarId=null。将 ReferenceToVideo 改为 ImageToVideo 并删除 ref_images 输入；不上传头像。保留所有调度器、输出和低步数 Refiner 修补。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/generation.test.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/shared/types.ts src/shared/ipc.ts src/main/generation.ts src/shared/workflow-nodes.ts tests/unit/ipc.test.ts tests/unit/generation.test.ts
 git commit -m "Allow H3 text to video without a reference image"
 ```
+
+实际完成：`30d618f2`。无参考专项 22/22、IPC/generation 413/413，类型检查通过；规格与代码质量审查均通过。旧 avatar 与 audio 行为保持，refs>0 在下一阶段接入前会明确拒绝且不建作品。审查仅记录一个覆盖缺口：无参考+SM120+1 step 将在任务 4 的真实低负载验收中覆盖。
 
 ### 任务 2：1-9 张参考图上传与 Ref2VA 连接
 
