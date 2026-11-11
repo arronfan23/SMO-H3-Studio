@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { constants } from 'node:fs';
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type {
   ComfyClient,
   ComfyExecutionUpdate,
@@ -9,9 +10,11 @@ import type {
 import type { GenerationExecutionOptions } from './generation';
 import {
   patchQwenImageWorkflow,
+  patchQwenReferenceImageWorkflow,
   type ImageWorkflowGraph,
 } from './image-workflow';
 import type { JobCoordinator } from './jobs';
+import type { MediaRegistry } from './media';
 import type { MediaComponentService } from './media-components';
 import type { Store } from './store';
 import type {
@@ -30,14 +33,19 @@ export interface ImageGenerationHandlerOptions {
   store: Pick<Store, 'addWork' | 'updateWork'>;
   comfy: Pick<
     ComfyClient,
-    'submit' | 'waitForCompletion' | 'history' | 'cancel'
+    'uploadFile' | 'submit' | 'waitForCompletion' | 'history' | 'cancel'
   >;
   mediaComponents: Pick<MediaComponentService, 'getState'>;
+  mediaRegistry: Pick<MediaRegistry, 'isSelectedImage'>;
   jobCoordinator: Pick<JobCoordinator, 'activeCount' | 'enqueue'>;
   workflowsDirectory: string;
   outputDirectory: string;
+  uploadsDirectory: string;
   ensureReady?: () => Promise<unknown>;
   idGenerator?: () => string;
+  copyFile?: typeof copyFile;
+  removeFile?: typeof rm;
+  cleanupErrorReporter?: (error: unknown) => void;
   progressErrorReporter?: (error: unknown) => void;
 }
 
@@ -85,6 +93,16 @@ export function validateImageGenerationRequest(
   if (!Number.isInteger(request.steps) || request.steps < 1 || request.steps > 100) {
     throw new Error('Image steps must be an integer from 1 to 100');
   }
+  if (
+    request.referenceImagePaths !== undefined &&
+    (!Array.isArray(request.referenceImagePaths) ||
+      request.referenceImagePaths.length > 4 ||
+      request.referenceImagePaths.some((path) => !nonEmptyString(path)))
+  ) {
+    throw new Error(
+      'referenceImagePaths must be an array of at most 4 non-empty strings',
+    );
+  }
   if (request.retryOf !== undefined && !nonEmptyString(request.retryOf)) {
     throw new Error('retryOf must not be empty');
   }
@@ -105,7 +123,7 @@ export function isImageGenerationRequest(
 function sanitizeRequest(
   input: ImageGenerationRequest,
 ): ImageGenerationRequest {
-  return {
+  const request: ImageGenerationRequest = {
     mode: 'image',
     prompt: input.prompt,
     width: input.width,
@@ -113,6 +131,61 @@ function sanitizeRequest(
     seed: input.seed,
     steps: input.steps,
   };
+  if (input.referenceImagePaths !== undefined) {
+    request.referenceImagePaths = [...input.referenceImagePaths];
+  }
+  return request;
+}
+
+const REFERENCE_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+
+async function stageReferenceImage(
+  sourcePath: string,
+  workId: string,
+  index: number,
+  uploadsDirectory: string,
+  copy: typeof copyFile,
+  remove: typeof rm,
+  reportCleanupError: (error: unknown) => void,
+): Promise<string> {
+  const extension = extname(sourcePath).toLowerCase();
+  if (!REFERENCE_IMAGE_EXTENSIONS.has(extension)) {
+    throw new Error('Reference image must be a PNG, JPEG, or WebP image');
+  }
+  await mkdir(uploadsDirectory, { recursive: true });
+  const stagedPath = join(
+    uploadsDirectory,
+    `${workId}-${index}${extension}`,
+  );
+  try {
+    await copy(sourcePath, stagedPath, constants.COPYFILE_EXCL);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      await cleanupStagedImage(stagedPath, remove, reportCleanupError);
+    }
+    throw error;
+  }
+  return stagedPath;
+}
+
+function reportCleanupError(error: unknown): void {
+  console.error('[SMO.H3 Studio] Failed to clean staged reference image', error);
+}
+
+async function cleanupStagedImage(
+  stagedPath: string,
+  remove: typeof rm,
+  reportError: (error: unknown) => void,
+): Promise<void> {
+  try {
+    await remove(stagedPath, { force: true });
+  } catch (error) {
+    try {
+      reportError(error);
+    } catch {
+      // Cleanup reporting must not replace the original job outcome.
+    }
+  }
 }
 
 function resolveWorkflowPath(
@@ -234,8 +307,11 @@ function reportProgressError(error: unknown): void {
 export function createImageGenerationHandler(
   options: ImageGenerationHandlerOptions,
 ): ImageGenerationHandler {
-  const { store, comfy, mediaComponents, jobCoordinator } = options;
+  const { store, comfy, mediaComponents, mediaRegistry, jobCoordinator } = options;
   const createId = options.idGenerator ?? randomUUID;
+  const copy = options.copyFile ?? copyFile;
+  const remove = options.removeFile ?? rm;
+  const cleanupErrorReporter = options.cleanupErrorReporter ?? reportCleanupError;
   const progressErrorReporter =
     options.progressErrorReporter ?? reportProgressError;
 
@@ -274,6 +350,13 @@ export function createImageGenerationHandler(
         ? executionOptions.workflowPath
         : IMAGE_WORKFLOW_FILENAME;
 
+    for (const referencePath of request.referenceImagePaths ?? []) {
+      if (!(await mediaRegistry.isSelectedImage(referencePath))) {
+        throw new Error(
+          'Reference image path must be explicitly selected through files.selectImage',
+        );
+      }
+    }
     requireReadyComponent();
     if (jobCoordinator.activeCount > 0) {
       throw new Error('Another generation is already running');
@@ -441,7 +524,37 @@ export function createImageGenerationHandler(
           await readFile(workflowPath, 'utf8'),
         ) as ImageWorkflowGraph;
         throwIfCancelled();
-        const { graph, nodeIds } = patchQwenImageWorkflow(frozen, request);
+        const uploadedNames: string[] = [];
+        for (const [index, sourcePath] of (
+          request.referenceImagePaths ?? []
+        ).entries()) {
+          const stagedPath = await stageReferenceImage(
+            sourcePath,
+            workId,
+            index,
+            options.uploadsDirectory,
+            copy,
+            remove,
+            cleanupErrorReporter,
+          );
+          try {
+            throwIfCancelled();
+            uploadedNames.push(
+              await comfy.uploadFile({ filePath: stagedPath, kind: 'image' }),
+            );
+            throwIfCancelled();
+          } finally {
+            await cleanupStagedImage(
+              stagedPath,
+              remove,
+              cleanupErrorReporter,
+            );
+          }
+        }
+        throwIfCancelled();
+        const { graph, nodeIds } = uploadedNames.length === 0
+          ? patchQwenImageWorkflow(frozen, request)
+          : patchQwenReferenceImageWorkflow(frozen, request, uploadedNames);
         graph[nodeIds.output].inputs.filename_prefix = `SMO-Image/${workId}`;
         graph[nodeIds.output].inputs.format = 'png';
         throwIfCancelled();

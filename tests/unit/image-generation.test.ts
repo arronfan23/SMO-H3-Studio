@@ -1,6 +1,7 @@
 // @vitest-environment node
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +89,7 @@ function pngOutput(
 
 class FakeComfyClient {
   readonly uploads: Parameters<ComfyClient['uploadFile']>[0][] = [];
+  readonly uploadedContents: string[] = [];
   readonly submissions: ImageWorkflowGraph[] = [];
   readonly waits: string[] = [];
   readonly histories: string[] = [];
@@ -100,10 +102,15 @@ class FakeComfyClient {
   progressEvents: ComfyProgress[] = [];
   executionUpdates: ComfyExecutionUpdate[] = [];
   outputFactory?: (workId: string) => ComfyOutputFile[];
+  uploadError?: Error;
+  uploadGate?: Deferred<void>;
 
   async uploadFile(input: Parameters<ComfyClient['uploadFile']>[0]): Promise<string> {
     this.uploads.push(input);
-    return 'unexpected-upload.png';
+    this.uploadedContents.push(await readFile(input.filePath, 'utf8'));
+    if (this.uploadGate) await this.uploadGate.promise;
+    if (this.uploadError) throw this.uploadError;
+    return `uploaded-${this.uploads.length}.png`;
   }
 
   async submit(prompt: unknown): Promise<ComfySubmitResult> {
@@ -211,9 +218,11 @@ async function createHarness(
     store,
     comfy,
     mediaComponents,
+    mediaRegistry,
     jobCoordinator,
     workflowsDirectory,
     outputDirectory,
+    uploadsDirectory: join(directory, 'uploads'),
     ensureReady,
     ...overrides,
   });
@@ -258,6 +267,51 @@ afterEach(async () => {
 });
 
 describe('image generation validation and submission', () => {
+  test.each([
+    { referenceImagePaths: [''] },
+    { referenceImagePaths: ['   '] },
+    { referenceImagePaths: ['1.png', '2.png', '3.png', '4.png', '5.png'] },
+    { referenceImagePaths: 'reference.png' },
+    { referenceImagePaths: [42] },
+  ])(
+    'image validates referenceImagePaths before authorization: %j',
+    async ({ referenceImagePaths }) => {
+      const isSelectedImage = vi.fn(async () => true);
+      const harness = await createHarness({
+        mediaRegistry: { isSelectedImage },
+      });
+
+      await expect(
+        harness.startImage({
+          ...harness.request,
+          referenceImagePaths,
+        } as ImageGenerationRequest),
+      ).rejects.toThrow(/referenceImagePaths/i);
+
+      expect(isSelectedImage).not.toHaveBeenCalled();
+      expect(harness.store.listWorks()).toEqual([]);
+      expect(harness.comfy.uploads).toEqual([]);
+      expect(harness.comfy.submissions).toEqual([]);
+    },
+  );
+
+  test('image rejects an unauthorized reference before creating a work', async () => {
+    const harness = await createHarness();
+    const referencePath = join(harness.directory, 'unauthorized.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+
+    await expect(
+      harness.startImage({
+        ...harness.request,
+        referenceImagePaths: [referencePath],
+      }),
+    ).rejects.toThrow(/selected|authorized/i);
+
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
   test('image rejects a component that is not ready before creating a work', async () => {
     const harness = await createHarness();
     harness.setComponentStatus('missing');
@@ -302,6 +356,9 @@ describe('image generation validation and submission', () => {
     const graph = harness.comfy.submissions[0];
 
     expect(harness.comfy.uploads).toEqual([]);
+    await expect(
+      readdir(join(harness.directory, 'uploads')),
+    ).rejects.toThrow();
     expect(harness.ensureReady).toHaveBeenCalledTimes(1);
     expect(graph['452'].inputs.prompt).toBe(request.prompt);
     expect(graph['456'].inputs).toMatchObject({
@@ -340,6 +397,236 @@ describe('image generation validation and submission', () => {
     expect(Date.parse(work.completedAt!)).toBeGreaterThanOrEqual(
       Date.parse(work.createdAt),
     );
+  });
+
+  test('image stages and submits one authorized reference in order', async () => {
+    const harness = await createHarness();
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'done');
+    const graph = harness.comfy.submissions[0];
+    const uploadsDirectory = join(harness.directory, 'uploads');
+
+    expect(harness.comfy.uploads).toEqual([
+      {
+        filePath: join(uploadsDirectory, `${result.id}-0.png`),
+        kind: 'image',
+      },
+    ]);
+    expect(harness.comfy.uploadedContents).toEqual(['reference-image-bytes']);
+    expect(await readdir(uploadsDirectory)).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+    expect(graph.ref1).toEqual({
+      class_type: 'LoadImage',
+      inputs: { image: 'uploaded-1.png' },
+    });
+    expect(graph['452'].inputs).toMatchObject({
+      prompt: harness.request.prompt,
+      vae: ['454', 0],
+      resolution: 1024,
+      images: { image_1: ['ref1', 0] },
+    });
+    expect(graph['458'].inputs).toMatchObject({
+      latent_image: ['452', 2],
+      seed: harness.request.seed,
+      steps: harness.request.steps,
+    });
+    expect(graph['456'].inputs).toMatchObject({
+      width: harness.request.width,
+      height: harness.request.height,
+    });
+    expect(graph['461'].inputs).toMatchObject({
+      filename_prefix: `SMO-Image/${result.id}`,
+      format: 'png',
+    });
+    expect(work.outputPath).toBe(
+      join(
+        harness.outputDirectory,
+        'SMO-Image',
+        `${result.id}_00001.png`,
+      ),
+    );
+    expect(work.metadata?.request).toEqual({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+  });
+
+  test('image uploads four references in array order with exclusive staged copies', async () => {
+    const copy = vi.fn<typeof copyFile>(async (source, destination, mode) => {
+      await copyFile(source, destination, mode);
+    });
+    const harness = await createHarness({ copyFile: copy });
+    const extensions = ['.PNG', '.jpg', '.jpeg', '.webp'];
+    const referencePaths: string[] = [];
+    for (const [index, extension] of extensions.entries()) {
+      const referencePath = join(
+        harness.directory,
+        `reference-${index}${extension}`,
+      );
+      await writeFile(referencePath, `reference-${index}-bytes`);
+      await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+      referencePaths.push(referencePath);
+    }
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: referencePaths,
+    });
+    await waitForWork(harness.store, result.id, 'done');
+    const graph = harness.comfy.submissions[0];
+    const uploadsDirectory = join(harness.directory, 'uploads');
+
+    expect(copy).toHaveBeenCalledTimes(4);
+    expect(copy.mock.calls.map(([source]) => source)).toEqual(referencePaths);
+    expect(copy.mock.calls.map(([, , mode]) => mode)).toEqual(
+      Array.from({ length: 4 }, () => constants.COPYFILE_EXCL),
+    );
+    expect(harness.comfy.uploads).toEqual(
+      extensions.map((extension, index) => ({
+        filePath: join(
+          uploadsDirectory,
+          `${result.id}-${index}${extension.toLowerCase()}`,
+        ),
+        kind: 'image',
+      })),
+    );
+    expect(harness.comfy.uploadedContents).toEqual(
+      extensions.map((_, index) => `reference-${index}-bytes`),
+    );
+    expect(graph['452'].inputs.vae).toEqual(['454', 0]);
+    expect(graph['452'].inputs.images).toEqual({
+      image_1: ['ref1', 0],
+      image_2: ['ref2', 0],
+      image_3: ['ref3', 0],
+      image_4: ['ref4', 0],
+    });
+    expect(Object.keys(graph['452'].inputs.images as object)).toEqual([
+      'image_1',
+      'image_2',
+      'image_3',
+      'image_4',
+    ]);
+    for (const index of [0, 1, 2, 3]) {
+      expect(graph[`ref${index + 1}`]).toEqual({
+        class_type: 'LoadImage',
+        inputs: { image: `uploaded-${index + 1}.png` },
+      });
+      expect(await readFile(referencePaths[index], 'utf8')).toBe(
+        `reference-${index}-bytes`,
+      );
+    }
+    expect(graph.ref5).toBeUndefined();
+    expect(graph['458'].inputs.latent_image).toEqual(['452', 2]);
+    expect(graph['461'].inputs).toMatchObject({
+      filename_prefix: `SMO-Image/${result.id}`,
+      format: 'png',
+    });
+    expect(await readdir(uploadsDirectory)).toEqual([]);
+  });
+
+  test('image cleans the staged reference when upload fails without submitting', async () => {
+    const harness = await createHarness();
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    harness.comfy.uploadError = new Error('reference upload failed');
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('reference upload failed');
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(await readdir(join(harness.directory, 'uploads'))).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
+  test('image reports cleanup failure without masking the upload failure', async () => {
+    const cleanupFailure = new Error('staged reference cleanup failed');
+    const cleanupErrorReporter = vi.fn();
+    const removeFile: typeof rm = async () => {
+      throw cleanupFailure;
+    };
+    const harness = await createHarness({
+      removeFile,
+      cleanupErrorReporter,
+    });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    harness.comfy.uploadError = new Error('reference upload failed');
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('reference upload failed');
+    expect(cleanupErrorReporter).toHaveBeenCalledWith(cleanupFailure);
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test('image removes a partial staged reference when copying fails', async () => {
+    const copyFailure = Object.assign(new Error('reference copy failed'), {
+      code: 'EIO',
+    });
+    const failingCopy: typeof copyFile = async (_source, destination) => {
+      await writeFile(destination, 'partial-reference');
+      throw copyFailure;
+    };
+    const harness = await createHarness({ copyFile: failingCopy });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('reference copy failed');
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(await readdir(join(harness.directory, 'uploads'))).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
+  test('image does not delete an existing staged path on an exclusive copy collision', async () => {
+    const collision = Object.assign(new Error('staged reference exists'), {
+      code: 'EEXIST',
+    });
+    let stagedPath = '';
+    const collidingCopy: typeof copyFile = async (_source, destination) => {
+      stagedPath = destination.toString();
+      await writeFile(destination, 'existing-staged-file');
+      throw collision;
+    };
+    const harness = await createHarness({ copyFile: collidingCopy });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('staged reference exists');
+    expect(await readFile(stagedPath, 'utf8')).toBe('existing-staged-file');
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
   });
 
   test('image rejects a workflow path escape before creating a work', async () => {
@@ -423,6 +710,67 @@ describe('image output safety', () => {
 });
 
 describe('image progress, completion, and cancellation', () => {
+  test('image cancellation before reference upload neither uploads nor leaves staging', async () => {
+    const copyStarted = deferred();
+    const copyGate = deferred();
+    const gatedCopy: typeof copyFile = async (source, destination, mode) => {
+      await copyFile(source, destination, mode);
+      copyStarted.resolve();
+      await copyGate.promise;
+    };
+    const harness = await createHarness({ copyFile: gatedCopy });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    await copyStarted.promise;
+    await harness.jobCoordinator.cancel(result.id);
+    copyGate.resolve();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('Generation cancelled');
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(await readdir(join(harness.directory, 'uploads'))).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
+  test('image cancellation during reference upload cleans staging without submitting', async () => {
+    const removeFile = vi.fn<typeof rm>(async (...args) => rm(...args));
+    const harness = await createHarness({ removeFile });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const uploadGate = deferred();
+    harness.comfy.uploadGate = uploadGate;
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    await vi.waitFor(() => expect(harness.comfy.uploads).toHaveLength(1));
+    await harness.jobCoordinator.cancel(result.id);
+    uploadGate.resolve();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+    const stagedPath = join(
+      harness.directory,
+      'uploads',
+      `${result.id}-0.png`,
+    );
+
+    expect(work.error).toBe('Generation cancelled');
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(harness.comfy.cancelRequests).toEqual([]);
+    expect(removeFile).toHaveBeenCalledWith(stagedPath, { force: true });
+    expect(removeFile).not.toHaveBeenCalledWith(referencePath, { force: true });
+    expect(await readdir(join(harness.directory, 'uploads'))).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
   test('image throttles progress and preserves retry metadata through finalizing', async () => {
     const harness = await createHarness();
     const updateWork = vi.spyOn(harness.store, 'updateWork');
@@ -576,6 +924,110 @@ describe('image progress, completion, and cancellation', () => {
 });
 
 describe('image retry and single-job coordination', () => {
+  test('image retries references from the frozen workflow without accumulating nodes', async () => {
+    const harness = await createHarness();
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const workflowPath = join(workflowsDirectory, 'qwen-image-2-1.json');
+    const frozenSource = await readFile(workflowPath, 'utf8');
+    const request: ImageGenerationRequest = {
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    };
+    const startImage = vi.fn(harness.startImage);
+    const startGeneration: GenerationHandler = (generationRequest, options) => {
+      if (generationRequest.mode === 'image') {
+        return startImage(generationRequest, options);
+      }
+      throw new Error('image retry routed to the wrong handler');
+    };
+    const retryWork = createRetryHandler({
+      store: harness.store,
+      mediaRegistry: harness.mediaRegistry,
+      startGeneration,
+    });
+    harness.comfy.completionError = new Error('retryable reference failure');
+
+    const original = await harness.startImage(request);
+    const failed = await waitForWork(harness.store, original.id, 'failed');
+    const originalSnapshot = structuredClone(failed);
+    harness.comfy.completionError = undefined;
+
+    const retried = await retryWork(original.id);
+    const completed = await waitForWork(harness.store, retried.id, 'done');
+
+    expect(harness.comfy.submissions).toHaveLength(2);
+    for (const [index, graph] of harness.comfy.submissions.entries()) {
+      expect(graph.ref1).toEqual({
+        class_type: 'LoadImage',
+        inputs: { image: `uploaded-${index + 1}.png` },
+      });
+      expect(graph.ref2).toBeUndefined();
+      expect(graph['452'].inputs.images).toEqual({
+        image_1: ['ref1', 0],
+      });
+      expect(graph['458'].inputs.latent_image).toEqual(['452', 2]);
+    }
+    expect(harness.comfy.uploads.map(({ filePath }) => filePath)).toEqual([
+      join(harness.directory, 'uploads', `${original.id}-0.png`),
+      join(harness.directory, 'uploads', `${retried.id}-0.png`),
+    ]);
+    expect(harness.comfy.uploadedContents).toEqual([
+      'reference-image-bytes',
+      'reference-image-bytes',
+    ]);
+    expect(completed.metadata).toMatchObject({
+      request,
+      workflowVersion: 'qwen-image-2-1.json',
+      retryOf: original.id,
+    });
+    expect(startImage).toHaveBeenLastCalledWith(
+      { ...request, retryOf: original.id },
+      { workflowPath: 'qwen-image-2-1.json' },
+    );
+    expect(harness.store.getWork(original.id)).toEqual(originalSnapshot);
+    expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
+    expect(await readdir(join(harness.directory, 'uploads'))).toEqual([]);
+  });
+
+  test('image rechecks single-job coordination after asynchronous authorization', async () => {
+    const authorizationStarted = deferred();
+    const authorizationGate = deferred();
+    let harness: Awaited<ReturnType<typeof createHarness>>;
+    const isSelectedImage = vi.fn(async (path: string) => {
+      authorizationStarted.resolve();
+      await authorizationGate.promise;
+      return harness.mediaRegistry.isSelectedImage(path);
+    });
+    harness = await createHarness({
+      mediaRegistry: { isSelectedImage },
+    });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+
+    const referenceStart = harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    await authorizationStarted.promise;
+    const occupying = await harness.startImage(harness.request);
+    authorizationGate.resolve();
+
+    await expect(referenceStart).rejects.toThrow(/another generation/i);
+    expect(harness.store.listWorks().map((work) => work.id)).toEqual([
+      occupying.id,
+    ]);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.jobCoordinator.activeId).toBe(occupying.id);
+
+    completionGate.resolve();
+    await waitForWork(harness.store, occupying.id, 'done');
+  });
+
   test('image retries a failed work without media authorization', async () => {
     const harness = await createHarness();
     harness.comfy.completionError = new Error('retryable image failure');
@@ -646,7 +1098,7 @@ describe('image retry and single-job coordination', () => {
 });
 
 describe('image AppServices assembly', () => {
-  test('image uses component readiness and active ComfyUI without hardware apply', async () => {
+  test('image uses the real media registry and uploads directory without hardware apply', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'smo-image-services-'));
     vi.spyOn(MediaComponentService.prototype, 'getState').mockImplementation(
       (id): MediaComponentState => ({
@@ -662,9 +1114,13 @@ describe('image AppServices assembly', () => {
     const ensureReady = vi
       .spyOn(ComfyProcessManager.prototype, 'ensureReady')
       .mockResolvedValue({ system: {}, devices: [] });
+    const uploadedContents: string[] = [];
     const upload = vi
       .spyOn(ComfyClientClass.prototype, 'uploadFile')
-      .mockResolvedValue('unexpected.png');
+      .mockImplementation(async (input) => {
+        uploadedContents.push(await readFile(input.filePath, 'utf8'));
+        return 'services-reference.png';
+      });
     let submitted: ImageWorkflowGraph | undefined;
     vi.spyOn(ComfyClientClass.prototype, 'submit').mockImplementation(
       async (graph) => {
@@ -695,6 +1151,10 @@ describe('image AppServices assembly', () => {
       await services.close();
       await rm(dataDirectory, { recursive: true, force: true });
     });
+    const referencePath = join(dataDirectory, 'selected-reference.PNG');
+    await writeFile(referencePath, 'services-reference-bytes');
+    const authorizedReference =
+      await services.files.authorizeDroppedImage(referencePath);
     const request: ImageGenerationRequest = {
       mode: 'image',
       prompt: '服务装配图像任务',
@@ -702,6 +1162,7 @@ describe('image AppServices assembly', () => {
       height: 1024,
       seed: 42,
       steps: 25,
+      referenceImagePaths: [authorizedReference],
     };
 
     const result = await services.startGeneration(request);
@@ -712,7 +1173,23 @@ describe('image AppServices assembly', () => {
       join(dataDirectory, 'output', 'SMO-Image', `${result.id}_00001.png`),
     );
     expect(ensureReady).toHaveBeenCalledTimes(1);
-    expect(upload).not.toHaveBeenCalled();
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload.mock.calls[0][0]).toEqual({
+      filePath: join(dataDirectory, 'uploads', `${result.id}-0.png`),
+      kind: 'image',
+    });
+    expect(uploadedContents).toEqual(['services-reference-bytes']);
+    expect(await readdir(join(dataDirectory, 'uploads'))).toEqual([]);
+    expect(submitted!.ref1).toEqual({
+      class_type: 'LoadImage',
+      inputs: { image: 'services-reference.png' },
+    });
+    expect(submitted!['452'].inputs).toMatchObject({
+      vae: ['454', 0],
+      images: { image_1: ['ref1', 0] },
+    });
+    expect(submitted!['458'].inputs.latent_image).toEqual(['452', 2]);
+    expect(work.metadata?.request).toEqual(request);
     expect(apply).not.toHaveBeenCalled();
   });
 });

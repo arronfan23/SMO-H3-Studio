@@ -686,9 +686,11 @@ export async function createAppServices(
       store,
       comfy,
       mediaComponents,
+      mediaRegistry,
       jobCoordinator,
       workflowsDirectory: defaultWorkflowsDirectory(),
       outputDirectory,
+      uploadsDirectory: join(dataDirectory, 'uploads'),
       ensureReady: () => activeComfyProcess!.ensureReady(),
     });
     speechRuntime = new SpeechRuntime({
