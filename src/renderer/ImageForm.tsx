@@ -37,6 +37,7 @@ export function ImageForm({
 }) {
   const [imageMode, setImageMode] = useState<ImageMode>('text');
   const [referenceImagePaths, setReferenceImagePaths] = useState<string[]>([]);
+  const [referenceSelectionVersion, setReferenceSelectionVersion] = useState(0);
   const [prompt, setPrompt] = useState('');
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('1:1 (Square)');
   const [megapixels, setMegapixels] = useState<ImageResolutionMegapixels>(
@@ -55,16 +56,24 @@ export function ImageForm({
   const [jobId, setJobId] = useState<string | null>(null);
   const [referenceDimensions, setReferenceDimensions] = useState<{
     path: string;
+    version: number;
     naturalWidth: number;
     naturalHeight: number;
   } | null>(null);
   const firstReferencePath = referenceImagePaths[0] ?? null;
-  const referenceContextRef = useRef({ imageMode, firstReferencePath });
-  referenceContextRef.current = { imageMode, firstReferencePath };
+  const referenceContextRef = useRef({
+    imageMode,
+    firstReferencePath,
+    referenceSelectionVersion,
+  });
+  referenceContextRef.current = { imageMode, firstReferencePath, referenceSelectionVersion };
   const { url: firstReferenceUrl, error: firstReferenceError } = useMediaUrl(
     imageMode === 'reference' ? firstReferencePath : null,
+    referenceSelectionVersion,
   );
-  const currentReferenceDimensions = referenceDimensions?.path === firstReferencePath
+  const currentReferenceDimensions =
+    referenceDimensions?.path === firstReferencePath &&
+    referenceDimensions.version === referenceSelectionVersion
     ? referenceDimensions
     : null;
   const referenceResolution = imageMode === 'reference' && currentReferenceDimensions !== null
@@ -297,11 +306,13 @@ export function ImageForm({
 
   const readFirstReferenceDimensions = (image: HTMLImageElement): void => {
     const path = firstReferencePath;
+    const version = referenceSelectionVersion;
     const current = referenceContextRef.current;
     if (
       path === null ||
       current.imageMode !== 'reference' ||
-      current.firstReferencePath !== path
+      current.firstReferencePath !== path ||
+      current.referenceSelectionVersion !== version
     ) {
       return;
     }
@@ -311,7 +322,13 @@ export function ImageForm({
       setError('无法读取首图自然尺寸，请重新选择参考图。');
       return;
     }
-    setReferenceDimensions({ path, naturalWidth, naturalHeight });
+    setReferenceDimensions({ path, version, naturalWidth, naturalHeight });
+  };
+
+  const changeReferenceImages = (paths: string[]): void => {
+    setReferenceSelectionVersion((version) => version + 1);
+    setReferenceImagePaths(paths);
+    setReferenceDimensions(null);
   };
 
   const startGeneration = async (): Promise<void> => {
@@ -520,34 +537,13 @@ export function ImageForm({
         </div>
 
         <div
-          id={`${imageMode}-image-panel`}
-          className="generation-form"
+          id="text-image-panel"
+          className={imageMode === 'text' ? 'generation-form' : undefined}
           role="tabpanel"
-          aria-labelledby={`${imageMode}-image-tab`}
+          aria-labelledby="text-image-tab"
+          hidden={imageMode !== 'text'}
         >
-          {imageMode === 'reference' ? (
-            <>
-              {firstReferenceUrl !== null && (
-                <img
-                  key={firstReferenceUrl}
-                  data-testid="reference-image-dimensions"
-                  src={firstReferenceUrl}
-                  alt=""
-                  aria-hidden="true"
-                  hidden
-                  onLoad={(event) => readFirstReferenceDimensions(event.currentTarget)}
-                />
-              )}
-              <ReferenceImagePicker
-                paths={referenceImagePaths}
-                max={4}
-                disabled={submitting || busy}
-                onChange={setReferenceImagePaths}
-                onError={setError}
-              />
-              <div className="form-row image-option-row">{resolutionField}</div>
-            </>
-          ) : (
+          {imageMode === 'text' && (
             <div className="form-row image-option-row">
               <div className="field">
                 <label htmlFor="image-aspect">图像比例</label>
@@ -568,6 +564,37 @@ export function ImageForm({
               </div>
               {resolutionField}
             </div>
+          )}
+        </div>
+        <div
+          id="reference-image-panel"
+          className={imageMode === 'reference' ? 'generation-form' : undefined}
+          role="tabpanel"
+          aria-labelledby="reference-image-tab"
+          hidden={imageMode !== 'reference'}
+        >
+          {imageMode === 'reference' && (
+            <>
+              {firstReferenceUrl !== null && (
+                <img
+                  key={`${referenceSelectionVersion}:${firstReferencePath}:${firstReferenceUrl}`}
+                  data-testid="reference-image-dimensions"
+                  src={firstReferenceUrl}
+                  alt=""
+                  aria-hidden="true"
+                  hidden
+                  onLoad={(event) => readFirstReferenceDimensions(event.currentTarget)}
+                />
+              )}
+              <ReferenceImagePicker
+                paths={referenceImagePaths}
+                max={4}
+                disabled={submitting || busy}
+                onChange={changeReferenceImages}
+                onError={setError}
+              />
+              <div className="form-row image-option-row">{resolutionField}</div>
+            </>
           )}
         </div>
 

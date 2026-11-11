@@ -161,6 +161,35 @@ describe('图像工作区', () => {
     expect(panel.queryByRole('group', { name: '参考图拖放区' })).not.toBeInTheDocument();
   });
 
+  test('两个图像模式 panel 始终存在且仅当前 panel 可见', async () => {
+    const { panel } = await renderImage();
+    await waitForImageReady();
+
+    const textPanel = document.getElementById('text-image-panel');
+    const referencePanel = document.getElementById('reference-image-panel');
+    expect(textPanel).toBeVisible();
+    expect(referencePanel).not.toBeVisible();
+    expect(panel.getByRole('tab', { name: '文字生图' })).toHaveAttribute(
+      'aria-controls',
+      'text-image-panel',
+    );
+    expect(panel.getByRole('tab', { name: '参考生图' })).toHaveAttribute(
+      'aria-controls',
+      'reference-image-panel',
+    );
+    expect(document.querySelectorAll('#image-resolution')).toHaveLength(1);
+
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
+    expect(textPanel).not.toBeVisible();
+    expect(referencePanel).toBeVisible();
+    expect(document.querySelectorAll('#image-resolution')).toHaveLength(1);
+
+    fireEvent.click(panel.getByRole('tab', { name: '文字生图' }));
+    expect(textPanel).toBeVisible();
+    expect(referencePanel).not.toBeVisible();
+    expect(document.querySelectorAll('#image-resolution')).toHaveLength(1);
+  });
+
   test('参考生图没有参考图时说明原因且不能提交', async () => {
     const { panel } = await renderImage();
     await waitForImageReady();
@@ -306,6 +335,32 @@ describe('图像工作区', () => {
     fireEvent.click(panel.getByRole('button', { name: '删除参考图 1' }));
     expect(panel.getByRole('button', { name: '生成图像' })).toBeDisabled();
     expect(panel.getByText(/至少.*1.*参考图/)).toBeInTheDocument();
+  });
+
+  test('同路径删除重选使旧尺寸失效且旧加载回调不能覆盖新代次', async () => {
+    const path = 'G:\\refs\\same-path.png';
+    const { panel } = await renderImage();
+    await waitForImageReady();
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
+    await addReference(panel, path);
+    const oldImage = await loadFirstReference(panel, 1920, 1080);
+    await waitFor(() => expect(panel.getByRole('button', { name: '生成图像' })).toBeEnabled());
+
+    fireEvent.click(panel.getByRole('button', { name: '删除参考图 1' }));
+    await addReference(panel, path);
+    expect(panel.getByRole('button', { name: '生成图像' })).toBeDisabled();
+    expect(panel.getByText(/正在读取首图尺寸/)).toBeInTheDocument();
+    fireEvent.load(oldImage);
+    expect(panel.getByRole('button', { name: '生成图像' })).toBeDisabled();
+
+    const newImage = await loadFirstReference(panel, 1200, 1600);
+    expect(newImage).not.toBe(oldImage);
+    await waitFor(() => expect(panel.getByRole('button', { name: '生成图像' })).toBeEnabled());
+    expect(panel.getByText(/输出 896 × 1184 px/)).toBeInTheDocument();
+
+    fireEvent.load(oldImage);
+    expect(panel.getByText(/输出 896 × 1184 px/)).toBeInTheDocument();
+    expect(panel.queryByText(/输出 1376 × 768 px/)).not.toBeInTheDocument();
   });
 
   test('切换模式保留参考图草稿且文字生图始终提交空路径数组', async () => {
