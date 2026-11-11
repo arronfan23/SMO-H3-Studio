@@ -134,6 +134,19 @@ git commit -m "Generate Qwen images from multiple references"
 - 4 图作品成功导入独立数字模特，导入副本字节一致；随后删除两个测试作品，实际输出均删除，参考原图与导入副本保留，`data/uploads` 无暂存残留。
 - 最终 ComfyUI 队列空闲、RTX 5080 健康，未停止用户实例，未修改模型或用户旧作品。
 
-- [ ] **步骤 3：完整回归并提交结果**
+- [x] **步骤 3：完整回归并提交结果**
 
 运行类型检查、排除已知旧环境导入测试的 Vitest、studio/package E2E，将真实结果和未执行项写入本计划并只提交计划文件。
+
+#### 2026-11-11 最终回归（HEAD `5595748109ebf45b7650642b1009d6395a1fe28d`）
+
+- `npm run typecheck`：PASS。
+- `npx vitest run --exclude tests/unit/environment-wizard.test.tsx`：**61 个文件，2772 通过、1 跳过、0 失败**。
+- `npm run test:e2e -- tests/e2e/studio.spec.ts`：**26/26 PASS**。
+- `npm run pack -- --config.electronDist=node_modules/electron/dist`：PASS，使用本机 Electron 分发目录，未签名。
+- `npm run test:e2e:package`：**6/6 PASS**。
+- 整体最终审查：Critical/Important 均为 0；审查提出的时序、无模特文案和上传阶段 3 个 Minor 已在 `55957481` 修复并复审通过。
+- 便携包 `release/SMO.H3-Studio-0.4.0.exe`：113,404,213 bytes，SHA256 `E863139508B3CFC2B9E2A6D8B0750420EE533A3B428C63BC503BE683227EF336`。
+- 安装包 `release/SMO.H3-Studio-Setup-0.4.0.exe`：125,914,963 bytes，SHA256 `7B329CEEAD9B166922D9E4575706F1BE91C68FB049F40B49511D6CFB33535685`。
+
+未执行/边界：仅实测当前 RTX 5080 16GB Windows 环境，未验证其他显卡或 8GB 配置；未创建远程 Release。异常强制终止进程后的暂存清理属于残余风险，正常成功、失败、取消与重试路径均已验证。
