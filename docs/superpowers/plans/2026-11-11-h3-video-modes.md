@@ -106,19 +106,21 @@ git commit -m "Support up to nine H3 reference images"
 
 **文件：** `src/renderer/TextToVideoForm.tsx`、`src/renderer/StudioPage.tsx`、`src/main/llm.ts`、`tests/unit/studio.test.tsx`、`tests/e2e/studio.spec.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 验证视频细分为“文生视频 / 图片生视频 / 音频数字人”。文生视频无模特可提交，图片生视频必须至少一张、最多九张；当前模特仅能通过显式按钮加入，不自动注入。三类草稿、焦点和 busy 保持。
 
 润色验证：无参考时 `imageCount:0/mode:t2va/referenceLabels:[]`；N 图时 `imageCount:N/mode:ref2va` 且 labels 为 Picture1..N。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/studio.test.tsx -t "文生视频|图片生视频|无模特"`
 
-- [ ] **步骤 3：实现三类表单和润色输入**
+- [x] **步骤 3：实现三类表单和润色输入**
 
 videoMode 改为 `'text'|'reference'|'audio'`。文字面板 `avatarId=null/referenceImagePaths=[]`；参考面板使用共享 picker，只有 `avatar` 存在时显示“使用当前模特”按钮。无 avatar 不再显示全页空状态，参考模式不强制模特预览。
+
+单元阶段实际完成：三类 UI `5bd75d51`，润色失效与跨表单互斥 `2ff34780`，busy 交接 `1fea4775`。完整 Studio 单元 200/200、类型检查通过；规格与代码质量审查均通过。Electron 与提交记录见下一步。
 
 - [ ] **步骤 4：运行单元、类型和 Electron 测试**
 
