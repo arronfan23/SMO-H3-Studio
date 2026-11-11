@@ -42,6 +42,9 @@ export function AudioDigitalHumanForm({
   active = true,
   pageActive = true,
   busy = false,
+  isGenerationPending = false,
+  generationPendingRef,
+  onGenerationPendingChange,
   onJobStarted,
   intent = null,
 }: {
@@ -50,6 +53,9 @@ export function AudioDigitalHumanForm({
   active?: boolean;
   pageActive?: boolean;
   busy?: boolean;
+  isGenerationPending?: boolean;
+  generationPendingRef?: { current: boolean };
+  onGenerationPendingChange?: (pending: boolean) => void;
   onJobStarted?: () => Promise<boolean | void>;
   intent?: StudioIntent | null;
 }) {
@@ -131,13 +137,13 @@ export function AudioDigitalHumanForm({
       return;
     }
     handledIntentTokenRef.current = intent.token;
-    if (busy || submitting || recordingBusy || operationRef.current === 'generation') {
+    if (busy || isGenerationPending || submitting || recordingBusy || operationRef.current === 'generation') {
       setError('生成任务进行中，完成后才能更换语音作品。');
       return;
     }
     setError(null);
     handleAudioSelected(intent.audioPath, intent.token);
-  }, [busy, intent, recordingBusy, submitting]);
+  }, [busy, intent, isGenerationPending, recordingBusy, submitting]);
 
   const resolveValidClip = (text: string): { audioPath: string; duration: number } | null => {
     if (audioPath === null || audioSeconds === null) {
@@ -245,7 +251,11 @@ export function AudioDigitalHumanForm({
   };
 
   const startGeneration = async (): Promise<void> => {
-    if (operationRef.current !== null) {
+    if (
+      operationRef.current !== null ||
+      isGenerationPending ||
+      generationPendingRef?.current === true
+    ) {
       return;
     }
     const prompt = (activeTab === 'polished' ? polishedText : originalText).trim();
@@ -263,6 +273,7 @@ export function AudioDigitalHumanForm({
     }
 
     operationRef.current = 'generation';
+    onGenerationPendingChange?.(true);
     setSubmitting(true);
     setError(null);
     setJobId(null);
@@ -289,6 +300,7 @@ export function AudioDigitalHumanForm({
       setError(errorMessage(startError));
     } finally {
       operationRef.current = null;
+      onGenerationPendingChange?.(false);
       setSubmitting(false);
     }
   };
@@ -341,13 +353,13 @@ export function AudioDigitalHumanForm({
       <AudioInput
         key={audioIntentToken ?? 'manual'}
         path={audioPath}
-        disabled={submitting || busy || recordingBusy}
+        disabled={submitting || busy || isGenerationPending || recordingBusy}
         onSelected={handleAudioSelected}
         onError={setError}
       />
       <AudioRecorder
         active={active && pageActive}
-        disabled={submitting || busy}
+        disabled={submitting || busy || isGenerationPending}
         hasAudio={audioPath !== null}
         onBusyChange={setRecordingBusy}
         onRecorded={handleAudioSelected}
@@ -525,15 +537,15 @@ export function AudioDigitalHumanForm({
         recommended={6}
         min={1}
         max={100}
-        disabled={submitting || busy || recordingBusy}
+        disabled={submitting || busy || isGenerationPending || recordingBusy}
         onChange={setSteps}
       />
-      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy || recordingBusy}>
+      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy || isGenerationPending || recordingBusy}>
         <Sparkles size={16} aria-hidden="true" />
         {polishing ? '正在润色…' : 'AI 润色'}
       </button>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy || recordingBusy}>
+      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy || isGenerationPending || recordingBusy}>
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>

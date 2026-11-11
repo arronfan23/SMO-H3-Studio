@@ -1120,6 +1120,163 @@ describe('text-to-video studio', () => {
     );
   });
 
+  test('图片生视频 polishing 禁用参考 picker 和使用当前模特', async () => {
+    const pending = deferred<PolishResult>();
+    smo.llm.polish.mockImplementationOnce(() => pending.promise);
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\polishing.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('polishing.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '润色期间不能修改参考图' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(panel.getByRole('button', { name: '正在润色…' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '删除参考图 1' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '使用当前模特' })).toBeDisabled();
+    fireEvent.drop(panel.getByRole('group', { name: '参考图拖放区' }), {
+      dataTransfer: {
+        files: [new File(['image'], 'blocked-during-polish.png', { type: 'image/png' })],
+      },
+    });
+    expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pending.resolve({
+        text: '润色完成',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+      await pending.promise;
+    });
+  });
+
+  test('图片生视频选择授权后改变参考数组会使旧润色结果失效', async () => {
+    const polishPending = deferred<PolishResult>();
+    const authorization = deferred<string>();
+    smo.llm.polish.mockImplementationOnce(() => polishPending.promise);
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\before-polish.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('before-polish.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '参考图变化前的润色' },
+    });
+    smo.files.authorizeDroppedImage.mockImplementationOnce(() => authorization.promise);
+    fireEvent.drop(panel.getByRole('group', { name: '参考图拖放区' }), {
+      dataTransfer: {
+        files: [new File(['image'], 'after-polish.png', { type: 'image/png' })],
+      },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    await act(async () => {
+      authorization.resolve('G:\\dropped\\after-polish.png');
+      await authorization.promise;
+    });
+    expect(await panel.findByText('after-polish.png')).toBeInTheDocument();
+
+    await act(async () => {
+      polishPending.resolve({
+        text: '不应生效的旧参考图润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+      await polishPending.promise;
+    });
+
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByDisplayValue('不应生效的旧参考图润色结果')).not.toBeInTheDocument();
+  });
+
+  test('图片生视频添加当前模特会清空已有润色并返回原文', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '加入模特前的润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\before-avatar.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('before-avatar.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '加入模特前的原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByDisplayValue('加入模特前的润色结果')).toBeInTheDocument();
+
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByDisplayValue('加入模特前的润色结果')).not.toBeInTheDocument();
+    expect(panel.getByLabelText('原始文字')).toHaveValue('加入模特前的原文');
+  });
+
+  test('人物 Picture 1 标签只在音频数字人模式显示', async () => {
+    await renderStudio();
+    expect(screen.queryByText('参考人物：<Picture 1>')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    expect(screen.queryByText('参考人物：<Picture 1>')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    expect(screen.getByText('参考人物：<Picture 1>')).toBeInTheDocument();
+  });
+
+  test('跨表单 text pending 同步阻止 reference 生成并在结束后恢复', async () => {
+    const pending = deferred<{ id: string }>();
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\shared-pending.png');
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(videoSubpanel('reference'));
+    fireEvent.click(referencePanel.getByRole('button', { name: '选择参考图' }));
+    expect(await referencePanel.findByText('shared-pending.png')).toBeInTheDocument();
+    fireEvent.change(referencePanel.getByLabelText('原始文字'), {
+      target: { value: '等待 text 完成的 reference 任务' },
+    });
+    const referenceForm = referencePanel.getByRole('button', { name: '生成视频' })
+      .closest('form') as HTMLFormElement;
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '先执行的 text 任务' },
+    });
+    smo.jobs.start.mockImplementationOnce(() => pending.promise);
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    fireEvent.submit(referenceForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    for (const name of ['文生视频', '图片生视频', '音频数字人']) {
+      expect(screen.getByRole('tab', { name })).toBeDisabled();
+    }
+
+    await act(async () => {
+      pending.resolve({ id: 'shared-text-job' });
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '图片生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(referenceForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
+  });
+
   test('图片生视频仅在点击后显式加入当前模特并处理重复', async () => {
     const panel = await openReferenceStudio();
     expect(panel.getByText('尚未选择参考图')).toBeInTheDocument();
@@ -3385,6 +3542,40 @@ describe('audio digital human studio', () => {
     expect(polishedTab).toBeDisabled();
     expect(polishedTab).toHaveAttribute('tabindex', '-1');
     expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('键盘 tabs 原文');
+  });
+
+  test('跨表单 audio pending 同步阻止 text 生成并在结束后恢复', async () => {
+    const pending = deferred<{ id: string }>();
+    await renderLoadedAudio('G:\\recordings\\shared-audio-pending.mp3', 8);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '先执行的 audio 任务' },
+    });
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '等待 audio 完成的 text 任务' },
+    });
+    const textForm = textVideoField('原始文字').closest('form') as HTMLFormElement;
+    smo.jobs.start.mockImplementationOnce(() => pending.promise);
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    fireEvent.submit(textForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    for (const name of ['文生视频', '图片生视频', '音频数字人']) {
+      expect(screen.getByRole('tab', { name })).toBeDisabled();
+    }
+
+    await act(async () => {
+      pending.resolve({ id: 'shared-audio-job' });
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '文生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(textForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
   });
 
   test('starts only one job for repeated generation clicks', async () => {

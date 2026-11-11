@@ -46,6 +46,13 @@ export function StudioPage({
   const handledIntentTokenRef = useRef<number | null>(null);
   const pendingIntentFocusTokenRef = useRef<number | null>(null);
   const { busy, syncRevision, refresh } = useActiveJob();
+  const generationPendingRef = useRef(false);
+  const [isGenerationPending, setIsGenerationPending] = useState(false);
+
+  const onGenerationPendingChange = useCallback((pending: boolean): void => {
+    generationPendingRef.current = pending;
+    setIsGenerationPending(pending);
+  }, []);
 
   const setMode = useCallback((nextMode: StudioMode): void => {
     if (controlledMode === undefined) {
@@ -272,7 +279,9 @@ export function StudioPage({
                   <h2>{avatar.name}</h2>
                 </div>
                 <AvatarImage avatar={avatar} />
-                <p className="reference-label">参考人物：&lt;Picture 1&gt;</p>
+                {videoMode === 'audio' && (
+                  <p className="reference-label">参考人物：&lt;Picture 1&gt;</p>
+                )}
               </section>
             )}
             <section className="production-controls" aria-label="制作控制区">
@@ -289,6 +298,7 @@ export function StudioPage({
                   role="tab"
                   aria-selected={videoMode === 'text'}
                   aria-controls="text-mode-panel"
+                  disabled={isGenerationPending}
                   tabIndex={videoMode === 'text' ? 0 : -1}
                   onClick={() => setVideoMode('text')}
                 >
@@ -301,6 +311,7 @@ export function StudioPage({
                   role="tab"
                   aria-selected={videoMode === 'reference'}
                   aria-controls="reference-mode-panel"
+                  disabled={isGenerationPending}
                   tabIndex={videoMode === 'reference' ? 0 : -1}
                   onClick={() => setVideoMode('reference')}
                 >
@@ -313,6 +324,7 @@ export function StudioPage({
                   role="tab"
                   aria-selected={videoMode === 'audio'}
                   aria-controls="audio-mode-panel"
+                  disabled={isGenerationPending}
                   tabIndex={videoMode === 'audio' ? 0 : -1}
                   onClick={() => setVideoMode('audio')}
                 >
@@ -331,6 +343,9 @@ export function StudioPage({
                   modelDirectory={modelDirectory}
                   active={mode === 'video' && videoMode === 'text'}
                   busy={busy}
+                  isGenerationPending={isGenerationPending}
+                  generationPendingRef={generationPendingRef}
+                  onGenerationPendingChange={onGenerationPendingChange}
                   onJobStarted={refresh}
                 />
               </div>
@@ -346,6 +361,9 @@ export function StudioPage({
                   modelDirectory={modelDirectory}
                   active={mode === 'video' && videoMode === 'reference'}
                   busy={busy}
+                  isGenerationPending={isGenerationPending}
+                  generationPendingRef={generationPendingRef}
+                  onGenerationPendingChange={onGenerationPendingChange}
                   onJobStarted={refresh}
                 />
               </div>
@@ -371,6 +389,9 @@ export function StudioPage({
                     active={mode === 'video' && videoMode === 'audio'}
                     pageActive={pageActive && mode === 'video'}
                     busy={busy}
+                    isGenerationPending={isGenerationPending}
+                    generationPendingRef={generationPendingRef}
+                    onGenerationPendingChange={onGenerationPendingChange}
                     onJobStarted={refresh}
                     intent={intent}
                   />

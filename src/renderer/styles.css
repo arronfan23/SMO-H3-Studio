@@ -1134,6 +1134,17 @@ body[data-window-maximized='true'] .window-resize-handle {
   gap: 8px;
 }
 
+.reference-image-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.reference-image-fieldset:disabled {
+  pointer-events: none;
+}
+
 .reference-image-toolbar {
   display: flex;
   align-items: center;

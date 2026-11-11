@@ -33,6 +33,9 @@ export function TextToVideoForm({
   modelDirectory,
   active = true,
   busy = false,
+  isGenerationPending = false,
+  generationPendingRef,
+  onGenerationPendingChange,
   onJobStarted,
 }: {
   avatar: Avatar | null;
@@ -40,6 +43,9 @@ export function TextToVideoForm({
   modelDirectory: string;
   active?: boolean;
   busy?: boolean;
+  isGenerationPending?: boolean;
+  generationPendingRef?: { current: boolean };
+  onGenerationPendingChange?: (pending: boolean) => void;
   onJobStarted?: () => Promise<boolean | void>;
 }) {
   const idPrefix = mode === 'reference' ? 'reference' : 'text';
@@ -67,6 +73,7 @@ export function TextToVideoForm({
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const operationRef = useRef<'polish' | 'generation' | null>(null);
+  const polishRevisionRef = useRef(0);
 
   const skillDescription =
     skill === 'auto'
@@ -91,8 +98,23 @@ export function TextToVideoForm({
     return false;
   };
 
+  const changeReferenceImages = (paths: string[]): void => {
+    polishRevisionRef.current += 1;
+    setPolishedText('');
+    setPolishedAutoDuration(null);
+    setActiveTab('original');
+    setReferenceImagePaths(paths);
+    setError(null);
+  };
+
   const addCurrentAvatar = (): void => {
-    if (avatar === null || operationRef.current !== null || busy) {
+    if (
+      avatar === null ||
+      operationRef.current !== null ||
+      busy ||
+      isGenerationPending ||
+      generationPendingRef?.current === true
+    ) {
       return;
     }
     if (referenceImagePaths.length >= 9) {
@@ -103,8 +125,7 @@ export function TextToVideoForm({
       setError('当前模特已在参考图中，未重复添加。');
       return;
     }
-    setReferenceImagePaths([...referenceImagePaths, avatar.photoPath]);
-    setError(null);
+    changeReferenceImages([...referenceImagePaths, avatar.photoPath]);
   };
 
   const polish = async (): Promise<void> => {
@@ -124,6 +145,7 @@ export function TextToVideoForm({
       setError('视频时长必须在 4–15 秒之间。');
       return;
     }
+    const polishRevision = polishRevisionRef.current;
     operationRef.current = 'polish';
     setPolishing(true);
     setError(null);
@@ -140,10 +162,16 @@ export function TextToVideoForm({
         ),
         skill,
       });
+      if (polishRevision !== polishRevisionRef.current) {
+        return;
+      }
       setPolishedText(result.text);
       setPolishedAutoDuration(duration === '' ? resolvedDuration : null);
       setActiveTab('polished');
     } catch (polishError) {
+      if (polishRevision !== polishRevisionRef.current) {
+        return;
+      }
       setActiveTab('original');
       setError(errorMessage(polishError));
     } finally {
@@ -155,7 +183,11 @@ export function TextToVideoForm({
   };
 
   const startGeneration = async (): Promise<void> => {
-    if (operationRef.current !== null) {
+    if (
+      operationRef.current !== null ||
+      isGenerationPending ||
+      generationPendingRef?.current === true
+    ) {
       return;
     }
     if (!requireReferenceImages('生成')) {
@@ -181,6 +213,7 @@ export function TextToVideoForm({
     }
 
     operationRef.current = 'generation';
+    onGenerationPendingChange?.(true);
     setSubmitting(true);
     setError(null);
     setJobId(null);
@@ -208,6 +241,7 @@ export function TextToVideoForm({
       if (operationRef.current === 'generation') {
         operationRef.current = null;
       }
+      onGenerationPendingChange?.(false);
       setSubmitting(false);
     }
   };
@@ -223,21 +257,30 @@ export function TextToVideoForm({
     >
       {mode === 'reference' && (
         <div className="field">
-          <ReferenceImagePicker
-            paths={referenceImagePaths}
-            max={9}
-            disabled={submitting || busy}
-            onChange={(paths) => {
-              setReferenceImagePaths(paths);
-              setError(null);
+          {/* Late authorization must still call onChange so it can invalidate this polish. */}
+          <fieldset
+            className="reference-image-fieldset"
+            disabled={polishing || submitting || busy || isGenerationPending}
+            onDropCapture={(event) => {
+              if (polishing) {
+                event.preventDefault();
+                event.stopPropagation();
+              }
             }}
-            onError={setError}
-          />
+          >
+            <ReferenceImagePicker
+              paths={referenceImagePaths}
+              max={9}
+              disabled={submitting || busy || isGenerationPending}
+              onChange={changeReferenceImages}
+              onError={setError}
+            />
+          </fieldset>
           {avatar !== null && (
             <button
               className="button button-secondary"
               type="button"
-              disabled={submitting || busy}
+              disabled={polishing || submitting || busy || isGenerationPending}
               onClick={addCurrentAvatar}
             >
               <UserPlus size={16} aria-hidden="true" />
@@ -311,7 +354,7 @@ export function TextToVideoForm({
         recommended={8}
         min={1}
         max={100}
-        disabled={submitting || busy}
+        disabled={submitting || busy || isGenerationPending}
         onChange={setSteps}
       />
 
@@ -363,12 +406,12 @@ export function TextToVideoForm({
         )}
       </div>
 
-      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy}>
+      <button className="button button-secondary" type="button" onClick={() => void polish()} disabled={polishing || submitting || busy || isGenerationPending}>
         <Sparkles size={16} aria-hidden="true" />
         {polishing ? '正在润色…' : 'AI 润色'}
       </button>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy}>
+      <button className="button button-generate" type="submit" disabled={polishing || submitting || busy || isGenerationPending}>
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>
