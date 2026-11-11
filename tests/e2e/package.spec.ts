@@ -445,7 +445,7 @@ async function openStudioVideo(page: Page): Promise<void> {
   if (await parent.getAttribute('aria-expanded') !== 'true') {
     await parent.click();
   }
-  await page.getByRole('button', { name: '视频', exact: true }).click();
+  await page.locator('#studio-video-button').click();
 }
 
 async function readVisibleTextJobId(page: Page): Promise<string> {
@@ -762,13 +762,14 @@ test.describe('SMO.H3 Studio portable package', () => {
     await page!.click('button:has-text("AI 润色")');
     await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
     const polishedText = await page!.inputValue('#polished-text');
-    expect(polishedText).toContain('subject_definitions:');
+    expect(polishedText).toContain('integrated_multimodal_description:');
 
     const previousCount = comfyMock.submittedPromptIds.length;
     await page!.click('#text-mode-panel button:has-text("生成视频")');
     const jobId = await readVisibleTextJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
+    expect(comfyMock.uploadedImages).toEqual([]);
 
     // The submitted ComfyUI graph must come from the packaged workflow file.
     const packagedWorkflow = JSON.parse(
@@ -782,14 +783,31 @@ test.describe('SMO.H3 Studio portable package', () => {
       string,
       { class_type: string; inputs: Record<string, unknown> }
     >;
-    // Every packaged node survives unchanged; supported hardware adds exactly
-    // one Spark node at the final sampler boundary.
+    // T2VA removes the frozen reference-image node and converts node 136;
+    // every other packaged node survives, with one Spark node added at the
+    // final sampler boundary on supported hardware.
+    const expectedPackagedNodeIds = Object.keys(packagedWorkflow).filter(
+      (nodeId) => nodeId !== '226',
+    );
     expect(Object.keys(submittedNodes).sort()).toEqual(
-      [...Object.keys(packagedWorkflow), 'smo_spark'].sort(),
+      [...expectedPackagedNodeIds, 'smo_spark'].sort(),
     );
     for (const [nodeId, node] of Object.entries(packagedWorkflow)) {
+      if (nodeId === '136' || nodeId === '226') {
+        continue;
+      }
       expect(submittedNodes[nodeId].class_type).toBe(node.class_type);
     }
+    expect(submittedNodes['136'].class_type).toBe('MiniMaxH3ImageToVideo');
+    expect(submittedNodes['136'].inputs).not.toHaveProperty('audio_vae');
+    expect(submittedNodes['136'].inputs).not.toHaveProperty('ref_image_size');
+    expect(submittedNodes['136'].inputs).not.toHaveProperty('ref_images');
+    expect(
+      Object.keys(submittedNodes['136'].inputs).filter((key) =>
+        key.startsWith('ref_images.'),
+      ),
+    ).toEqual([]);
+    expect(submittedNodes['226']).toBeUndefined();
     expect(submittedNodes.smo_spark.class_type).toBe('MiniMaxH3SparkAttentionSM120');
     expect(submittedNodes.smo_spark.inputs.model).toEqual(['153', 0]);
     expect(submittedNodes['269'].inputs.low_res_model).toEqual(['smo_spark', 0]);
