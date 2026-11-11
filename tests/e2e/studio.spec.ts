@@ -1281,10 +1281,15 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         (_, index) => `<Picture ${index + 1}>`,
       ).join(', ')}.`,
     );
+    const normalizedLlmUserContent = llmUserContent!.replaceAll('\\', '/');
     for (const referencePath of referencePaths) {
-      expect(llmRequest!.body).not.toContain(referencePath);
+      const directory = dirname(referencePath);
+      expect(llmUserContent).not.toContain(referencePath);
+      expect(llmUserContent).not.toContain(directory);
+      // JSON.parse restores native separators; normalization also catches POSIX-style leaks.
+      expect(normalizedLlmUserContent).not.toContain(referencePath.replaceAll('\\', '/'));
+      expect(normalizedLlmUserContent).not.toContain(directory.replaceAll('\\', '/'));
     }
-    expect(llmRequest!.body).not.toContain(referenceDirectory);
 
     const editedPrompt = 'Polished nine-reference prompt in the selected order.';
     await page.fill('#reference-polished-text', editedPrompt);
