@@ -1546,10 +1546,15 @@ body[data-window-maximized='true'] .window-resize-handle {
 }
 
 .works-filters {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.works-filter-group {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 18px;
 }
 
 .works-filters .button {

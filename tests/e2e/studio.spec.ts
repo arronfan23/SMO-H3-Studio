@@ -1114,9 +1114,38 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     expect(display.naturalRatio).toBe(2);
     expect(display.renderedRatio).toBeCloseTo(display.naturalRatio, 2);
     expect(display.objectFit).toBe('contain');
+
+    const avatarName = jobId.slice(0, 8);
+    const originalBytes = await readFile(outputPath);
+    await work.getByRole('button', { name: '导入数字模特', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '数字模特', exact: true })).toBeVisible();
+    const avatarList = page.locator('.avatar-list');
+    const importedAvatar = avatarList.locator('article').filter({ hasText: avatarName });
+    await expect(importedAvatar).toHaveCount(1);
+    await expect(importedAvatar.getByRole('button', { name: '当前模特' })).toBeDisabled();
+
+    const firstAvatarPhotos = await readdir(join(dataDirectory, 'avatars'));
+    expect(firstAvatarPhotos).toHaveLength(1);
+    const firstCopyPath = join(dataDirectory, 'avatars', firstAvatarPhotos[0]);
+    expect(firstCopyPath).not.toBe(outputPath);
+    expect(await readFile(firstCopyPath)).toEqual(originalBytes);
+    expect(await readFile(outputPath)).toEqual(originalBytes);
+
+    await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    await expect(work).toBeVisible();
+    await work.getByRole('button', { name: '导入数字模特', exact: true }).click();
+    await expect(avatarList.locator('article')).toHaveCount(2);
+    await expect(avatarList.getByRole('button', { name: '当前模特' })).toHaveCount(1);
+    const secondAvatarPhotos = await readdir(join(dataDirectory, 'avatars'));
+    expect(secondAvatarPhotos).toHaveLength(2);
+    expect(new Set(secondAvatarPhotos).size).toBe(2);
+    for (const photo of secondAvatarPhotos) {
+      expect(await readFile(join(dataDirectory, 'avatars', photo))).toEqual(originalBytes);
+    }
+    expect(await readFile(outputPath)).toEqual(originalBytes);
   });
 
-  test('works list shows completed work and filters by status and mode', async () => {
+  test('works list combines hierarchical mode and status filters', async () => {
     const avatarName = 'E2E Works Avatar';
     await createAvatar(page!, avatarName);
     await saveLlmProfile(page!, llmMock.baseUrl);
@@ -1135,14 +1164,18 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(work).toContainText('已完成');
     await expect(work).toContainText('文字生视频');
 
-    await page!.click('.works-filters button:has-text("音频数字人")');
+    const workTypes = page!.getByRole('group', { name: '作品类型' });
+    const statusFilters = page!.getByRole('group', { name: '作品状态' });
+    await workTypes.getByRole('button', { name: '视频', exact: true }).click();
+    const videoTypes = page!.getByRole('group', { name: '视频类型' });
+    await videoTypes.getByRole('button', { name: '音频数字人', exact: true }).click();
     await expect(page!.locator('.works-list article')).toHaveCount(0);
-    await page!.click('.works-filters button:has-text("文字生视频")');
+    await videoTypes.getByRole('button', { name: '文字生视频', exact: true }).click();
     await expect(work).toBeVisible();
 
-    await page!.click('.works-filters button:has-text("失败")');
+    await statusFilters.getByRole('button', { name: '失败', exact: true }).click();
     await expect(page!.locator('.works-list article')).toHaveCount(0);
-    await page!.click('.works-filters button:has-text("已完成")');
+    await statusFilters.getByRole('button', { name: '已完成', exact: true }).click();
     await expect(work).toBeVisible();
   });
 

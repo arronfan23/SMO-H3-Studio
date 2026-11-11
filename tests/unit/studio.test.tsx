@@ -4183,7 +4183,79 @@ describe('settings page LLM configuration', () => {
 });
 
 describe('works page actions', () => {
-  test('filters 作品 by speech, image, video mode, and status without a pending filter', async () => {
+  test('导入数字模特只出现在已完成的图像作品，并使用作品标题创建和选中', async () => {
+    const outputPath = 'G:\\SMO-H3-Data\\output\\SMO-Image\\poster.png';
+    const imported: Avatar = {
+      ...avatar,
+      id: 'avatar-imported',
+      name: '产品海报',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\imported.png',
+    };
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'image-done',
+        avatarId: null,
+        mode: 'image',
+        status: 'done',
+        outputPath,
+        title: '产品海报',
+      }),
+      createWork({ id: 'image-running', avatarId: null, mode: 'image', status: 'running' }),
+      createWork({
+        id: 'image-failed',
+        avatarId: null,
+        mode: 'image',
+        status: 'failed',
+        outputPath,
+      }),
+      createWork({ id: 'text-done', mode: 'text', status: 'done', outputPath: 'G:\\video.mp4' }),
+    ]);
+    smo.avatars.list.mockResolvedValueOnce([avatar]).mockResolvedValueOnce([avatar, imported]);
+    smo.avatars.create.mockResolvedValue(imported);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    const doneCard = (await screen.findByText('image-done')).closest('article') as HTMLElement;
+    expect(within(doneCard).getByRole('button', { name: '导入数字模特' })).toBeInTheDocument();
+    for (const id of ['image-running', 'image-failed', 'text-done']) {
+      const card = screen.getByText(id).closest('article') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: '导入数字模特' })).not.toBeInTheDocument();
+    }
+
+    fireEvent.click(within(doneCard).getByRole('button', { name: '导入数字模特' }));
+
+    expect(smo.avatars.create).toHaveBeenCalledWith({ name: '产品海报', photoPath: outputPath });
+    expect(await screen.findByRole('heading', { name: '数字模特' })).toBeInTheDocument();
+    const avatarList = screen.getByRole('region', { name: '模特列表' });
+    const importedCard = within(avatarList).getByRole('heading', { name: '产品海报' }).closest('article') as HTMLElement;
+    expect(within(importedCard).getByRole('button', { name: '当前模特' })).toBeDisabled();
+  });
+
+  test('导入无标题图像作品时使用短 ID 命名', async () => {
+    const id = '12345678-abcd-4000-8000-123456789abc';
+    const outputPath = 'G:\\SMO-H3-Data\\output\\SMO-Image\\untitled.png';
+    const imported: Avatar = {
+      ...avatar,
+      id: 'avatar-untitled',
+      name: '12345678',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\untitled.png',
+    };
+    smo.works.list.mockResolvedValue([
+      createWork({ id, avatarId: null, mode: 'image', status: 'done', outputPath, title: null }),
+    ]);
+    smo.avatars.list.mockResolvedValueOnce([avatar]).mockResolvedValueOnce([avatar, imported]);
+    smo.avatars.create.mockResolvedValue(imported);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    const card = (await screen.findByText(id)).closest('article') as HTMLElement;
+
+    fireEvent.click(within(card).getByRole('button', { name: '导入数字模特' }));
+
+    expect(smo.avatars.create).toHaveBeenCalledWith({ name: '12345678', photoPath: outputPath });
+    expect(await screen.findByRole('heading', { name: '12345678' })).toBeInTheDocument();
+  });
+
+  test('筛选按作品类型、视频子类型和状态组合，并同步 aria-pressed', async () => {
     smo.works.list.mockResolvedValue([
       createWork({ id: 'text-done', mode: 'text', status: 'done' }),
       createWork({ id: 'audio-failed', mode: 'audio', status: 'failed' }),
@@ -4195,71 +4267,88 @@ describe('works page actions', () => {
     fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
     await screen.findByText('text-done');
 
-    const filters = screen.getByRole('group', { name: '作品筛选' });
-    expect(within(filters).getAllByRole('button').map((button) => button.textContent)).toEqual([
+    const workTypeFilters = screen.getByRole('group', { name: '作品类型' });
+    const statusFilters = screen.getByRole('group', { name: '作品状态' });
+    expect(within(workTypeFilters).getAllByRole('button').map((button) => button.textContent)).toEqual([
       '全部',
       '语音',
       '图像',
-      '文字生视频',
-      '音频数字人',
+      '视频',
+    ]);
+    expect(within(statusFilters).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '全部状态',
       '运行中',
       '已完成',
       '失败',
     ]);
-    expect(within(filters).queryByRole('button', { name: '等待中' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: '视频类型' })).not.toBeInTheDocument();
+    expect(within(statusFilters).queryByRole('button', { name: '等待中' })).not.toBeInTheDocument();
 
-    const expectPressedFilter = (label: string) => {
-      for (const button of within(filters).getAllByRole('button')) {
+    const expectPressedFilter = (group: HTMLElement, label: string) => {
+      for (const button of within(group).getAllByRole('button')) {
         expect(button).toHaveAttribute(
           'aria-pressed',
           button.textContent === label ? 'true' : 'false',
         );
       }
     };
-    expectPressedFilter('全部');
+    expectPressedFilter(workTypeFilters, '全部');
+    expectPressedFilter(statusFilters, '全部状态');
 
-    const expectOnlyWork = (id: string) => {
-      const cards = screen.getAllByRole('article');
-      expect(cards).toHaveLength(1);
-      expect(cards[0]).toHaveTextContent(id);
+    const expectWorkIds = (ids: string[]) => {
+      const actual = screen.queryAllByRole('article').map(
+        (card) => card.querySelector('.work-id')?.textContent,
+      );
+      expect(actual.sort()).toEqual([...ids].sort());
     };
+    expectWorkIds(['text-done', 'audio-failed', 'speech-running', 'image-done', 'text-pending']);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '语音' }));
-    expectPressedFilter('语音');
-    expectOnlyWork('speech-running');
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '视频' }));
+    const videoTypeFilters = screen.getByRole('group', { name: '视频类型' });
+    expect(within(videoTypeFilters).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '全部视频',
+      '文字生视频',
+      '音频数字人',
+    ]);
+    expectPressedFilter(workTypeFilters, '视频');
+    expectPressedFilter(videoTypeFilters, '全部视频');
+    expectWorkIds(['text-done', 'audio-failed', 'text-pending']);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '图像' }));
-    expectPressedFilter('图像');
-    expectOnlyWork('image-done');
+    fireEvent.click(within(videoTypeFilters).getByRole('button', { name: '文字生视频' }));
+    expectPressedFilter(videoTypeFilters, '文字生视频');
+    expectWorkIds(['text-done', 'text-pending']);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '文字生视频' }));
-    expectPressedFilter('文字生视频');
-    expect(screen.getByText('text-done')).toBeInTheDocument();
-    expect(screen.getByText('text-pending')).toBeInTheDocument();
-    expect(screen.getAllByRole('article')).toHaveLength(2);
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '已完成' }));
+    expectPressedFilter(statusFilters, '已完成');
+    expectWorkIds(['text-done']);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '音频数字人' }));
-    expectPressedFilter('音频数字人');
-    expectOnlyWork('audio-failed');
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '失败' }));
+    expectWorkIds([]);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '运行中' }));
-    expectPressedFilter('运行中');
-    expectOnlyWork('speech-running');
+    fireEvent.click(within(videoTypeFilters).getByRole('button', { name: '音频数字人' }));
+    expectPressedFilter(videoTypeFilters, '音频数字人');
+    expectWorkIds(['audio-failed']);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '已完成' }));
-    expectPressedFilter('已完成');
-    expect(screen.getByText('text-done')).toBeInTheDocument();
-    expect(screen.getByText('image-done')).toBeInTheDocument();
-    expect(screen.getAllByRole('article')).toHaveLength(2);
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '语音' }));
+    expectPressedFilter(workTypeFilters, '语音');
+    expect(screen.queryByRole('group', { name: '视频类型' })).not.toBeInTheDocument();
+    expectWorkIds([]);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '失败' }));
-    expectPressedFilter('失败');
-    expectOnlyWork('audio-failed');
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '运行中' }));
+    expectPressedFilter(statusFilters, '运行中');
+    expectWorkIds(['speech-running']);
 
-    fireEvent.click(within(filters).getByRole('button', { name: '全部' }));
-    expectPressedFilter('全部');
-    expect(screen.getAllByRole('article')).toHaveLength(5);
-    expect(screen.getByText('text-pending')).toBeInTheDocument();
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '图像' }));
+    expectWorkIds([]);
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '已完成' }));
+    expectWorkIds(['image-done']);
+
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '全部' }));
+    expectWorkIds(['text-done', 'image-done']);
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '全部状态' }));
+    expectPressedFilter(workTypeFilters, '全部');
+    expectPressedFilter(statusFilters, '全部状态');
+    expectWorkIds(['text-done', 'audio-failed', 'speech-running', 'image-done', 'text-pending']);
   });
 
   test('retries a failed work and refreshes the list', async () => {

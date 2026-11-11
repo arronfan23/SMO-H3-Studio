@@ -66,7 +66,32 @@ describe('AvatarService', () => {
     expect(registry.resolveMediaUrl(mediaUrl)).toBe(await realpath(avatar.photoPath));
   });
 
-  test('rejects an existing image that was not explicitly selected without copying it', async () => {
+  test('导入 managed 输出图像会复制独立资产，重复导入生成不同 UUID', async () => {
+    const outputDirectory = join(directory, 'output', 'SMO-Image');
+    const source = join(outputDirectory, 'generated.png');
+    await mkdir(outputDirectory, { recursive: true });
+    await writeFile(source, 'generated-image-data');
+
+    const first = await service.createAvatar({ name: 'Generated', photoPath: source });
+    const second = await service.createAvatar({ name: 'Generated', photoPath: source });
+
+    expect(first.id).not.toBe(second.id);
+    expect(first.photoPath).not.toBe(second.photoPath);
+    expect(dirname(first.photoPath)).toBe(avatarsDirectory);
+    expect(dirname(second.photoPath)).toBe(avatarsDirectory);
+    expect(basename(first.photoPath)).toMatch(/^[0-9a-f-]{36}\.png$/);
+    expect(basename(second.photoPath)).toMatch(/^[0-9a-f-]{36}\.png$/);
+    expect(await readFile(first.photoPath, 'utf8')).toBe('generated-image-data');
+    expect(await readFile(second.photoPath, 'utf8')).toBe('generated-image-data');
+    expect(await readFile(source, 'utf8')).toBe('generated-image-data');
+    expect(store.listAvatars()).toHaveLength(2);
+
+    await writeFile(first.photoPath, 'changed-copy');
+    expect(await readFile(source, 'utf8')).toBe('generated-image-data');
+    expect(await readFile(second.photoPath, 'utf8')).toBe('generated-image-data');
+  });
+
+  test('根外图片导入仍需显式选择，否则不复制资产', async () => {
     const source = join(directory, 'private.png');
     await writeFile(source, 'private-image-data');
 

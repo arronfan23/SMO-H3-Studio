@@ -1,20 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { ExternalLink, FolderOpen, Pencil, Play, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react';
+import { ExternalLink, FolderOpen, Pencil, Play, RefreshCw, RotateCcw, Trash2, UserPlus, X } from 'lucide-react';
 import type { Avatar, Work, WorkMode, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { WorkProgressBar } from './WorkProgressBar';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName, formatElapsedDuration, parentPath, readWorkExecution, readWorkProgress } from './ui';
 
-type WorkFilter = 'all' | WorkMode | Exclude<WorkStatus, 'pending'>;
+type WorkType = 'all' | 'speech' | 'image' | 'video';
+type VideoType = 'all' | 'text' | 'audio';
+type StatusFilter = 'all' | Exclude<WorkStatus, 'pending'>;
 
-const FILTERS: { id: WorkFilter; label: string }[] = [
+const WORK_TYPE_FILTERS: { id: WorkType; label: string }[] = [
   { id: 'all', label: '全部' },
   { id: 'speech', label: '语音' },
   { id: 'image', label: '图像' },
+  { id: 'video', label: '视频' },
+];
+
+const VIDEO_TYPE_FILTERS: { id: VideoType; label: string }[] = [
+  { id: 'all', label: '全部视频' },
   { id: 'text', label: '文字生视频' },
   { id: 'audio', label: '音频数字人' },
+];
+
+const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
+  { id: 'all', label: '全部状态' },
   { id: 'running', label: '运行中' },
   { id: 'done', label: '已完成' },
   { id: 'failed', label: '失败' },
@@ -102,14 +113,18 @@ function trapDialogTabKeyDown(
 export function WorksPage({
   avatars,
   onUseSpeech,
+  onImportImage,
 }: {
   avatars: Avatar[];
   onUseSpeech?: (audioPath: string) => void;
+  onImportImage?: (work: Work) => Promise<void>;
 }) {
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeFilter, setActiveFilter] = useState<WorkFilter>('all');
+  const [workType, setWorkType] = useState<WorkType>('all');
+  const [videoType, setVideoType] = useState<VideoType>('all');
+  const [status, setStatus] = useState<StatusFilter>('all');
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [retryError, setRetryError] = useState<Record<string, string>>({});
   const [deleteTarget, setDeleteTarget] = useState<Work | null>(null);
@@ -167,19 +182,20 @@ export function WorksPage({
   }, [refresh, works]);
 
   const filteredWorks = useMemo(() => {
-    if (activeFilter === 'all') {
-      return works;
-    }
-    if (
-      activeFilter === 'text' ||
-      activeFilter === 'audio' ||
-      activeFilter === 'speech' ||
-      activeFilter === 'image'
-    ) {
-      return works.filter((work) => work.mode === activeFilter);
-    }
-    return works.filter((work) => work.status === activeFilter);
-  }, [works, activeFilter]);
+    const modeFilteredWorks = works.filter((work) => {
+      if (workType === 'all') {
+        return true;
+      }
+      if (workType === 'video') {
+        return (
+          (work.mode === 'text' || work.mode === 'audio') &&
+          (videoType === 'all' || work.mode === videoType)
+        );
+      }
+      return work.mode === workType;
+    });
+    return modeFilteredWorks.filter((work) => status === 'all' || work.status === status);
+  }, [works, workType, videoType, status]);
 
   const avatarName = (id: string | null): string =>
     avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
@@ -412,18 +428,48 @@ export function WorksPage({
         </button>
       </header>
       {error && <p className="form-error" role="alert">作品列表更新失败：{error}</p>}
-      <div className="works-filters" role="group" aria-label="作品筛选">
-        {FILTERS.map((filter) => (
-          <button
-            key={filter.id}
-            type="button"
-            aria-pressed={activeFilter === filter.id}
-            className={activeFilter === filter.id ? 'button button-primary' : 'button button-secondary'}
-            onClick={() => setActiveFilter(filter.id)}
-          >
-            {filter.label}
-          </button>
-        ))}
+      <div className="works-filters">
+        <div className="works-filter-group" role="group" aria-label="作品类型">
+          {WORK_TYPE_FILTERS.map((filter) => (
+            <button
+              key={filter.id}
+              type="button"
+              aria-pressed={workType === filter.id}
+              className={workType === filter.id ? 'button button-primary' : 'button button-secondary'}
+              onClick={() => setWorkType(filter.id)}
+            >
+              {filter.label}
+            </button>
+          ))}
+        </div>
+        {workType === 'video' && (
+          <div className="works-filter-group" role="group" aria-label="视频类型">
+            {VIDEO_TYPE_FILTERS.map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                aria-pressed={videoType === filter.id}
+                className={videoType === filter.id ? 'button button-primary' : 'button button-secondary'}
+                onClick={() => setVideoType(filter.id)}
+              >
+                {filter.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="works-filter-group" role="group" aria-label="作品状态">
+          {STATUS_FILTERS.map((filter) => (
+            <button
+              key={filter.id}
+              type="button"
+              aria-pressed={status === filter.id}
+              className={status === filter.id ? 'button button-primary' : 'button button-secondary'}
+              onClick={() => setStatus(filter.id)}
+            >
+              {filter.label}
+            </button>
+          ))}
+        </div>
       </div>
       {loading ? (
         <div className="page-state">正在读取作品…</div>
@@ -492,6 +538,29 @@ export function WorksPage({
                     >
                       <Play size={16} aria-hidden="true" />
                       用于音频数字人
+                    </button>
+                  )}
+                {onImportImage !== undefined &&
+                  work.mode === 'image' &&
+                  work.status === 'done' &&
+                  work.outputPath && (
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      onClick={() => {
+                        setRetryError((current) => ({ ...current, [work.id]: '' }));
+                        void onImportImage(work).catch((importError: unknown) => {
+                          if (mountedRef.current) {
+                            setRetryError((current) => ({
+                              ...current,
+                              [work.id]: errorMessage(importError),
+                            }));
+                          }
+                        });
+                      }}
+                    >
+                      <UserPlus size={16} aria-hidden="true" />
+                      导入数字模特
                     </button>
                   )}
                 {work.status === 'done' && work.outputPath && (

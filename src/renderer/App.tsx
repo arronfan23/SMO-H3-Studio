@@ -10,7 +10,7 @@ import {
   Users,
   Video,
 } from 'lucide-react';
-import type { Avatar } from '../shared/types';
+import type { Avatar, Work } from '../shared/types';
 import { AvatarsPage } from './AvatarsPage';
 import { EnvironmentWizard } from './EnvironmentWizard';
 import { SettingsPage } from './SettingsPage';
@@ -101,6 +101,20 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
     setAvatars((current) => [avatar, ...current.filter((item) => item.id !== avatar.id)]);
     setSelectedAvatarId(avatar.id);
     await refreshAvatars(avatar.id);
+  };
+
+  const importImageAsAvatar = async (work: Work): Promise<void> => {
+    if (work.outputPath === null) {
+      return;
+    }
+    const avatar = await window.smo.avatars.create({
+      name: work.title?.trim() || work.id.slice(0, 8),
+      photoPath: work.outputPath,
+    });
+    await avatarCreated(avatar);
+    if (mountedRef.current) {
+      setPage('avatars');
+    }
   };
 
   const selectedAvatar = avatars.find((avatar) => avatar.id === selectedAvatarId) ?? null;
@@ -217,7 +231,11 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
             />
           )}
           {page === 'works' && (
-            <WorksPage avatars={avatars} onUseSpeech={useSpeechInAudioDigitalHuman} />
+            <WorksPage
+              avatars={avatars}
+              onUseSpeech={useSpeechInAudioDigitalHuman}
+              onImportImage={importImageAsAvatar}
+            />
           )}
           {page === 'settings' && (
             <SettingsPage
