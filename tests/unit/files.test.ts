@@ -75,9 +75,9 @@ describe('controlled media access', () => {
     await expect(registry.createMediaUrl(filePath)).rejects.toThrow(/not allowed/i);
 
     if (kind === 'audio') {
-      await expect(service.selectAudio()).resolves.toBe(filePath);
+      await expect(service.selectAudio()).resolves.toBe(await realpath(filePath));
     } else {
-      await expect(service.selectImage()).resolves.toBe(filePath);
+      await expect(service.selectImage()).resolves.toBe(await realpath(filePath));
     }
     await expect(registry.createMediaUrl(filePath)).resolves.toMatch(/^smo-media:/);
   });
@@ -185,8 +185,8 @@ describe('FileService', () => {
 
     try {
       await expect(service.selectImage()).resolves.toBeNull();
-      await expect(service.selectImage()).resolves.toBe(imagePath);
-      await expect(service.selectAudio()).resolves.toBe(audioPath);
+      await expect(service.selectImage()).resolves.toBe(await realpath(imagePath));
+      await expect(service.selectAudio()).resolves.toBe(await realpath(audioPath));
       await expect(registry.createMediaUrl(imagePath)).resolves.toMatch(/^smo-media:/);
       await expect(registry.createMediaUrl(audioPath)).resolves.toMatch(/^smo-media:/);
 
@@ -209,9 +209,66 @@ describe('FileService', () => {
   });
 });
 
+describe('FileService canonical paths', () => {
+  test.each([
+    { kind: 'image', source: 'dialog' },
+    { kind: 'image', source: 'drop' },
+    { kind: 'audio', source: 'dialog' },
+    { kind: 'audio', source: 'drop' },
+  ] as const)('returns and authorizes the realpath for a $kind $source alias', async ({ kind, source }) => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-canonical-'));
+    const extension = kind === 'image' ? 'png' : 'mp3';
+    const target = join(directory, `Canonical-${kind}.${extension}`);
+    const link = join(directory, `Alias-${kind}.${extension}`);
+    const outputDirectory = join(directory, 'output');
+    const registry = new MediaRegistry({
+      avatarsDirectory: join(directory, 'avatars'),
+      outputDirectory,
+    });
+
+    try {
+      await writeFile(target, kind);
+      await symlink(target, link, 'file');
+      const slashAlias = link.replaceAll('\\', '/');
+      const alias = process.platform === 'win32'
+        ? slashAlias.replace(`Alias-${kind}`, `aLiAs-${kind}`)
+        : slashAlias;
+      const canonicalPath = await realpath(target);
+      const showOpenDialog = vi.fn().mockResolvedValue({
+        canceled: false,
+        filePaths: [alias],
+      });
+      const service = new FileService({
+        mediaRegistry: registry,
+        dialog: { showOpenDialog },
+        outputDirectory,
+        dataDirectory: directory,
+      });
+      const authorize = kind === 'image'
+        ? vi.spyOn(registry, 'authorizeSelectedImage')
+        : vi.spyOn(registry, 'authorizeSelectedFile');
+
+      await expect(registry.createMediaUrl(target)).rejects.toThrow(/not allowed/i);
+
+      const selected = source === 'dialog'
+        ? await (kind === 'image' ? service.selectImage() : service.selectAudio())
+        : await (kind === 'image'
+          ? service.authorizeDroppedImage(alias)
+          : service.authorizeDroppedAudio(alias));
+
+      expect(selected).toBe(canonicalPath);
+      expect(authorize).toHaveBeenCalledWith(canonicalPath);
+      const url = await registry.createMediaUrl(alias);
+      expect(registry.resolveMediaUrl(url)).toBe(canonicalPath);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 
 describe('FileService.authorizeDroppedImage', () => {
-  test('authorizes a dropped image and returns the same path', async () => {
+  test('authorizes a dropped image and returns its canonical path', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-drop-'));
     const photoPath = join(directory, 'dropped.png');
     await writeFile(photoPath, 'image');
@@ -230,7 +287,7 @@ describe('FileService.authorizeDroppedImage', () => {
       await expect(registry.createMediaUrl(photoPath)).rejects.toThrow(/not allowed/i);
       await expect(registry.isSelectedImage(photoPath)).resolves.toBe(false);
 
-      await expect(service.authorizeDroppedImage(photoPath)).resolves.toBe(photoPath);
+      await expect(service.authorizeDroppedImage(photoPath)).resolves.toBe(await realpath(photoPath));
 
       await expect(registry.isSelectedImage(photoPath)).resolves.toBe(true);
       await expect(registry.createMediaUrl(photoPath)).resolves.toMatch(/^smo-media:/);
@@ -304,7 +361,7 @@ describe('FileService.authorizeDroppedAudio', () => {
     return { files, registry };
   }
 
-  test('audio drop authorizes the selected file and returns the original path', async () => {
+  test('audio drop authorizes the selected file and returns its canonical path', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-audio-drop-'));
     const path = join(directory, 'voice.mp3');
     await writeFile(path, 'audio');
@@ -312,7 +369,7 @@ describe('FileService.authorizeDroppedAudio', () => {
 
     try {
       await expect(registry.isSelectedFile(path)).resolves.toBe(false);
-      await expect(files.authorizeDroppedAudio(path)).resolves.toBe(path);
+      await expect(files.authorizeDroppedAudio(path)).resolves.toBe(await realpath(path));
       await expect(registry.isSelectedFile(path)).resolves.toBe(true);
       await expect(registry.createMediaUrl(path)).resolves.toMatch(/^smo-media:/);
     } finally {
