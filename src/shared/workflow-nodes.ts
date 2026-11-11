@@ -71,3 +71,64 @@ export function createNoReferenceTextWorkflow<T extends WorkflowGraph>(source: T
   delete copy[WORKFLOW_NODES.text.image];
   return copy as T;
 }
+
+export function createReferenceTextWorkflow<T extends WorkflowGraph>(
+  source: T,
+  uploadedNames: readonly string[],
+): T {
+  if (
+    !Array.isArray(uploadedNames) ||
+    uploadedNames.length < 1 ||
+    uploadedNames.length > 9 ||
+    uploadedNames.some(
+      (name) => typeof name !== 'string' || name.trim().length === 0,
+    )
+  ) {
+    throw new Error('Uploaded reference image names must contain 1-9 non-empty strings');
+  }
+  const promptId = WORKFLOW_NODES.text.prompt;
+  const imageId = WORKFLOW_NODES.text.image;
+  const promptNode = source[promptId];
+  const imageNode = source[imageId];
+  if (!promptNode) {
+    throw new Error(`Missing workflow node: ${promptId}`);
+  }
+  if (!imageNode) {
+    throw new Error(`Missing workflow node: ${imageId}`);
+  }
+  for (let index = 1; index < uploadedNames.length; index += 1) {
+    const nodeId = `ref${index + 1}`;
+    if (Object.prototype.hasOwnProperty.call(source, nodeId)) {
+      throw new Error(`Reference workflow node conflict: ${nodeId}`);
+    }
+  }
+
+  const inputs = Object.fromEntries(
+    Object.entries(promptNode.inputs).filter(
+      ([key]) => key !== 'ref_images' && !key.startsWith('ref_images.'),
+    ),
+  );
+  const copy: WorkflowGraph = {
+    ...source,
+    [promptId]: {
+      ...promptNode,
+      class_type: 'MiniMaxH3ReferenceToVideo',
+      inputs,
+    },
+    [imageId]: {
+      ...imageNode,
+      inputs: { ...imageNode.inputs, image: uploadedNames[0] },
+    },
+  };
+  for (const [index, uploadedName] of uploadedNames.entries()) {
+    const nodeId = index === 0 ? imageId : `ref${index + 1}`;
+    if (index > 0) {
+      copy[nodeId] = {
+        class_type: 'LoadImage',
+        inputs: { image: uploadedName },
+      };
+    }
+    inputs[`ref_images.ref_image_${index}`] = [nodeId, 0];
+  }
+  return copy as T;
+}

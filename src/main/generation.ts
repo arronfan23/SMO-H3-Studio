@@ -20,6 +20,7 @@ import {
 import { patchWorkflow } from '../shared/workflow';
 import {
   createNoReferenceTextWorkflow,
+  createReferenceTextWorkflow,
   WORKFLOW_NODES,
   WORKFLOW_PATHS,
 } from '../shared/workflow-nodes';
@@ -64,7 +65,7 @@ export interface GenerationHandlerOptions {
   jobCoordinator: Pick<JobCoordinator, 'activeCount' | 'enqueue'>;
   workflowsDirectory: string;
   outputDirectory: string;
-  mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
+  mediaRegistry: Pick<MediaRegistry, 'isSelectedFile' | 'isSelectedImage'>;
   uploadsDirectory: string;
   workflowResolver?: (mode: VideoMode) => string;
   ensureReady?: () => Promise<unknown>;
@@ -137,8 +138,8 @@ function validateRequest(request: VideoGenerationRequest): void {
   ) {
     throw new Error('referenceImagePaths must contain at most 9 non-empty strings');
   }
-  if (referenceImagePaths.length > 0) {
-    throw new Error('Video reference images are not supported yet');
+  if (request.mode === 'audio' && referenceImagePaths.length > 0) {
+    throw new Error('Reference images must be empty for audio generation');
   }
   if (typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
     throw new Error('Generation prompt must not be empty');
@@ -261,8 +262,52 @@ async function uploadStagedAudio(
   }
 }
 
+const REFERENCE_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+
+async function cleanupStagedReference(
+  stagedPath: string,
+  remove: typeof rm,
+  reportError: (error: unknown) => void,
+): Promise<void> {
+  try {
+    await remove(stagedPath, { force: true });
+  } catch (error) {
+    try {
+      reportError(error);
+    } catch {
+      // Cleanup reporting must not replace the original job outcome.
+    }
+  }
+}
+
+async function stageReferenceImage(
+  sourcePath: string,
+  workId: string,
+  index: number,
+  uploadsDirectory: string,
+  copy: typeof copyFile,
+  remove: typeof rm,
+  reportError: (error: unknown) => void,
+): Promise<string> {
+  const extension = extname(sourcePath).toLowerCase();
+  if (!REFERENCE_IMAGE_EXTENSIONS.has(extension)) {
+    throw new Error('Reference image must be a PNG, JPEG, or WebP image');
+  }
+  await mkdir(uploadsDirectory, { recursive: true });
+  const stagedPath = join(uploadsDirectory, `${workId}-${index}${extension}`);
+  try {
+    await copy(sourcePath, stagedPath, constants.COPYFILE_EXCL);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      await cleanupStagedReference(stagedPath, remove, reportError);
+    }
+    throw error;
+  }
+  return stagedPath;
+}
+
 function reportCleanupError(error: unknown): void {
-  console.error('[SMO.H3 Studio] Failed to clean staged audio', error);
+  console.error('[SMO.H3 Studio] Failed to clean staged generation media', error);
 }
 
 function reportProgressError(error: unknown): void {
@@ -338,16 +383,20 @@ export function createGenerationHandler(
       throw new Error('Image generation requires the image generation handler');
     }
     validateRequest(input);
-    const avatar = input.avatarId === null
+    const request = sanitizeRequest(input);
+    const referenceImagePaths = request.mode === 'text'
+      ? request.referenceImagePaths ?? []
+      : [];
+    const hasReferences = referenceImagePaths.length > 0;
+    const avatar = hasReferences || request.avatarId === null
       ? null
-      : store.listAvatars().find((candidate) => candidate.id === input.avatarId);
-    if (input.avatarId !== null && !avatar) {
-      throw new Error(`Avatar not found: ${input.avatarId}`);
+      : store.listAvatars().find((candidate) => candidate.id === request.avatarId);
+    if (!hasReferences && request.avatarId !== null && !avatar) {
+      throw new Error(`Avatar not found: ${request.avatarId}`);
     }
     if (jobCoordinator.activeCount > 0) {
       throw new Error('Another generation is already running');
     }
-    const request = sanitizeRequest(input);
     const originalRetryOf = input.retryOf;
     const workId = randomUUID();
     const workflowFilename = WORKFLOW_FILENAMES[request.mode];
@@ -368,6 +417,13 @@ export function createGenerationHandler(
           : requestedWorkflowPath;
     const acceleration = selectSparkAcceleration(options.acceleration);
     let stagedAudioPath: string | undefined;
+    for (const referencePath of referenceImagePaths) {
+      if (!(await mediaRegistry.isSelectedImage(referencePath))) {
+        throw new Error(
+          'Reference image path must be explicitly selected through files.selectImage',
+        );
+      }
+    }
     if (request.mode === 'audio') {
       const sourcePath = request.audioPath!;
       if (!(await mediaRegistry.isSelectedFile(sourcePath))) {
@@ -439,7 +495,7 @@ export function createGenerationHandler(
     }
     store.addWork({
       id: workId,
-      avatarId: request.avatarId,
+      avatarId: hasReferences ? null : request.avatarId,
       mode: request.mode,
       outputPath: null,
       status: 'pending',
@@ -554,7 +610,32 @@ export function createGenerationHandler(
         await options.ensureReady?.();
         throwIfCancelled();
         setExecution('uploading');
-        const image = request.avatarId === null
+        const uploadedNames: string[] = [];
+        for (const [index, sourcePath] of referenceImagePaths.entries()) {
+          const stagedPath = await stageReferenceImage(
+            sourcePath,
+            workId,
+            index,
+            uploadsDirectory,
+            copy,
+            remove,
+            cleanupErrorReporter,
+          );
+          try {
+            throwIfCancelled();
+            uploadedNames.push(
+              await comfy.uploadFile({ filePath: stagedPath, kind: 'image' }),
+            );
+            throwIfCancelled();
+          } finally {
+            await cleanupStagedReference(
+              stagedPath,
+              remove,
+              cleanupErrorReporter,
+            );
+          }
+        }
+        const image = hasReferences || avatar === null
           ? undefined
           : await comfy.uploadFile({
               filePath: avatar!.photoPath,
@@ -584,7 +665,7 @@ export function createGenerationHandler(
         const changes: Record<string, unknown> =
           request.mode === 'text'
             ? {
-                ...(request.avatarId === null
+                ...(hasReferences || request.avatarId === null
                   ? {}
                   : { [WORKFLOW_PATHS.text.image]: image }),
                 [WORKFLOW_PATHS.text.prompt]: request.prompt,
@@ -608,8 +689,12 @@ export function createGenerationHandler(
           changes[WORKFLOW_PATHS.text.sigmaRefinerStart] = 20;
         }
         const patchedWithReferences = patchWorkflow(frozen, changes);
-        const patched = request.mode === 'text' && request.avatarId === null
-          ? createNoReferenceTextWorkflow(patchedWithReferences)
+        const patched = request.mode === 'text'
+          ? hasReferences
+            ? createReferenceTextWorkflow(patchedWithReferences, uploadedNames)
+            : request.avatarId === null
+              ? createNoReferenceTextWorkflow(patchedWithReferences)
+              : patchedWithReferences
           : patchedWithReferences;
         if (request.mode === 'audio' && request.steps === 1) {
           // A one-step BasicScheduler is [sigma, 0]. Force one intermediate
@@ -746,7 +831,7 @@ function isRetryableRequest(value: unknown): value is RetryableRequest {
       request.referenceImagePaths.some(
         (path) => typeof path !== 'string' || path.trim().length === 0,
       ) ||
-      request.referenceImagePaths.length > 0
+      (request.mode === 'audio' && request.referenceImagePaths.length > 0)
     ) {
       return false;
     }
@@ -887,7 +972,25 @@ export function createRetryHandler(
       ...storedRequest,
       steps: storedRequest.steps ?? (storedRequest.mode === 'text' ? 8 : 6),
     };
-    if (request.avatarId !== null) {
+    const referenceImagePaths = request.mode === 'text'
+      ? request.referenceImagePaths ?? []
+      : [];
+    const hasReferences = referenceImagePaths.length > 0;
+    for (const referencePath of referenceImagePaths) {
+      try {
+        const referenceStats = await stat(referencePath);
+        if (!referenceStats.isFile()) {
+          throw new Error('Original reference image is not a file');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error('Original reference image missing');
+        }
+        throw error;
+      }
+      await mediaRegistry.authorizeSelectedImage(referencePath);
+    }
+    if (!hasReferences && request.avatarId !== null) {
       const avatar = store
         .listAvatars()
         .find((candidate) => candidate.id === request.avatarId);
