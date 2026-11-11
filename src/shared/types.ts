@@ -37,6 +37,7 @@ export interface ImageGenerationRequest {
   height: number;
   seed: number;
   steps: number;
+  referenceImagePaths?: string[];
   retryOf?: string;
 }
 

@@ -104,6 +104,7 @@ const imageGenerationRequest: ImageGenerationRequest = {
   height: 768,
   seed: 99,
   steps: 30,
+  referenceImagePaths: [],
 };
 
 const polishRequest = {
@@ -416,6 +417,50 @@ describe('IPC input schema', () => {
     };
 
     expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('image defaults omitted reference image paths to an empty array', () => {
+    const { referenceImagePaths: _referenceImagePaths, ...payload } =
+      imageGenerationRequest;
+
+    expect(
+      createIpcSchema().parse({ channel: 'jobs:start', payload }),
+    ).toEqual({
+      channel: 'jobs:start',
+      payload: { ...payload, referenceImagePaths: [] },
+    });
+  });
+
+  test.each([1, 2, 3, 4])(
+    'image accepts %i authorized reference image paths',
+    (count) => {
+      const referenceImagePaths = Array.from(
+        { length: count },
+        (_, index) => `G:\\refs\\${index + 1}.png`,
+      );
+      const request = {
+        channel: 'jobs:start',
+        payload: { ...imageGenerationRequest, referenceImagePaths },
+      };
+
+      expect(createIpcSchema().parse(request)).toEqual(request);
+    },
+  );
+
+  test.each([
+    Array.from({ length: 5 }, (_, index) => `G:\\refs\\${index + 1}.png`),
+    [''],
+    ['   '],
+    ['G:\\refs\\valid.png', 42],
+    [null],
+    'G:\\refs\\not-an-array.png',
+  ])('image rejects invalid reference image paths: %j', (referenceImagePaths) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...imageGenerationRequest, referenceImagePaths },
+      }),
+    ).toThrow();
   });
 
   test.each([

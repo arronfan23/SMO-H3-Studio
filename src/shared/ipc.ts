@@ -205,6 +205,7 @@ const imageGenerationRequestSchema = z
     height: imageDimensionSchema,
     seed: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     steps: z.number().int().min(1).max(100),
+    referenceImagePaths: z.array(nonEmptyString).max(4).default([]),
     retryOf: nonEmptyString.optional(),
   })
   .strict() satisfies z.ZodType<ImageGenerationRequest>;

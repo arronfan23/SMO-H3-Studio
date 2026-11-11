@@ -5,8 +5,13 @@ import {
   RESOLUTION_OPTIONS,
 } from '../../src/shared/generation-options';
 import {
+  DEFAULT_IMAGE_RESOLUTION_MP,
+  IMAGE_RESOLUTION_OPTIONS,
+} from '../../src/shared/image-options';
+import {
   pythonRoundHalfEven,
   resolveH3Resolution,
+  resolveResolutionForDimensions,
 } from '../../src/shared/resolution';
 
 describe('resolution options', () => {
@@ -30,6 +35,15 @@ describe('resolution options', () => {
       expect(option.label).toContain('未实测');
       expect(option.label).not.toMatch(/已验证|已实测/);
     }
+  });
+
+  test('adds image-only 2 MP and 4 MP tiers without changing video options', () => {
+    expect(IMAGE_RESOLUTION_OPTIONS.map((option) => option.value)).toEqual([
+      0.3, 0.4, 0.55, 0.7, 0.85, 1, 1.2, 2, 4,
+    ]);
+    expect(DEFAULT_IMAGE_RESOLUTION_MP).toBe(1);
+    expect(RESOLUTION_OPTIONS.map((option) => option.value)).not.toContain(2);
+    expect(RESOLUTION_OPTIONS.map((option) => option.value)).not.toContain(4);
   });
 });
 
@@ -70,6 +84,14 @@ describe('resolveH3Resolution', () => {
     });
   });
 
+  test.each([
+    [1, { width: 1024, height: 1024 }],
+    [2, { width: 1440, height: 1440 }],
+    [4, { width: 2048, height: 2048 }],
+  ])('resolves square output at %s MP on the 32-pixel grid', (megapixels, expected) => {
+    expect(resolveH3Resolution('1:1 (Square)', megapixels)).toEqual(expected);
+  });
+
   test('aligns square output to a custom multiple', () => {
     expect(resolveH3Resolution('1:1 (Square)', 0.5, 16)).toEqual({
       width: 720,
@@ -91,6 +113,73 @@ describe('resolveH3Resolution', () => {
     (multiple) => {
       expect(() =>
         resolveH3Resolution('16:9 (Widescreen)', 0.7, multiple),
+      ).toThrow(RangeError);
+    },
+  );
+});
+
+describe('resolveResolutionForDimensions', () => {
+  test.each([
+    [1, 1024],
+    [2, 1440],
+    [4, 2048],
+  ])('aligns square output at %s MP to the 32-pixel grid', (megapixels, expected) => {
+    expect(resolveResolutionForDimensions(1000, 1000, megapixels)).toEqual({
+      width: expected,
+      height: expected,
+    });
+  });
+
+  test('uses the first reference image aspect ratio and H3 pixel math', () => {
+    expect(resolveResolutionForDimensions(1920, 1080, 1)).toEqual({
+      width: 1376,
+      height: 768,
+    });
+    expect(resolveResolutionForDimensions(1200, 1600, 1)).toEqual({
+      width: 896,
+      height: 1184,
+    });
+  });
+
+  test('supports a custom grid multiple', () => {
+    expect(resolveResolutionForDimensions(1920, 1080, 1, 16)).toEqual({
+      width: 1360,
+      height: 768,
+    });
+  });
+
+  test.each([
+    [(32.5 / 32) ** 2, 1024],
+    [(33.5 / 32) ** 2, 1088],
+  ])('rounds a square grid-unit tie to even for %s MP', (megapixels, expected) => {
+    expect(resolveResolutionForDimensions(1000, 1000, megapixels)).toEqual({
+      width: expected,
+      height: expected,
+    });
+  });
+
+  test.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid natural dimensions %s',
+    (dimension) => {
+      expect(() => resolveResolutionForDimensions(dimension, 1080, 1)).toThrow(RangeError);
+      expect(() => resolveResolutionForDimensions(1920, dimension, 1)).toThrow(RangeError);
+    },
+  );
+
+  test.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid megapixels %s',
+    (megapixels) => {
+      expect(() =>
+        resolveResolutionForDimensions(1920, 1080, megapixels),
+      ).toThrow(RangeError);
+    },
+  );
+
+  test.each([0, -32, 2.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid multiple %s',
+    (multiple) => {
+      expect(() =>
+        resolveResolutionForDimensions(1920, 1080, 1, multiple),
       ).toThrow(RangeError);
     },
   );
