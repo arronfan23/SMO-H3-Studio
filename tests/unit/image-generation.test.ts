@@ -460,8 +460,9 @@ describe('image generation validation and submission', () => {
       prompt: harness.request.prompt,
       vae: ['454', 0],
       resolution: 1024,
-      images: { image_1: ['ref1', 0] },
+      'images.image_1': ['ref1', 0],
     });
+    expect(graph['452'].inputs).not.toHaveProperty('images');
     expect(graph['458'].inputs).toMatchObject({
       latent_image: ['452', 2],
       seed: harness.request.seed,
@@ -531,17 +532,20 @@ describe('image generation validation and submission', () => {
       extensions.map((_, index) => `reference-${index}-bytes`),
     );
     expect(graph['452'].inputs.vae).toEqual(['454', 0]);
-    expect(graph['452'].inputs.images).toEqual({
-      image_1: ['ref1', 0],
-      image_2: ['ref2', 0],
-      image_3: ['ref3', 0],
-      image_4: ['ref4', 0],
+    expect(graph['452'].inputs).toMatchObject({
+      'images.image_1': ['ref1', 0],
+      'images.image_2': ['ref2', 0],
+      'images.image_3': ['ref3', 0],
+      'images.image_4': ['ref4', 0],
     });
-    expect(Object.keys(graph['452'].inputs.images as object)).toEqual([
-      'image_1',
-      'image_2',
-      'image_3',
-      'image_4',
+    expect(graph['452'].inputs).not.toHaveProperty('images');
+    expect(
+      Object.keys(graph['452'].inputs).filter((key) => key.startsWith('images.')),
+    ).toEqual([
+      'images.image_1',
+      'images.image_2',
+      'images.image_3',
+      'images.image_4',
     ]);
     for (const index of [0, 1, 2, 3]) {
       expect(graph[`ref${index + 1}`]).toEqual({
@@ -1002,10 +1006,14 @@ describe('image retry and single-job coordination', () => {
         inputs: { image: `uploaded-${uploadOffset + 2}.png` },
       });
       expect(graph.ref3).toBeUndefined();
-      expect(graph['452'].inputs.images).toEqual({
-        image_1: ['ref1', 0],
-        image_2: ['ref2', 0],
+      expect(graph['452'].inputs).toMatchObject({
+        'images.image_1': ['ref1', 0],
+        'images.image_2': ['ref2', 0],
       });
+      expect(graph['452'].inputs).not.toHaveProperty('images');
+      expect(
+        Object.keys(graph['452'].inputs).filter((key) => key.startsWith('images.')),
+      ).toEqual(['images.image_1', 'images.image_2']);
       expect(graph['458'].inputs.latent_image).toEqual(['452', 2]);
     }
     expect(harness.comfy.uploads.map(({ filePath }) => filePath)).toEqual([
@@ -1277,8 +1285,9 @@ describe('image AppServices assembly', () => {
     });
     expect(submitted!['452'].inputs).toMatchObject({
       vae: ['454', 0],
-      images: { image_1: ['ref1', 0] },
+      'images.image_1': ['ref1', 0],
     });
+    expect(submitted!['452'].inputs).not.toHaveProperty('images');
     expect(submitted!['458'].inputs.latent_image).toEqual(['452', 2]);
     expect(work.metadata?.request).toEqual(request);
     expect(apply).not.toHaveBeenCalled();

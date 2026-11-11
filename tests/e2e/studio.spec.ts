@@ -1300,8 +1300,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       prompt,
       vae: ['454', 0],
       resolution: 1024,
-      images: { image_1: ['ref1', 0] },
+      'images.image_1': ['ref1', 0],
     });
+    expect(graph['452'].inputs).not.toHaveProperty('images');
     expect(graph['458'].inputs).toMatchObject({
       latent_image: ['452', 2],
       seed: 71,
@@ -1494,13 +1495,20 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       prompt,
       vae: ['454', 0],
       resolution: 2048,
-      images: {
-        image_1: ['ref1', 0],
-        image_2: ['ref2', 0],
-        image_3: ['ref3', 0],
-        image_4: ['ref4', 0],
-      },
+      'images.image_1': ['ref1', 0],
+      'images.image_2': ['ref2', 0],
+      'images.image_3': ['ref3', 0],
+      'images.image_4': ['ref4', 0],
     });
+    expect(graph['452'].inputs).not.toHaveProperty('images');
+    expect(
+      Object.keys(graph['452'].inputs).filter((key) => key.startsWith('images.')),
+    ).toEqual([
+      'images.image_1',
+      'images.image_2',
+      'images.image_3',
+      'images.image_4',
+    ]);
     expect(graph['454'].class_type).toBe('VAELoader');
     expect(graph['458'].inputs).toMatchObject({
       latent_image: ['452', 2],

@@ -326,18 +326,21 @@ describe('patchQwenImageWorkflow', () => {
     }
   });
 
-  test('keeps the empty latent path when no reference images are supplied', () => {
+  test('keeps the empty latent path without Autogrow inputs when no references are supplied', () => {
     const { graph, nodeIds } = patchQwenImageWorkflow(frozenGraph(), validOptions);
 
     expect(graph[nodeIds.sampler].inputs.latent_image).toEqual([nodeIds.latent, 0]);
     expect(graph[nodeIds.text].inputs).not.toHaveProperty('images');
+    expect(
+      Object.keys(graph[nodeIds.text].inputs).filter((key) => key.startsWith('images.')),
+    ).toEqual([]);
     expect(graph[nodeIds.text].inputs).not.toHaveProperty('vae');
   });
 });
 
 describe('patchQwenReferenceImageWorkflow', () => {
   test.each([1, 4])(
-    'adds %s ordered references and preserves model, decode, and output links',
+    'adds %s ordered flat Autogrow references and preserves model, decode, and output links',
     (count) => {
       const source = frozenGraph();
       const before = structuredClone(source);
@@ -355,7 +358,10 @@ describe('patchQwenReferenceImageWorkflow', () => {
         uploadedNames,
       );
       const expectedImages = Object.fromEntries(
-        uploadedNames.map((_, index) => [`image_${index + 1}`, [`ref${index + 1}`, 0]]),
+        uploadedNames.map((_, index) => [
+          `images.image_${index + 1}`,
+          [`ref${index + 1}`, 0],
+        ]),
       );
 
       for (const [index, uploadedName] of uploadedNames.entries()) {
@@ -369,11 +375,12 @@ describe('patchQwenReferenceImageWorkflow', () => {
         prompt: options.prompt,
         vae: [nodeIds.vae, 0],
         resolution: 1440,
+        ...expectedImages,
       });
-      expect(graph[nodeIds.text].inputs.images).toEqual(expectedImages);
-      expect(Object.keys(graph[nodeIds.text].inputs.images as object)).toEqual(
-        uploadedNames.map((_, index) => `image_${index + 1}`),
-      );
+      expect(graph[nodeIds.text].inputs).not.toHaveProperty('images');
+      expect(
+        Object.keys(graph[nodeIds.text].inputs).filter((key) => key.startsWith('images.')),
+      ).toEqual(uploadedNames.map((_, index) => `images.image_${index + 1}`));
       expect(graph[nodeIds.latent].inputs).toMatchObject({
         width: options.width,
         height: options.height,
@@ -408,8 +415,9 @@ describe('patchQwenReferenceImageWorkflow', () => {
     expect(graph.text.inputs).toMatchObject({
       vae: ['vae', 0],
       resolution: 1024,
-      images: { image_1: ['ref1', 0] },
+      'images.image_1': ['ref1', 0],
     });
+    expect(graph.text.inputs).not.toHaveProperty('images');
     expect(graph.sampler.inputs).toMatchObject({
       model: ['cache', 0],
       latent_image: ['text', 2],

@@ -100,11 +100,10 @@ export function patchQwenReferenceImageWorkflow(
   }
 
   const { graph, nodeIds } = patchQwenImageWorkflow(source, options);
-  const images: Record<string, [string, number]> = {};
   for (const [index, uploadedName] of uploadedNames.entries()) {
     const id = referenceIds[index];
     graph[id] = { class_type: 'LoadImage', inputs: { image: uploadedName } };
-    images[`image_${index + 1}`] = [id, 0];
+    graph[nodeIds.text].inputs[`images.image_${index + 1}`] = [id, 0];
   }
 
   graph[nodeIds.text].inputs.vae = [nodeIds.vae, 0];
@@ -112,7 +111,6 @@ export function patchQwenReferenceImageWorkflow(
     options.width,
     options.height,
   );
-  graph[nodeIds.text].inputs.images = images;
   graph[nodeIds.sampler].inputs.latent_image = [nodeIds.text, 2];
 
   return { graph, nodeIds };
