@@ -54,7 +54,7 @@
 
 ### 图片生视频
 
-使用 H3 Ref2VA 工作流。参考图数量 1-9 可调，逐张选择、拖入、预览和删除。当前模特可作为其中一张参考图，但不是必需输入。按数量上传并连接 `MiniMaxH3ReferenceToVideo.ref_images.ref_image_1..N`，提示词引用 `<Picture 1>` 至 `<Picture 9>`，不能继续假设只有一张参考图。
+使用 H3 Ref2VA 工作流。参考图数量 1-9 可调，逐张选择、拖入、预览和删除。当前模特可作为其中一张参考图，但不是必需输入。按数量上传并连接 ComfyUI Autogrow 扁平键 `MiniMaxH3ReferenceToVideo.ref_images.ref_image_0..8`（依次对应第 1-9 张），提示词引用 `<Picture 1>` 至 `<Picture 9>`，不能继续假设只有一张参考图。
 
 图片生视频保留提示词、时长、分辨率、随机种子和步数，沿用现有低显存/Spark/低步数修补逻辑。
 

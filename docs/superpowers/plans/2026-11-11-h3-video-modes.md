@@ -4,7 +4,7 @@
 
 **目标：** 支持无参考图文生视频，以及 1-9 张参考图的图片生视频，并将两类画面视频与音频数字人清晰区分。
 
-**架构：** 沿用当前 H3 工作流。无参考时把 `MiniMaxH3ReferenceToVideo` 替换为 `MiniMaxH3ImageToVideo` 并删除 `ref_images`；多参考时保留 Ref2VA 节点并动态连接 `ref_image_1..9`。请求沿用 `mode: 'text'`，以参考数组和可空 avatarId 区分输入，不迁移旧作品。
+**架构：** 沿用当前 H3 工作流。无参考时把 `MiniMaxH3ReferenceToVideo` 替换为 `MiniMaxH3ImageToVideo` 并删除全部 `ref_images.*`；多参考时保留 Ref2VA 节点并按 ComfyUI Autogrow 契约动态连接扁平键 `ref_images.ref_image_0..8`。请求沿用 `mode: 'text'`，以参考数组和可空 avatarId 区分输入，不迁移旧作品。
 
 **技术栈：** MiniMax H3、Electron、React、TypeScript、Zod、Vitest、Playwright。
 
@@ -28,7 +28,7 @@
 
 - [ ] **步骤 1：编写失败测试**
 
-验证 `mode:'text'`、`avatarId:null`、`referenceImagePaths:[]` 合法且不上传图片；提交图中 `MiniMaxH3ImageToVideo` 没有 `ref_images`，其他调度、Spark、步数、输出不变。旧请求含 avatarId 仍走原 Ref2VA。
+验证 `mode:'text'`、`avatarId:null`、`referenceImagePaths:[]` 合法且不上传图片；提交图中 `MiniMaxH3ImageToVideo` 没有任何 `ref_images.*`，其他调度、Spark、步数、输出不变。旧请求含 avatarId 仍走原 Ref2VA。
 
 - [ ] **步骤 2：运行测试确认失败**
 
@@ -64,7 +64,7 @@ git commit -m "Allow H3 text to video without a reference image"
 
 - [ ] **步骤 1：编写失败测试**
 
-用 1 张和 9 张验证 `ref_image_1..9` 顺序、`MiniMaxH3ReferenceToVideo` 保留、上传授权、临时文件清理、取消和重试不重复节点。超过 9、空数组元素和未授权路径拒绝。
+用 1 张和 9 张验证扁平键 `ref_images.ref_image_0..8` 顺序、`MiniMaxH3ReferenceToVideo` 保留、上传授权、临时文件清理、取消和重试不重复节点。超过 9、空数组元素和未授权路径拒绝。
 
 - [ ] **步骤 2：运行测试确认失败**
 
@@ -75,12 +75,17 @@ git commit -m "Allow H3 text to video without a reference image"
 参考路径长度 1-9 时按顺序调用 `comfy.uploadFile({kind:'image'})`，首图使用现有节点 226，其他 LoadImage 节点使用 `ref2..ref9`：
 
 ```ts
-refNode.inputs.ref_images = Object.fromEntries(
-  uploaded.map((name, index) => [`ref_image_${index + 1}`, [index === 0 ? '226' : `ref${index + 1}`, 0]]),
-);
+uploaded.forEach((name, index) => {
+  refNode.inputs[`ref_images.ref_image_${index}`] = [
+    index === 0 ? '226' : `ref${index + 1}`,
+    0,
+  ];
+});
 ```
 
 数组存在时只使用数组，不隐式重复当前模特。旧请求只有 avatarId 时维持原一张 Ref2VA 行为。
+
+注意：本机 Autogrow 诊断已证实嵌套 `ref_images` 会被忽略，扁平 `ref_images.ref_image_N` 才进入执行图；前缀索引为 0-8，对应第 1-9 张图，提示词标签仍是 `<Picture 1>` 至 `<Picture 9>`。
 
 - [ ] **步骤 4：运行测试和类型检查**
 

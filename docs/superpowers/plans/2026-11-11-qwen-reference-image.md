@@ -90,9 +90,9 @@ git commit -m "Add Qwen reference image controls and 2K options"
 ```ts
 text.inputs.vae = ['454', 0];
 text.inputs.resolution = resolveReferenceResolution(width, height);
-text.inputs.images = Object.fromEntries(
-  uploadedNames.map((name, index) => [`image_${index + 1}`, [`ref${index + 1}`, 0]]),
-);
+uploadedNames.forEach((name, index) => {
+  text.inputs[`images.image_${index + 1}`] = [`ref${index + 1}`, 0];
+});
 sampler.inputs.latent_image = ['452', 2];
 ```
 
@@ -109,13 +109,15 @@ git add src/main/image-workflow.ts src/main/image-generation.ts tests/unit/image
 git commit -m "Generate Qwen images from multiple references"
 ```
 
-实际完成：工作流补丁 `b27ee5cb`，多图生成与装配 `83144759`，重启重试授权 `ba1268ed`。最终图像生成 50/50、工作流/分辨率 121/121、重启授权相关四组 482/482，类型检查通过；规格与代码质量审查均通过。
+实际完成：工作流补丁 `b27ee5cb`，多图生成与装配 `83144759`，重启重试授权 `ba1268ed`，Autogrow 扁平键修复 `1f5e99be`。最终图像生成 50/50、工作流/分辨率 121/121、重启授权相关四组 482/482，类型检查通过；规格与代码质量审查均通过。ComfyUI 实际接收 `images.image_1..N` 扁平键，嵌套 `inputs.images` 不会进入执行图。
 
 ### 任务 3：多图与 2K 的真实验收
 
-- [ ] **步骤 1：Electron E2E**
+- [x] **步骤 1：Electron E2E**
 
 用 1 张和 4 张授权图片完成模拟生成，验证请求、上传顺序、提交图、草稿、实际 `_00001.png` 预览和删除。覆盖 4MP 参数与窄窗口布局。
+
+实际完成：单图验收 `809747ff`，四图/4MP/布局/资产验收 `12d0db55`，Autogrow 契约回归 `1f5e99be`。定向参考生图 E2E 2/2、完整 Studio E2E 24/24，类型检查通过；规格与代码质量审查均通过。
 
 - [ ] **步骤 2：真实 Qwen 验收**
 
