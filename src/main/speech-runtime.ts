@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import defaultManifest from '../../resources/environment/media-components.json';
@@ -151,6 +151,20 @@ export class SpeechRuntime {
     }
   }
 
+  private async hasExpectedPythonVersion(
+    pythonPath: string,
+    commandOptions: SpeechExecFileOptions,
+  ): Promise<boolean> {
+    if (!(await fileExists(pythonPath))) return false;
+    try {
+      const { stdout } = await this.execFile(pythonPath, ['--version'], commandOptions);
+      return /^Python 3\.12\.\d+(?:\s+.*)?$/.test(stdout.trim());
+    } catch {
+      commandOptions.signal?.throwIfAborted();
+      return false;
+    }
+  }
+
   private async reinstallUv(
     archivePath: string,
     toolsRoot: string,
@@ -210,6 +224,8 @@ export class SpeechRuntime {
     const toolDirectory = join(toolsRoot, `uv-${UV_VERSION}`);
     const uvPath = join(toolDirectory, 'uv.exe');
     const venvDirectory = join(this.options.runtimeDirectory, 'venv');
+    const venvConfigPath = join(venvDirectory, 'pyvenv.cfg');
+    const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
     const localAppData = process.env.LOCALAPPDATA;
     const pythonInstallDirectory =
       this.options.pythonInstallDirectory ??
@@ -242,13 +258,24 @@ export class SpeechRuntime {
     }
 
     signal.throwIfAborted();
-    await this.execFile(uvPath, ['python', 'install', '3.12'], commandOptions);
-    signal.throwIfAborted();
-    await this.execFile(
-      uvPath,
-      ['venv', '--python', '3.12', venvDirectory],
-      commandOptions,
-    );
+    if (
+      !(await fileExists(venvConfigPath)) ||
+      !(await this.hasExpectedPythonVersion(pythonPath, commandOptions))
+    ) {
+      try {
+        await rename(venvDirectory, `${venvDirectory}.invalid-${randomUUID()}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      signal.throwIfAborted();
+      await this.execFile(uvPath, ['python', 'install', '3.12'], commandOptions);
+      signal.throwIfAborted();
+      await this.execFile(
+        uvPath,
+        ['venv', '--python', '3.12', venvDirectory],
+        commandOptions,
+      );
+    }
     signal.throwIfAborted();
     await this.execFile(
       uvPath,
@@ -258,7 +285,7 @@ export class SpeechRuntime {
     signal.throwIfAborted();
 
     return {
-      pythonPath: join(venvDirectory, 'Scripts', 'python.exe'),
+      pythonPath,
       environment: {
         UV_PROJECT_ENVIRONMENT: venvDirectory,
         VIRTUAL_ENV: venvDirectory,

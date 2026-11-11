@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -23,7 +23,34 @@ function sha256(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
-describe('SpeechRuntime', () => {
+interface RuntimeCall {
+  command: string;
+  args: readonly string[];
+  options: Record<string, unknown>;
+}
+
+function commandSequence(calls: RuntimeCall[]): string[] {
+  return calls.map(({ command, args }) => {
+    const executable = command.endsWith('uv.exe')
+      ? 'uv'
+      : command.endsWith('python.exe')
+        ? 'venv-python'
+        : command;
+    return [executable, ...args].join(' ');
+  });
+}
+
+async function writeValidVenv(venvDirectory: string): Promise<void> {
+  const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
+  await mkdir(dirname(pythonPath), { recursive: true });
+  await writeFile(pythonPath, 'Python fixture');
+  await writeFile(
+    join(venvDirectory, 'pyvenv.cfg'),
+    'include-system-site-packages = false\n',
+  );
+}
+
+describe('SpeechRuntime mocked command orchestration', () => {
   let directory: string;
   let modelDirectory: string;
   let runtimeDirectory: string;
@@ -74,11 +101,9 @@ describe('SpeechRuntime', () => {
       pythonInstallDirectory?: string;
     } = {},
   ) {
-    const calls: Array<{
-      command: string;
-      args: readonly string[];
-      options: Record<string, unknown>;
-    }> = [];
+    const calls: RuntimeCall[] = [];
+    const venvDirectory = join(runtimeDirectory, 'venv');
+    const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
     let versionChecks = 0;
     const execFile: SpeechExecFile = vi.fn(async (command, args, options) => {
       calls.push({ command, args, options: { ...options } });
@@ -89,6 +114,9 @@ describe('SpeechRuntime', () => {
         const outputDirectory = args[args.indexOf('-C') + 1];
         await mkdir(outputDirectory, { recursive: true });
         await writeFile(join(outputDirectory, 'uv.exe'), 'uv fixture');
+      }
+      if (command === pythonPath && args.length === 1 && args[0] === '--version') {
+        return { stdout: 'Python 3.12.13\r\n', stderr: '' };
       }
       if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
         versionChecks += 1;
@@ -102,6 +130,9 @@ describe('SpeechRuntime', () => {
           stdout: `uv ${UV_VERSION} (${UV_REVISION.slice(0, 9)} x86_64-pc-windows-msvc)`,
           stderr: '',
         };
+      }
+      if (command.endsWith('uv.exe') && args[0] === 'venv') {
+        await writeValidVenv(venvDirectory);
       }
       return { stdout: '', stderr: '' };
     });
@@ -158,6 +189,119 @@ describe('SpeechRuntime', () => {
     });
     expect(result.environment.PYTHONHOME).toBeUndefined();
   });
+
+  test('reuses a valid Python 3.12 venv and continues directly to locked sync', async () => {
+    const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    const venvDirectory = join(runtimeDirectory, 'venv');
+    const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
+    const modelPath = join(modelDirectory, 'user-model.safetensors');
+    await mkdir(toolDirectory, { recursive: true });
+    await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+    await mkdir(dirname(pythonPath), { recursive: true });
+    await writeFile(pythonPath, 'existing Python fixture');
+    await writeFile(
+      join(venvDirectory, 'pyvenv.cfg'),
+      'include-system-site-packages = false\n',
+    );
+    await writeFile(modelPath, 'user model contents');
+    const { runtime, calls } = createRuntime({
+      execFileImpl: async (command, args) => {
+        if (command === pythonPath && args.length === 1 && args[0] === '--version') {
+          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+        }
+        if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
+          return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        return { stdout: '', stderr: '' };
+      },
+    });
+
+    await expect(runtime.prepare()).resolves.toMatchObject({ pythonPath });
+
+    expect(
+      calls.filter(({ command }) => command.endsWith('uv.exe')).map(({ args }) => args),
+    ).toEqual([
+      ['--version'],
+      ['sync', '--locked', '--project', projectDirectory],
+    ]);
+    expect(
+      calls.filter(({ command }) => command === pythonPath).map(({ args }) => args),
+    ).toEqual([['--version']]);
+    expect(calls.some(({ args }) => args[0] === 'venv')).toBe(false);
+    expect(calls.some(({ args }) => args[0] === 'python')).toBe(false);
+    expect(await readFile(pythonPath, 'utf8')).toBe('existing Python fixture');
+    expect(await readFile(modelPath, 'utf8')).toBe('user model contents');
+  });
+
+  test.each([
+    { scenario: 'a missing interpreter', pythonState: 'missing' },
+    { scenario: 'an interpreter startup failure', pythonState: 'error' },
+    { scenario: 'a Python version mismatch', pythonState: '3.11' },
+    { scenario: 'a missing pyvenv.cfg', pythonState: 'no-config' },
+  ])(
+    'quarantines a venv with $scenario before recreating it without clearing models',
+    async ({ pythonState }) => {
+      const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+      const venvDirectory = join(runtimeDirectory, 'venv');
+      const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
+      const oldEnvironmentPath = join(venvDirectory, 'old-environment.txt');
+      const modelPath = join(modelDirectory, 'user-model.safetensors');
+      await mkdir(toolDirectory, { recursive: true });
+      await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+      await mkdir(venvDirectory, { recursive: true });
+      await writeFile(oldEnvironmentPath, 'preserve invalid environment');
+      if (pythonState !== 'no-config') {
+        await writeFile(
+          join(venvDirectory, 'pyvenv.cfg'),
+          'include-system-site-packages = false\n',
+        );
+      }
+      if (pythonState !== 'missing') {
+        await mkdir(dirname(pythonPath), { recursive: true });
+        await writeFile(pythonPath, 'invalid Python fixture');
+      }
+      await writeFile(modelPath, 'user model contents');
+      let venvExistedAtCreation: boolean | undefined;
+      let backupsAtCreation: string[] = [];
+      const { runtime, calls } = createRuntime({
+        execFileImpl: async (command, args) => {
+          if (command === pythonPath && args.length === 1 && args[0] === '--version') {
+            if (pythonState === 'error') throw new Error('broken Python installation');
+            return {
+              stdout: pythonState === 'no-config' ? 'Python 3.12.13\r\n' : 'Python 3.11.9\r\n',
+              stderr: '',
+            };
+          }
+          if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
+            return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+          }
+          if (command.endsWith('uv.exe') && args[0] === 'venv') {
+            venvExistedAtCreation = existsSync(venvDirectory);
+            backupsAtCreation = (await readdir(runtimeDirectory)).filter((entry) =>
+              entry.startsWith('venv.invalid-'),
+            );
+            await writeValidVenv(venvDirectory);
+          }
+          return { stdout: '', stderr: '' };
+        },
+      });
+
+      await expect(runtime.prepare()).resolves.toMatchObject({ pythonPath });
+
+      expect(venvExistedAtCreation).toBe(false);
+      expect(backupsAtCreation).toHaveLength(1);
+      const backupDirectory = join(runtimeDirectory, backupsAtCreation[0]!);
+      expect(await readFile(join(backupDirectory, 'old-environment.txt'), 'utf8')).toBe(
+        'preserve invalid environment',
+      );
+      expect(await readFile(pythonPath, 'utf8')).toBe('Python fixture');
+      expect(existsSync(join(venvDirectory, 'pyvenv.cfg'))).toBe(true);
+      expect(await readFile(modelPath, 'utf8')).toBe('user model contents');
+      expect(calls.some(({ args }) => args.includes('--clear'))).toBe(false);
+      expect(calls.filter(({ args }) => args[0] === 'venv')).toHaveLength(1);
+      expect(calls.filter(({ args }) => args[0] === 'sync')).toHaveLength(1);
+    },
+  );
 
   test('NTFS Python defaults to LOCALAPPDATA without moving component paths', async () => {
     const localAppData = join(directory, 'NTFS LocalAppData');
@@ -278,8 +422,74 @@ describe('SpeechRuntime', () => {
     });
   });
 
-  test('aborts uv sync, stops the failed attempt, and permits a fresh prepare', async () => {
+  test('reuses the prepared result for repeated calls without duplicate commands', async () => {
     const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    const venvDirectory = join(runtimeDirectory, 'venv');
+    await mkdir(toolDirectory, { recursive: true });
+    await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+    const { runtime, calls } = createRuntime();
+
+    const first = await runtime.prepare();
+    const second = await runtime.prepare();
+
+    expect(second).toBe(first);
+    expect(commandSequence(calls)).toEqual([
+      'uv --version',
+      'uv python install 3.12',
+      `uv venv --python 3.12 ${venvDirectory}`,
+      `uv sync --locked --project ${projectDirectory}`,
+    ]);
+    expect(existsSync(join(venvDirectory, 'pyvenv.cfg'))).toBe(true);
+  });
+
+  test('shares an in-flight prepare and runs one command sequence', async () => {
+    const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    const venvDirectory = join(runtimeDirectory, 'venv');
+    const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
+    await mkdir(toolDirectory, { recursive: true });
+    await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+    const syncStarted = deferred<void>();
+    const finishSync = deferred<void>();
+    const { runtime, calls } = createRuntime({
+      execFileImpl: async (command, args) => {
+        if (command === pythonPath && args.length === 1 && args[0] === '--version') {
+          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+        }
+        if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
+          return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (command.endsWith('uv.exe') && args[0] === 'venv') {
+          await writeValidVenv(venvDirectory);
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'sync') {
+          syncStarted.resolve();
+          await finishSync.promise;
+        }
+        return { stdout: '', stderr: '' };
+      },
+    });
+
+    const first = runtime.prepare();
+    const second = runtime.prepare();
+    expect(second).toBe(first);
+    await syncStarted.promise;
+    finishSync.resolve();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(secondResult).toBe(firstResult);
+    expect(commandSequence(calls)).toEqual([
+      'uv --version',
+      'uv python install 3.12',
+      `uv venv --python 3.12 ${venvDirectory}`,
+      `uv sync --locked --project ${projectDirectory}`,
+    ]);
+  });
+
+  test('aborts uv sync and retries only locked sync with the valid venv', async () => {
+    const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    const venvDirectory = join(runtimeDirectory, 'venv');
+    const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
     await mkdir(toolDirectory, { recursive: true });
     await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
     const syncStarted = deferred<void>();
@@ -288,9 +498,16 @@ describe('SpeechRuntime', () => {
     let syncAttempts = 0;
     let firstSyncSignal: AbortSignal | undefined;
     const { runtime, calls } = createRuntime({
-      execFileImpl: async (_command, args, options) => {
+      execFileImpl: async (command, args, options) => {
+        if (command === pythonPath && args.length === 1 && args[0] === '--version') {
+          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+        }
         if (args.length === 1 && args[0] === '--version') {
           return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (command.endsWith('uv.exe') && args[0] === 'venv') {
+          await writeValidVenv(venvDirectory);
+          return { stdout: '', stderr: '' };
         }
         if (args[0] !== 'sync') return { stdout: '', stderr: '' };
         syncAttempts += 1;
@@ -319,10 +536,97 @@ describe('SpeechRuntime', () => {
     expect(syncAttempts).toBe(1);
 
     await expect(runtime.prepare()).resolves.toMatchObject({
-      pythonPath: join(runtimeDirectory, 'venv', 'Scripts', 'python.exe'),
+      pythonPath,
     });
     expect(syncAttempts).toBe(2);
-    expect(calls.filter(({ args }) => args[0] === 'venv')).toHaveLength(2);
+    expect(commandSequence(calls)).toEqual([
+      'uv --version',
+      'uv python install 3.12',
+      `uv venv --python 3.12 ${venvDirectory}`,
+      `uv sync --locked --project ${projectDirectory}`,
+      'uv --version',
+      'venv-python --version',
+      `uv sync --locked --project ${projectDirectory}`,
+    ]);
+    expect(calls.filter(({ args }) => args[0] === 'venv')).toHaveLength(1);
+    expect(calls.filter(({ args }) => args[0] === 'python')).toHaveLength(1);
+  });
+
+  test('quarantines a partial venv when creation is interrupted before retrying', async () => {
+    const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
+    const venvDirectory = join(runtimeDirectory, 'venv');
+    const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
+    const partialPath = join(venvDirectory, 'partial-venv.txt');
+    await mkdir(toolDirectory, { recursive: true });
+    await writeFile(join(toolDirectory, 'uv.exe'), 'uv fixture');
+    const venvStarted = deferred<void>();
+    const controller = new AbortController();
+    const cancellation = new Error('generation cancelled during uv venv');
+    let venvAttempts = 0;
+    let firstVenvSignal: AbortSignal | undefined;
+    let venvExistedAtRetry: boolean | undefined;
+    let backupsAtRetry: string[] = [];
+    const { runtime, calls } = createRuntime({
+      execFileImpl: async (command, args, options) => {
+        if (command === pythonPath && args.length === 1 && args[0] === '--version') {
+          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+        }
+        if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
+          return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (command.endsWith('uv.exe') && args[0] === 'venv') {
+          venvAttempts += 1;
+          if (venvAttempts > 1) {
+            venvExistedAtRetry = existsSync(venvDirectory);
+            backupsAtRetry = (await readdir(runtimeDirectory)).filter((entry) =>
+              entry.startsWith('venv.invalid-'),
+            );
+            await writeValidVenv(venvDirectory);
+            return { stdout: '', stderr: '' };
+          }
+          await mkdir(dirname(pythonPath), { recursive: true });
+          await writeFile(pythonPath, 'partial Python fixture');
+          await writeFile(partialPath, 'preserve interrupted venv');
+          firstVenvSignal = options.signal;
+          return new Promise((_resolve, reject) => {
+            const rejectCancellation = () => reject(options.signal?.reason);
+            if (options.signal?.aborted) {
+              rejectCancellation();
+              return;
+            }
+            options.signal?.addEventListener('abort', rejectCancellation, { once: true });
+            venvStarted.resolve();
+          });
+        }
+        return { stdout: '', stderr: '' };
+      },
+    });
+
+    const firstPrepare = runtime.prepare(controller.signal);
+    await venvStarted.promise;
+    controller.abort(cancellation);
+    await expect(firstPrepare).rejects.toBe(cancellation);
+    expect(firstVenvSignal?.aborted).toBe(true);
+
+    await expect(runtime.prepare()).resolves.toMatchObject({ pythonPath });
+
+    expect(venvExistedAtRetry).toBe(false);
+    expect(backupsAtRetry).toHaveLength(1);
+    expect(
+      await readFile(join(runtimeDirectory, backupsAtRetry[0]!, 'partial-venv.txt'), 'utf8'),
+    ).toBe('preserve interrupted venv');
+    expect(existsSync(join(venvDirectory, 'pyvenv.cfg'))).toBe(true);
+    expect(commandSequence(calls)).toEqual([
+      'uv --version',
+      'uv python install 3.12',
+      `uv venv --python 3.12 ${venvDirectory}`,
+      'uv --version',
+      'uv python install 3.12',
+      `uv venv --python 3.12 ${venvDirectory}`,
+      `uv sync --locked --project ${projectDirectory}`,
+    ]);
+    expect(calls.filter(({ args }) => args[0] === 'sync')).toHaveLength(1);
+    expect(calls.some(({ args }) => args.includes('--clear'))).toBe(false);
   });
 
   test('close aborts an unattached preparation and waits for command cleanup', async () => {
@@ -336,6 +640,10 @@ describe('SpeechRuntime', () => {
       execFileImpl: async (_command, args, options) => {
         if (args.length === 1 && args[0] === '--version') {
           return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (_command.endsWith('uv.exe') && args[0] === 'venv') {
+          await writeValidVenv(join(runtimeDirectory, 'venv'));
+          return { stdout: '', stderr: '' };
         }
         if (args[0] !== 'sync') return { stdout: '', stderr: '' };
         syncSignal = options.signal;
@@ -385,6 +693,10 @@ describe('SpeechRuntime', () => {
       execFileImpl: async (_command, args, options) => {
         if (args.length === 1 && args[0] === '--version') {
           return { stdout: `uv ${UV_VERSION}`, stderr: '' };
+        }
+        if (_command.endsWith('uv.exe') && args[0] === 'venv') {
+          await writeValidVenv(join(runtimeDirectory, 'venv'));
+          return { stdout: '', stderr: '' };
         }
         if (args[0] !== 'sync') return { stdout: '', stderr: '' };
         const script =
