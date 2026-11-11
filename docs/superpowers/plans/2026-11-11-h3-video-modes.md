@@ -137,13 +137,25 @@ Electron 与实际提交记录：三类 UI `5bd75d51`，润色失效与互斥 `2
 
 ### 任务 4：真实视频验收
 
-- [ ] **步骤 1：无参考真实生成**
+- [x] **步骤 1：无参考真实生成**
 
 用固定提示词和 1 step 低负载运行 4 秒无参考视频，确认无图像上传、MiniMaxH3ImageToVideo 节点、非空输出和任务锁释放。
 
-- [ ] **步骤 2：多参考真实生成**
+- [x] **步骤 2：多参考真实生成**
 
 用 1 张和 9 张合成参考图分别运行 Ref2VA，检查上传顺序、ref_image 连接、Spark/transition 与非空输出。删除测试作品后无媒体残留，用户原图不动。
+
+#### 2026-11-11 最终合并真实验收（生产代码 `6575b0b2`）
+
+**结论：PASS。** 真实 Electron + ComfyUI，A→B→C 顺序执行，均为 0.3MP、4 秒、1 step、seed `20261111`，未调用 LLM 或提示词增强。证据：`G:\SMO-H3-Verification\h3-video-real-20261111\acceptance-report.md` 与 `acceptance-summary.json`。
+
+- A 无模特文生：`MiniMaxH3ImageToVideo`，无 226、`audio_vae`、`ref_image_size`、`ref_images.*`，零图片上传。生成墙钟 **5.138 秒**（缓存后），峰值 **14,277 MiB**。
+- B 无模特 1 图：`ref_images.ref_image_0 -> ['226',0]`，仅 1 张上传。生成墙钟 **45.175 秒**，峰值 **15,270 MiB**。
+- C 无模特 9 图：`ref_images.ref_image_0..8` 顺序连接 `226,ref2..ref9`，9 张上传。生成墙钟 **50.239 秒**，峰值 **15,441 MiB**。
+- 三案均确认 Spark SM120、`transition_step=1`、1 步 `H3SigmaRefiner(start_at_sigma=20)` 和 MP4 输出节点。
+- 三案视频均为 **736×416、4.458333 秒、24fps**，文件非空，首/中/尾抽帧经 sharp 和人工查看均非空白；作品页 `readyState=4` 可预览。
+- 三案最终 `jobs.getState.activeId=null`、ComfyUI 队列空闲；作品和输出删除成功，`data/uploads` 无暂存残留，测试上传按精确 workId 文件名清理，参考原图哈希不变。
+- 首次 harness 选择器错误发生在提交前并已单独归档；最终合并轮无未执行项，ComfyUI 0.38.0 / RTX 5080 结束健康。
 
 - [ ] **步骤 3：完整回归并记录**
 
