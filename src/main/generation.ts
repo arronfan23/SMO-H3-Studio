@@ -685,7 +685,10 @@ export function createGenerationHandler(
 
 export interface RetryHandlerOptions {
   store: Pick<Store, 'getWork' | 'listAvatars'>;
-  mediaRegistry: Pick<MediaRegistry, 'authorizeSelectedFile'>;
+  mediaRegistry: Pick<
+    MediaRegistry,
+    'authorizeSelectedFile' | 'authorizeSelectedImage'
+  >;
   startGeneration: GenerationHandler;
 }
 
@@ -811,8 +814,23 @@ export function createRetryHandler(
       ) {
         throw new Error('Work metadata is missing a valid image request or workflowVersion');
       }
+      const storedRequest = work.metadata.request;
+      for (const referencePath of storedRequest.referenceImagePaths ?? []) {
+        try {
+          const referenceStats = await stat(referencePath);
+          if (!referenceStats.isFile()) {
+            throw new Error('Original reference image is not a file');
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error('Original reference image missing');
+          }
+          throw error;
+        }
+        await mediaRegistry.authorizeSelectedImage(referencePath);
+      }
       return startGeneration(
-        { ...work.metadata.request, retryOf: id },
+        { ...storedRequest, retryOf: id },
         { workflowPath: work.metadata.workflowVersion },
       );
     }

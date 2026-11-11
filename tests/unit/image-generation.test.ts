@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { constants } from 'node:fs';
-import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -258,6 +258,36 @@ async function createHarness(
     store,
     terminalSnapshots,
   };
+}
+
+function createRestartedImageRetry(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+) {
+  const mediaRegistry = new MediaRegistry({
+    avatarsDirectory: join(harness.directory, 'avatars'),
+    outputDirectory: harness.outputDirectory,
+  });
+  const startImage = vi.fn(createImageGenerationHandler({
+    store: harness.store,
+    comfy: harness.comfy,
+    mediaComponents: harness.mediaComponents,
+    mediaRegistry,
+    jobCoordinator: harness.jobCoordinator,
+    workflowsDirectory,
+    outputDirectory: harness.outputDirectory,
+    uploadsDirectory: join(harness.directory, 'uploads'),
+    ensureReady: harness.ensureReady,
+  }));
+  const startGeneration: GenerationHandler = (request, options) => {
+    if (request.mode === 'image') return startImage(request, options);
+    throw new Error('image retry routed to the wrong handler');
+  };
+  const retryWork = createRetryHandler({
+    store: harness.store,
+    mediaRegistry,
+    startGeneration,
+  });
+  return { mediaRegistry, retryWork, startImage };
 }
 
 afterEach(async () => {
@@ -926,63 +956,77 @@ describe('image progress, completion, and cancellation', () => {
 describe('image retry and single-job coordination', () => {
   test('image retries references from the frozen workflow without accumulating nodes', async () => {
     const harness = await createHarness();
-    const referencePath = join(harness.directory, 'reference.png');
-    await writeFile(referencePath, 'reference-image-bytes');
-    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const referencePaths = [
+      join(harness.directory, 'reference-0.png'),
+      join(harness.directory, 'reference-1.png'),
+    ];
+    for (const [index, referencePath] of referencePaths.entries()) {
+      await writeFile(referencePath, `reference-${index}-bytes`);
+      await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    }
     const workflowPath = join(workflowsDirectory, 'qwen-image-2-1.json');
     const frozenSource = await readFile(workflowPath, 'utf8');
     const request: ImageGenerationRequest = {
       ...harness.request,
-      referenceImagePaths: [referencePath],
+      referenceImagePaths: referencePaths,
     };
-    const startImage = vi.fn(harness.startImage);
-    const startGeneration: GenerationHandler = (generationRequest, options) => {
-      if (generationRequest.mode === 'image') {
-        return startImage(generationRequest, options);
-      }
-      throw new Error('image retry routed to the wrong handler');
-    };
-    const retryWork = createRetryHandler({
-      store: harness.store,
-      mediaRegistry: harness.mediaRegistry,
-      startGeneration,
-    });
     harness.comfy.completionError = new Error('retryable reference failure');
 
     const original = await harness.startImage(request);
     const failed = await waitForWork(harness.store, original.id, 'failed');
     const originalSnapshot = structuredClone(failed);
     harness.comfy.completionError = undefined;
+    const restarted = createRestartedImageRetry(harness);
+    const authorize = vi.spyOn(
+      restarted.mediaRegistry,
+      'authorizeSelectedImage',
+    );
+    for (const referencePath of referencePaths) {
+      await expect(
+        restarted.mediaRegistry.isSelectedImage(referencePath),
+      ).resolves.toBe(false);
+    }
 
-    const retried = await retryWork(original.id);
+    const retried = await restarted.retryWork(original.id);
     const completed = await waitForWork(harness.store, retried.id, 'done');
 
     expect(harness.comfy.submissions).toHaveLength(2);
     for (const [index, graph] of harness.comfy.submissions.entries()) {
+      const uploadOffset = index * 2;
       expect(graph.ref1).toEqual({
         class_type: 'LoadImage',
-        inputs: { image: `uploaded-${index + 1}.png` },
+        inputs: { image: `uploaded-${uploadOffset + 1}.png` },
       });
-      expect(graph.ref2).toBeUndefined();
+      expect(graph.ref2).toEqual({
+        class_type: 'LoadImage',
+        inputs: { image: `uploaded-${uploadOffset + 2}.png` },
+      });
+      expect(graph.ref3).toBeUndefined();
       expect(graph['452'].inputs.images).toEqual({
         image_1: ['ref1', 0],
+        image_2: ['ref2', 0],
       });
       expect(graph['458'].inputs.latent_image).toEqual(['452', 2]);
     }
     expect(harness.comfy.uploads.map(({ filePath }) => filePath)).toEqual([
       join(harness.directory, 'uploads', `${original.id}-0.png`),
+      join(harness.directory, 'uploads', `${original.id}-1.png`),
       join(harness.directory, 'uploads', `${retried.id}-0.png`),
+      join(harness.directory, 'uploads', `${retried.id}-1.png`),
     ]);
     expect(harness.comfy.uploadedContents).toEqual([
-      'reference-image-bytes',
-      'reference-image-bytes',
+      'reference-0-bytes',
+      'reference-1-bytes',
+      'reference-0-bytes',
+      'reference-1-bytes',
     ]);
+    expect(authorize.mock.calls.map(([path]) => path)).toEqual(referencePaths);
     expect(completed.metadata).toMatchObject({
       request,
       workflowVersion: 'qwen-image-2-1.json',
       retryOf: original.id,
     });
-    expect(startImage).toHaveBeenLastCalledWith(
+    expect(restarted.startImage).toHaveBeenLastCalledWith(
       { ...request, retryOf: original.id },
       { workflowPath: 'qwen-image-2-1.json' },
     );
@@ -1028,6 +1072,48 @@ describe('image retry and single-job coordination', () => {
     await waitForWork(harness.store, occupying.id, 'done');
   });
 
+  test.each([
+    {
+      sourceState: 'missing',
+      expectedError: 'Original reference image missing',
+    },
+    {
+      sourceState: 'directory',
+      expectedError: 'Original reference image is not a file',
+    },
+  ] as const)(
+    'image rejects a $sourceState retry source without starting generation',
+    async ({ sourceState, expectedError }) => {
+      const harness = await createHarness();
+      const referencePath = join(harness.directory, 'reference.png');
+      await writeFile(referencePath, 'reference-image-bytes');
+      await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+      harness.comfy.completionError = new Error('retryable reference failure');
+
+      const original = await harness.startImage({
+        ...harness.request,
+        referenceImagePaths: [referencePath],
+      });
+      const failed = await waitForWork(harness.store, original.id, 'failed');
+      const originalSnapshot = structuredClone(failed);
+      const uploadCount = harness.comfy.uploads.length;
+      const submissionCount = harness.comfy.submissions.length;
+      await rm(referencePath);
+      if (sourceState === 'directory') await mkdir(referencePath);
+      const restarted = createRestartedImageRetry(harness);
+
+      await expect(restarted.retryWork(original.id)).rejects.toThrow(
+        expectedError,
+      );
+
+      expect(restarted.startImage).not.toHaveBeenCalled();
+      expect(harness.store.listWorks()).toHaveLength(1);
+      expect(harness.store.getWork(original.id)).toEqual(originalSnapshot);
+      expect(harness.comfy.uploads).toHaveLength(uploadCount);
+      expect(harness.comfy.submissions).toHaveLength(submissionCount);
+    },
+  );
+
   test('image retries a failed work without media authorization', async () => {
     const harness = await createHarness();
     harness.comfy.completionError = new Error('retryable image failure');
@@ -1041,9 +1127,13 @@ describe('image retry and single-job coordination', () => {
       mediaRegistry: harness.mediaRegistry,
       startGeneration,
     });
-    const authorize = vi.spyOn(
+    const authorizeFile = vi.spyOn(
       harness.mediaRegistry,
       'authorizeSelectedFile',
+    );
+    const authorizeImage = vi.spyOn(
+      harness.mediaRegistry,
+      'authorizeSelectedImage',
     );
 
     const original = await harness.startImage(harness.request);
@@ -1064,7 +1154,8 @@ describe('image retry and single-job coordination', () => {
       { ...harness.request, retryOf: original.id },
       { workflowPath: 'qwen-image-2-1.json' },
     );
-    expect(authorize).not.toHaveBeenCalled();
+    expect(authorizeFile).not.toHaveBeenCalled();
+    expect(authorizeImage).not.toHaveBeenCalled();
     expect(harness.store.getWork(original.id)).toEqual(originalSnapshot);
   });
 
