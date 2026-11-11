@@ -130,7 +130,7 @@ afterEach(() => {
 });
 
 describe('语音工作区', () => {
-  test('语音无需数字模特，只有视频显示新建模特空状态', async () => {
+  test('语音无需数字模特，仅音频数字人显示新建模特空状态', async () => {
     const { onCreateAvatar } = await renderSpeech();
     await waitForSpeechReady();
 
@@ -143,8 +143,20 @@ describe('语音工作区', () => {
     expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    const textPanel = screen.getByRole('tabpanel', { name: '文生视频' });
+    expect(textPanel).toBeVisible();
+    expect(within(textPanel).getByLabelText('原始文字')).toBeInTheDocument();
+    expect(within(textPanel).getByRole('button', { name: '生成视频' })).toBeEnabled();
+    expect(
+      document.querySelector('#video-main-panel > .empty-state'),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '还没有数字模特' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
     expect(screen.getByRole('heading', { name: '还没有数字模特' })).toBeVisible();
-    fireEvent.click(screen.getByRole('button', { name: '新建数字模特' }));
+    const createAvatarButton = screen.getByRole('button', { name: '新建数字模特' });
+    expect(createAvatarButton).toBeVisible();
+    fireEvent.click(createAvatarButton);
     expect(onCreateAvatar).toHaveBeenCalledTimes(1);
   });
 
