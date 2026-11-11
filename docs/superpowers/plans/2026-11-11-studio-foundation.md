@@ -165,7 +165,7 @@ git commit -m "Import generated images as avatars and organize work filters"
 ### 任务 5：基础链路验证
 
 - [x] **步骤 1：运行 `npm run typecheck`、排除已知旧环境导入测试的 Vitest、完整 studio E2E，并提交实际结果到本计划。**
-- [ ] **步骤 2：在真实 G 盘环境确认 TTS capabilities 可加载、克隆录音可保存并授权。**
+- [x] **步骤 2：在真实 G 盘环境确认 TTS capabilities 可加载、克隆录音可保存并授权。**
 - [x] **步骤 3：用合成 WAV/模拟 MediaRecorder 验证克隆参考音保存、授权、重录替换和忙时不能提交。**
 
 #### 2026-11-11 实际验证（Base `6b98c921d6e5d277d66fc683d28974620ac6b247`）
@@ -195,3 +195,16 @@ git commit -m "Import generated images as avatars and organize work filters"
 
 - 按任务边界未执行真实 TTS 音频生成、真实麦克风采集、模型重新下载或依赖重装。
 - 因禁止修改生产代码，未修复或复验已有 venv 的默认 prepare 阻塞。应用重启后再次加载 capabilities 仍可能失败，这是当前基础链路的发布阻塞风险；绕过 prepare 的真实模型结果不能作为正常启动链路验收结论。
+
+#### 2026-11-11 阻塞解除复验（修复提交 `46420230d316c6f958000f50a14483052494bd70`）
+
+**结论：PASS。** 上述 BLOCKED 记录保留为修复前历史。已有 venv 现在只有在 `pyvenv.cfg` 存在且真实解释器为 Python 3.12.x 时才复用；无效环境会隔离备份后重建。默认应用 prepare/capabilities 链路已恢复，不再需要绕过 prepare。
+
+- 默认 `SpeechRuntime.prepare()` 对已有有效环境仅执行版本检查和一次 locked sync，没有重新创建 venv 或重新下载依赖。
+- 使用复用环境的真实解释器执行 `python -I -c "import qwen_tts"`：**1/1 通过**。
+- 默认 capabilities：custom 返回 **9 个音色、11 种语言**，clone 返回 **11 种语言**；未再出现 Python minor version link directory 或已有 venv 阻塞错误。
+- 克隆录音保存、授权、重录替换和忙时提交拦截沿用上述合成集成验收结果：通过。
+- `npm run typecheck`：PASS。
+- 排除既有未完成的 `tests/unit/environment-wizard.test.tsx` 后，Vitest：**2600 通过、1 跳过、0 失败**。
+- 完整 studio E2E：**22/22 通过**。
+- 真实 TTS 音频生成、真实麦克风采集和模型重新下载仍不在本任务验收范围内。
