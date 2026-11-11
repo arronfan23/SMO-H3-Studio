@@ -1324,6 +1324,238 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     }))).toEqual({ width: 1376, height: 768 });
   });
 
+  test('参考生图 4 张首图方形按 4MP 端到端验收', async () => {
+    const referenceDirectory = join(tempDirectory!, 'references-4');
+    await mkdir(referenceDirectory, { recursive: true });
+    const referenceDefinitions = [
+      { width: 1200, height: 1200, background: { r: 32, g: 120, b: 196 } },
+      { width: 1600, height: 900, background: { r: 196, g: 80, b: 32 } },
+      { width: 900, height: 1600, background: { r: 48, g: 160, b: 96 } },
+      { width: 1400, height: 1000, background: { r: 160, g: 64, b: 144 } },
+    ];
+    const referencePaths: string[] = [];
+    for (const [index, definition] of referenceDefinitions.entries()) {
+      const referencePath = join(referenceDirectory, `reference-${index + 1}.png`);
+      await sharp({
+        create: { ...definition, channels: 3 },
+      }).png().toFile(referencePath);
+      referencePaths.push(referencePath);
+    }
+    const originalReferences = await Promise.all(
+      referencePaths.map((referencePath) => readFile(referencePath)),
+    );
+    const outputInset = await sharp({
+      create: {
+        width: 1024,
+        height: 1024,
+        channels: 3,
+        background: { r: 224, g: 84, b: 48 },
+      },
+    }).png().toBuffer();
+    const outputPng = await sharp({
+      create: {
+        width: 2048,
+        height: 2048,
+        channels: 3,
+        background: { r: 24, g: 150, b: 112 },
+      },
+    })
+      .composite([{ input: outputInset, top: 512, left: 512 }])
+      .png()
+      .toBuffer();
+
+    await app!.close();
+    app = undefined;
+    page = undefined;
+    imageServiceProbeEntry = await createImageServiceProbeEntry();
+    app = await launchApp({
+      ...launchOptions,
+      appPath: imageServiceProbeEntry,
+      fileDialogPaths: referencePaths,
+    });
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    await installImageBackendProbe(app, {
+      outputDirectory,
+      pngBase64: outputPng.toString('base64'),
+    });
+    await page.reload();
+    await expect(page).toHaveTitle('SMO.H3 Studio');
+
+    const prompt = 'Four ordered references with a square first image at 4MP.';
+    await page.click('#studio-image-button');
+    await page.fill('#image-prompt', prompt);
+    await page.click('#reference-image-tab');
+    for (const [index, definition] of referenceDefinitions.entries()) {
+      const selectButton = page.getByRole('button', {
+        name: '选择参考图',
+        exact: true,
+      });
+      await expect(selectButton).toBeEnabled();
+      await selectButton.click();
+      await expect(page.locator('.reference-image-count')).toHaveText(
+        `${index + 1} / 4`,
+      );
+      await expect(page.locator('.reference-image-preview img')).toHaveCount(index + 1);
+      const preview = page.getByRole('img', {
+        name: `参考图 ${index + 1}：reference-${index + 1}.png`,
+      });
+      await expect(preview).toBeVisible();
+      await expect.poll(() =>
+        preview.evaluate((element) => (element as HTMLImageElement).naturalWidth),
+      ).toBe(definition.width);
+    }
+    await expect(page.locator('.reference-image-filename')).toHaveText(
+      referencePaths.map((_, index) => `reference-${index + 1}.png`),
+    );
+    await expect(
+      page.getByRole('button', { name: '选择参考图', exact: true }),
+    ).toBeDisabled();
+
+    await page.click('#text-image-tab');
+    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await page.click('#reference-image-tab');
+    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await expect(page.locator('.reference-image-count')).toHaveText('4 / 4');
+    await expect(page.locator('.reference-image-preview img')).toHaveCount(4);
+    await page.selectOption('#image-resolution', '4');
+    await expect(page.locator('#image-resolution')).toHaveValue('4');
+    await expect(page.locator('#image-main-panel .form-notice')).toContainText(
+      '首图 1200 × 1200 px，输出 2048 × 2048 px',
+    );
+    await page.fill('#image-seed', '144');
+    await page.fill('#image-steps', '32');
+
+    await setViewport(app, page, 960, 640);
+    await assertViewLayout(page, 'studio-reference-four-960x640', [
+      '#image-prompt',
+      '.reference-image-picker',
+      '#image-resolution',
+      '#image-steps',
+      '#image-main-panel .button-generate',
+    ]);
+
+    await expect(page.locator('#image-main-panel .button-generate')).toBeEnabled();
+    await page.locator('#image-main-panel .button-generate').click();
+    const jobLocator = page.locator(
+      '#image-main-panel section[aria-label="任务状态"] code',
+    );
+    await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
+    const jobId = (await jobLocator.textContent())!;
+    await waitForStableStatus(page, jobId, 'done');
+    const outputPath = join(outputDirectory, 'SMO-Image', `${jobId}_00001.png`);
+    expect(existsSync(outputPath)).toBe(true);
+    const outputMetadata = await sharp(outputPath).metadata();
+    expect(outputMetadata).toMatchObject({ width: 2048, height: 2048, format: 'png' });
+    const outputStats = await sharp(outputPath).stats();
+    expect(outputStats.channels.some((channel) => channel.stdev > 0)).toBe(true);
+
+    const probe = await app.evaluate(() => {
+      const probeGlobal = process as unknown as {
+        __smoImageE2eGraph?: Record<string, {
+          class_type: string;
+          inputs: Record<string, unknown>;
+        }>;
+        __smoImageE2eUploads?: Array<{
+          filePath: string;
+          kind: string;
+        }>;
+      };
+      return {
+        graph: probeGlobal.__smoImageE2eGraph,
+        uploads: probeGlobal.__smoImageE2eUploads,
+      };
+    });
+    expect(probe.uploads).toEqual(
+      referencePaths.map((_, index) => ({
+        filePath: join(dataDirectory, 'uploads', `${jobId}-${index}.png`),
+        kind: 'image',
+      })),
+    );
+    expect(await readdir(join(dataDirectory, 'uploads'))).toEqual([]);
+    for (const [index, referencePath] of referencePaths.entries()) {
+      expect(await readFile(referencePath)).toEqual(originalReferences[index]);
+    }
+
+    const graph = probe.graph!;
+    expect(graph).toBeDefined();
+    for (const index of [0, 1, 2, 3]) {
+      expect(graph[`ref${index + 1}`]).toEqual({
+        class_type: 'LoadImage',
+        inputs: { image: `uploaded-${index + 1}.png` },
+      });
+    }
+    expect(graph.ref5).toBeUndefined();
+    expect(graph['452'].class_type).toBe('TextEncodeQwenImage21');
+    expect(graph['452'].inputs).toMatchObject({
+      prompt,
+      vae: ['454', 0],
+      resolution: 2048,
+      images: {
+        image_1: ['ref1', 0],
+        image_2: ['ref2', 0],
+        image_3: ['ref3', 0],
+        image_4: ['ref4', 0],
+      },
+    });
+    expect(graph['454'].class_type).toBe('VAELoader');
+    expect(graph['458'].inputs).toMatchObject({
+      latent_image: ['452', 2],
+      seed: 144,
+      steps: 32,
+    });
+    expect(graph['461'].inputs).toMatchObject({
+      filename_prefix: `SMO-Image/${jobId}`,
+      format: 'png',
+    });
+    expect(graph['456'].class_type).toBe('EmptyLatentImage');
+    expect(reachableImageNodeIds(graph, '461')).not.toContain('456');
+
+    await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page.locator('.works-list article').filter({ hasText: jobId });
+    await expect(work).toBeVisible();
+    await expect(work).toContainText('已完成');
+    const outputImage = work.getByRole('img', { name: `作品图像 ${jobId}` });
+    await expect(outputImage).toBeVisible();
+    await expect.poll(() => outputImage.evaluate((element) => ({
+      width: (element as HTMLImageElement).naturalWidth,
+      height: (element as HTMLImageElement).naturalHeight,
+    }))).toEqual({ width: 2048, height: 2048 });
+
+    const originalOutput = await readFile(outputPath);
+    const avatarName = jobId.slice(0, 8);
+    await work.getByRole('button', { name: '导入数字模特', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '数字模特', exact: true })).toBeVisible();
+    const avatarList = page.locator('.avatar-list');
+    const importedAvatar = avatarList.locator('article').filter({ hasText: avatarName });
+    await expect(importedAvatar).toHaveCount(1);
+    const avatarPhotos = await readdir(join(dataDirectory, 'avatars'));
+    expect(avatarPhotos).toHaveLength(1);
+    const importedAssetPath = join(dataDirectory, 'avatars', avatarPhotos[0]);
+    expect(importedAssetPath).not.toBe(outputPath);
+    expect(await readFile(importedAssetPath)).toEqual(originalOutput);
+    expect(await readFile(outputPath)).toEqual(originalOutput);
+
+    await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    await expect(work).toBeVisible();
+    await work.getByRole('button', { name: `删除作品 ${jobId}` }).click();
+    const dialog = page.getByRole('dialog', { name: '删除作品' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(`${jobId}_00001.png`);
+    await dialog.getByRole('button', { name: '确认删除' }).click();
+    await expect(work).toHaveCount(0);
+    await expect(dialog).toHaveCount(0);
+    expect(existsSync(outputPath)).toBe(false);
+    expect(await readFile(importedAssetPath)).toEqual(originalOutput);
+    expect(await readdir(join(dataDirectory, 'avatars'))).toEqual(avatarPhotos);
+    for (const [index, referencePath] of referencePaths.entries()) {
+      expect(await readFile(referencePath)).toEqual(originalReferences[index]);
+    }
+  });
+
   test('works list combines hierarchical mode and status filters', async () => {
     const avatarName = 'E2E Works Avatar';
     await createAvatar(page!, avatarName);
