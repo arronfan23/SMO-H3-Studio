@@ -122,16 +122,18 @@ videoMode 改为 `'text'|'reference'|'audio'`。文字面板 `avatarId=null/refe
 
 单元阶段实际完成：三类 UI `5bd75d51`，润色失效与跨表单互斥 `2ff34780`，busy 交接 `1fea4775`。完整 Studio 单元 200/200、类型检查通过；规格与代码质量审查均通过。Electron 与提交记录见下一步。
 
-- [ ] **步骤 4：运行单元、类型和 Electron 测试**
+- [x] **步骤 4：运行单元、类型和 Electron 测试**
 
 运行：`npx vitest run tests/unit/studio.test.tsx && npm run typecheck && npm run build && npx playwright test tests/e2e/studio.spec.ts`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/renderer/TextToVideoForm.tsx src/renderer/StudioPage.tsx src/main/llm.ts tests/unit/studio.test.tsx tests/e2e/studio.spec.ts
 git commit -m "Separate text and reference H3 video modes"
 ```
+
+Electron 与实际提交记录：三类 UI `5bd75d51`，润色失效与互斥 `2ff34780`，busy 交接 `1fea4775`，三类 E2E `ef4395b2`，隐私断言修正 `6575b0b2`，上传字节/全消息/T2VA 二次生成补强 `4ae649b8`。最终 Studio 单元 200/200、定向 E2E 3/3、完整 Studio E2E 26/26、类型检查通过；规格与代码质量审查均通过。
 
 ### 任务 4：真实视频验收
 
