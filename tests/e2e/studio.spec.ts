@@ -576,21 +576,33 @@ async function saveLlmProfile(page: Page, baseUrl: string): Promise<void> {
   await expect(page.locator('#llm-api-key')).toHaveValue('');
 }
 
-async function openStudio(page: Page, avatarName: string): Promise<void> {
+async function openStudio(page: Page, avatarName?: string): Promise<void> {
   const parent = page.locator('#studio-nav-button');
   if (await parent.getAttribute('aria-expanded') !== 'true') {
     await parent.click();
   }
   await page.locator('#studio-video-button').click();
-  await expect(
-    page.locator(`.person-preview h2:has-text("${avatarName}")`),
-  ).toBeVisible();
+  if (avatarName !== undefined) {
+    await expect(
+      page.locator(`.person-preview h2:has-text("${avatarName}")`),
+    ).toBeVisible();
+  } else {
+    await expect(page.locator('#text-mode-panel')).toBeVisible();
+  }
 }
 
-async function assertStudioReferenceLayout(page: Page, viewName: string): Promise<void> {
+async function selectCurrentAvatarReference(page: Page): Promise<void> {
+  await page.click('#reference-mode-tab');
+  await page.click('#reference-mode-panel button:has-text("使用当前模特")');
+  await expect(page.locator('#reference-mode-panel .reference-image-count'))
+    .toHaveText('1 / 9');
+}
+
+async function assertStudioAvatarLayout(page: Page, viewName: string): Promise<void> {
   const image = page.locator('.person-preview .avatar-image img');
   await image.scrollIntoViewIfNeeded();
   await expect(image).toBeVisible();
+  await expect(page.locator('.person-preview .reference-label')).toHaveCount(0);
   await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0);
 
@@ -599,12 +611,10 @@ async function assertStudioReferenceLayout(page: Page, viewName: string): Promis
       '.person-preview .avatar-image img',
     );
     const container = document.querySelector<HTMLElement>('.person-preview .avatar-image');
-    const label = document.querySelector<HTMLElement>('.person-preview .reference-label');
-    if (!imageElement || !container || !label) {
+    if (!imageElement || !container) {
       return null;
     }
     const imageRect = imageElement.getBoundingClientRect();
-    const labelRect = label.getBoundingClientRect();
     const imageStyle = getComputedStyle(imageElement);
     const containerStyle = getComputedStyle(container);
     return {
@@ -613,7 +623,6 @@ async function assertStudioReferenceLayout(page: Page, viewName: string): Promis
       objectFit: imageStyle.objectFit,
       containerAspectRatio: containerStyle.aspectRatio,
       containerOverflow: containerStyle.overflow,
-      labelOverlapsImage: labelRect.top < imageRect.bottom - 2,
       documentOverflow: document.documentElement.scrollWidth > window.innerWidth,
     };
   });
@@ -624,13 +633,20 @@ async function assertStudioReferenceLayout(page: Page, viewName: string): Promis
   expect(layout!.objectFit, viewName).toBe('contain');
   expect(layout!.containerAspectRatio, viewName).toBe('auto');
   expect(layout!.containerOverflow, viewName).toBe('visible');
-  expect(layout!.labelOverlapsImage, viewName).toBe(false);
   expect(layout!.documentOverflow, viewName).toBe(false);
 }
 
 async function readVisibleTextJobId(page: Page): Promise<string> {
   const jobId = page.locator(
     '#text-mode-panel section[aria-label="任务状态"]:visible code',
+  );
+  await expect(jobId).toHaveText(/^[0-9a-f-]{36}$/);
+  return (await jobId.textContent())!;
+}
+
+async function readVisibleReferenceJobId(page: Page): Promise<string> {
+  const jobId = page.locator(
+    '#reference-mode-panel section[aria-label="任务状态"]:visible code',
   );
   await expect(jobId).toHaveText(/^[0-9a-f-]{36}$/);
   return (await jobId.textContent())!;
@@ -829,9 +845,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     await page!.fill('#original-text', 'Original text video draft.');
     await page!.fill('#text-steps', '11');
-    await page!.click('#text-mode-panel button:has-text("AI 润色")');
-    await expect(page!.locator('#polished-text')).toBeVisible({ timeout: 30_000 });
-    await page!.fill('#polished-text', 'Edited text video polished draft.');
+    await selectCurrentAvatarReference(page!);
+    await page!.fill('#reference-original-text', 'Original reference video draft.');
+    await page!.fill('#reference-steps', '12');
+    await page!.click('#reference-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#reference-polished-text')).toBeVisible({ timeout: 30_000 });
+    await page!.fill('#reference-polished-text', 'Edited reference video polished draft.');
 
     await page!.click('#audio-mode-tab');
     await page!.click('#audio-mode-panel button:has-text("选择音频")');
@@ -847,13 +866,18 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.fill('#audio-polished-text', 'Edited audio video polished draft.');
 
     await page!.click('#text-mode-tab');
-    await expect(page!.locator('#polished-text')).toHaveValue(
-      'Edited text video polished draft.',
-    );
-    await expect(page!.locator('#text-steps')).toHaveValue('11');
-    await page!.click('#original-tab');
     await expect(page!.locator('#original-text')).toHaveValue('Original text video draft.');
-    await page!.click('#polished-tab');
+    await expect(page!.locator('#text-steps')).toHaveValue('11');
+    await page!.click('#reference-mode-tab');
+    await expect(page!.locator('#reference-polished-text')).toHaveValue(
+      'Edited reference video polished draft.',
+    );
+    await expect(page!.locator('#reference-steps')).toHaveValue('12');
+    await page!.click('#reference-original-tab');
+    await expect(page!.locator('#reference-original-text')).toHaveValue(
+      'Original reference video draft.',
+    );
+    await page!.click('#reference-polished-tab');
 
     await page!.click('#audio-mode-tab');
     await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
@@ -876,12 +900,13 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await expect(page!.locator('#audio-steps')).toHaveValue('9');
     }
 
-    await page!.click('#text-mode-tab');
-    await expect(page!.locator('#polished-text')).toHaveValue(
-      'Edited text video polished draft.',
+    await page!.click('#reference-mode-tab');
+    await expect(page!.locator('#reference-polished-text')).toHaveValue(
+      'Edited reference video polished draft.',
     );
+    await expect(page!.locator('#reference-steps')).toHaveValue('12');
+    await page!.click('#text-mode-tab');
     await expect(page!.locator('#text-steps')).toHaveValue('11');
-    await page!.click('#original-tab');
     await expect(page!.locator('#original-text')).toHaveValue('Original text video draft.');
 
     await page!.click('#audio-mode-tab');
@@ -978,31 +1003,188 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page!.locator('text=测试通过')).toBeVisible({ timeout: 15_000 });
   });
 
-  test('text-to-video with polish', async () => {
+  test('无模特文生验证 T2VA 润色参数与原文生成', async () => {
+    const originalText = 'A quiet studio shot with no reference image.';
+    await saveLlmProfile(page!, llmMock.baseUrl);
+    await openStudio(page!);
+
+    await expect(page!.locator('.studio-layout-without-avatar')).toBeVisible();
+    await expect(page!.locator('.person-preview')).toHaveCount(0);
+    await expect(page!.locator('#video-main-panel .empty-state:visible')).toHaveCount(0);
+    await expect(page!.locator('#original-text')).toBeEditable();
+    await expect(page!.locator('#text-mode-panel .button-generate')).toBeEnabled();
+
+    await page!.fill('#original-text', originalText);
+    await page!.fill('#text-duration', '7');
+    await page!.fill('#text-seed', '314');
+    await page!.fill('#text-steps', '9');
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+    const originalJobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, originalJobId, 'done');
+
+    expect(comfyMock.uploadedImages).toEqual([]);
+    expect(comfyMock.submittedPrompts).toHaveLength(1);
+    const originalGraph = comfyMock.submittedPrompts[0].prompt as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(originalGraph['136'].class_type).toBe('MiniMaxH3ImageToVideo');
+    expect(originalGraph['136'].inputs.prompt).toBe(originalText);
+    expect(originalGraph['136'].inputs).not.toHaveProperty('audio_vae');
+    expect(originalGraph['136'].inputs).not.toHaveProperty('ref_image_size');
+    expect(originalGraph['136'].inputs).not.toHaveProperty('ref_images');
+    expect(
+      Object.keys(originalGraph['136'].inputs).filter((key) =>
+        key.startsWith('ref_images.'),
+      ),
+    ).toEqual([]);
+    expect(originalGraph['226']).toBeUndefined();
+    expect(originalGraph['132'].inputs.value).toBe(7);
+    expect(originalGraph['269'].inputs.seed).toBe(314);
+    expect(originalGraph['124'].inputs.steps).toBe(9);
+    expect(originalGraph['180'].inputs.filename_prefix).toBe(
+      `SMO-H3/${originalJobId}`,
+    );
+    const originalMp4 = (await readdir(
+      join(outputDirectory, 'SMO-H3', originalJobId),
+    )).find((name) => name.endsWith('.mp4'));
+    expect(originalMp4).toBeDefined();
+
+    const requestsBefore = llmMock.requests.length;
+    await page!.click('#text-mode-panel button:has-text("AI 润色")');
+    // The shared LLM fixture returns a Ref2VA-shaped completion. For T2VA,
+    // verify the real outgoing request and generate from the original draft.
+    await expect(
+      page!.locator('#text-mode-panel button:has-text("AI 润色")'),
+    ).toBeEnabled({ timeout: 30_000 });
+    const llmRequest = llmMock.requests
+      .slice(requestsBefore)
+      .find((request) => request.method === 'POST' && request.url === '/v1/chat/completions');
+    expect(llmRequest).toBeDefined();
+    const llmBody = JSON.parse(llmRequest!.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const llmUserContent = llmBody.messages.find(
+      (message) => message.role === 'user',
+    )?.content;
+    expect(llmUserContent).toContain('Input mode: T2VA.');
+    expect(llmUserContent).toContain('Reference labels: None.');
+    expect(comfyMock.submittedPrompts).toHaveLength(1);
+
+    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    expect(
+      existsSync(join(outputDirectory, 'SMO-H3', originalJobId, originalMp4!)),
+    ).toBe(true);
+    const work = page!.locator('.works-list article').filter({ hasText: originalJobId });
+    await expect(work).toContainText('已完成');
+    await expect(work.locator('video')).toBeVisible();
+  });
+
+  test('1 图显式当前模特使用 Ref2VA 且只上传一张', async () => {
     const avatarName = 'E2E Text Avatar';
-    const originalText = 'A woman waves and says hello.';
+    const originalText = 'The current avatar waves in one explicit reference.';
     await createAvatar(page!, avatarName);
     await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!, avatarName);
 
-    await page!.fill('#original-text', originalText);
-    await page!.click('button:has-text("AI 润色")');
-    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
-    await expect(page!.locator('#polished-tab')).toHaveAttribute('aria-selected', 'true');
-    const polishedText = await page!.inputValue('#polished-text');
+    await page!.fill('#original-text', 'Independent text-mode draft.');
+    await page!.fill('#text-steps', '11');
+    await page!.click('#reference-mode-tab');
+    await expect(page!.locator('#reference-original-text')).toHaveValue('');
+    await expect(page!.locator('#original-text')).toHaveValue(
+      'Independent text-mode draft.',
+    );
+    await expect(page!.locator('#reference-mode-panel .reference-image-count'))
+      .toHaveText('0 / 9');
+    await expect(page!.locator('#reference-mode-panel .reference-image-preview img'))
+      .toHaveCount(0);
+
+    await page!.click('#reference-mode-panel button:has-text("使用当前模特")');
+    await expect(page!.locator('#reference-mode-panel .reference-image-count'))
+      .toHaveText('1 / 9');
+    await expect(page!.locator('#reference-mode-panel .reference-image-preview img'))
+      .toHaveCount(1);
+    const [avatarPhotoName] = await readdir(join(dataDirectory, 'avatars'));
+    expect(avatarPhotoName).toMatch(/^[0-9a-f-]{36}\.png$/);
+    await expect(page!.locator('#reference-mode-panel .reference-image-filename'))
+      .toHaveText(avatarPhotoName);
+    expect(comfyMock.uploadedImages).toEqual([]);
+
+    await page!.fill('#reference-original-text', originalText);
+    await page!.fill('#reference-duration', '6');
+    await page!.fill('#reference-seed', '271');
+    await page!.fill('#reference-steps', '10');
+    await page!.click('#text-mode-tab');
+    await expect(page!.locator('#original-text')).toHaveValue(
+      'Independent text-mode draft.',
+    );
+    await expect(page!.locator('#text-steps')).toHaveValue('11');
+    await page!.click('#reference-mode-tab');
+    await expect(page!.locator('#reference-original-text')).toHaveValue(originalText);
+    await expect(page!.locator('#reference-mode-panel .reference-image-count'))
+      .toHaveText('1 / 9');
+
+    const requestsBefore = llmMock.requests.length;
+    await page!.click('#reference-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#reference-polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await expect(page!.locator('#reference-polished-tab')).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    const polishedText = await page!.inputValue('#reference-polished-text');
     expect(polishedText).toContain('subject_definitions:');
 
-    await page!.click('#original-tab');
-    await expect(page!.locator('#original-text')).toHaveValue(originalText);
-    await page!.click('#polished-tab');
-    await expect(page!.locator('#polished-text')).toHaveValue(polishedText);
-    await page!.fill('#polished-text', 'Polished: a woman waves and says hello.');
+    const llmRequest = llmMock.requests
+      .slice(requestsBefore)
+      .find((request) => request.method === 'POST' && request.url === '/v1/chat/completions');
+    expect(llmRequest).toBeDefined();
+    const llmBody = JSON.parse(llmRequest!.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const llmUserContent = llmBody.messages.find(
+      (message) => message.role === 'user',
+    )?.content;
+    expect(llmUserContent).toContain('Input mode: REF2VA.');
+    expect(llmUserContent).toContain('Reference labels: <Picture 1>.');
+    expect(llmRequest!.body).not.toContain(launchOptions.fileDialogPaths[0]);
+
+    await page!.click('#reference-original-tab');
+    await expect(page!.locator('#reference-original-text')).toHaveValue(originalText);
+    await page!.click('#reference-polished-tab');
+    await expect(page!.locator('#reference-polished-text')).toHaveValue(polishedText);
+    const editedPrompt = 'Polished one-reference prompt with no implicit second image.';
+    await page!.fill('#reference-polished-text', editedPrompt);
 
     const previousCount = comfyMock.submittedPromptIds.length;
-    await page!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(page!);
+    await page!.click('#reference-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleReferenceJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
+    expect(comfyMock.uploadedImages).toEqual([`${jobId}-0.png`]);
+    const graph = comfyMock.submittedPrompts[previousCount].prompt as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(graph['136'].class_type).toBe('MiniMaxH3ReferenceToVideo');
+    expect(graph['136'].inputs.prompt).toBe(editedPrompt);
+    expect(graph['136'].inputs).not.toHaveProperty('ref_images');
+    expect(
+      Object.keys(graph['136'].inputs).filter((key) => key.startsWith('ref_images.')),
+    ).toEqual(['ref_images.ref_image_0']);
+    expect(graph['136'].inputs['ref_images.ref_image_0']).toEqual(['226', 0]);
+    expect(graph['226']).toEqual({
+      class_type: 'LoadImage',
+      inputs: { image: `${jobId}-0.png` },
+    });
+    expect(graph.ref2).toBeUndefined();
+    expect(graph['132'].inputs.value).toBe(6);
+    expect(graph['269'].inputs.seed).toBe(271);
+    expect(graph['124'].inputs.steps).toBe(10);
+    expect(graph['180'].inputs.filename_prefix).toBe(`SMO-H3/${jobId}`);
+    expect(await readdir(join(dataDirectory, 'uploads'))).toEqual([]);
+    const outputName = (await readdir(join(outputDirectory, 'SMO-H3', jobId)))
+      .find((name) => name.endsWith('.mp4'));
+    expect(outputName).toBeDefined();
 
     await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
     const work = page!.locator('.works-list article').filter({ hasText: jobId });
@@ -1010,6 +1192,153 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(work).toContainText('已完成');
     await expect(work.locator('video')).toBeVisible();
     await waitForVideoReadyByJobId(page!, jobId);
+  });
+
+  test('9 张无模特参考图按顺序润色、上传并生成 Ref2VA', async () => {
+    const referenceDirectory = join(tempDirectory!, 'video-references-9');
+    await mkdir(referenceDirectory, { recursive: true });
+    const referencePaths: string[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      const referencePath = join(referenceDirectory, `reference-${index + 1}.png`);
+      await sharp({
+        create: {
+          width: 96 + index,
+          height: 128 + index,
+          channels: 3,
+          background: {
+            r: 24 + index * 20,
+            g: 180 - index * 12,
+            b: 48 + index * 16,
+          },
+        },
+      }).png().toFile(referencePath);
+      referencePaths.push(referencePath);
+    }
+    const originalReferences = await Promise.all(
+      referencePaths.map((referencePath) => readFile(referencePath)),
+    );
+
+    await app!.close();
+    app = undefined;
+    page = undefined;
+    app = await launchApp({ ...launchOptions, fileDialogPaths: referencePaths });
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    await expect(page).toHaveTitle('SMO.H3 Studio');
+    await saveLlmProfile(page, llmMock.baseUrl);
+    await openStudio(page);
+    await page.click('#reference-mode-tab');
+
+    for (const index of referencePaths.keys()) {
+      const selectButton = page.locator(
+        '#reference-mode-panel button:has-text("选择参考图")',
+      );
+      await expect(selectButton).toBeEnabled();
+      await selectButton.click();
+      await expect(page.locator('#reference-mode-panel .reference-image-count'))
+        .toHaveText(`${index + 1} / 9`);
+      await expect(page.locator('#reference-mode-panel .reference-image-preview img'))
+        .toHaveCount(index + 1);
+      const preview = page.getByRole('img', {
+        name: `参考图 ${index + 1}：reference-${index + 1}.png`,
+      });
+      await expect(preview).toBeVisible();
+      await expect.poll(() =>
+        preview.evaluate((element) => (element as HTMLImageElement).naturalWidth),
+      ).toBe(96 + index);
+    }
+    await expect(page.locator('#reference-mode-panel .reference-image-filename'))
+      .toHaveText(referencePaths.map((_, index) => `reference-${index + 1}.png`));
+    await expect(
+      page.locator('#reference-mode-panel button:has-text("选择参考图")'),
+    ).toBeDisabled();
+
+    const originalText = 'Nine ordered references with no avatar and no path leakage.';
+    await page.fill('#reference-original-text', originalText);
+    await page.fill('#reference-duration', '11');
+    await page.fill('#reference-seed', '999');
+    await page.fill('#reference-steps', '12');
+    const requestsBefore = llmMock.requests.length;
+    await page.click('#reference-mode-panel button:has-text("AI 润色")');
+    await expect(page.locator('#reference-polished-tab')).toBeEnabled({ timeout: 30_000 });
+    const llmRequest = llmMock.requests
+      .slice(requestsBefore)
+      .find((request) => request.method === 'POST' && request.url === '/v1/chat/completions');
+    expect(llmRequest).toBeDefined();
+    const llmBody = JSON.parse(llmRequest!.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const llmUserContent = llmBody.messages.find(
+      (message) => message.role === 'user',
+    )?.content;
+    expect(llmUserContent).toContain('Input mode: REF2VA.');
+    expect(llmUserContent).toContain(
+      `Reference labels: ${Array.from(
+        { length: 9 },
+        (_, index) => `<Picture ${index + 1}>`,
+      ).join(', ')}.`,
+    );
+    for (const referencePath of referencePaths) {
+      expect(llmRequest!.body).not.toContain(referencePath);
+    }
+    expect(llmRequest!.body).not.toContain(referenceDirectory);
+
+    const editedPrompt = 'Polished nine-reference prompt in the selected order.';
+    await page.fill('#reference-polished-text', editedPrompt);
+    await page.click('#reference-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleReferenceJobId(page);
+    await waitForStableStatus(page, jobId, 'done');
+
+    expect(comfyMock.submittedPrompts).toHaveLength(1);
+    expect(comfyMock.uploadedImages).toEqual(
+      Array.from({ length: 9 }, (_, index) => `${jobId}-${index}.png`),
+    );
+    const graph = comfyMock.submittedPrompts[0].prompt as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(graph['136'].class_type).toBe('MiniMaxH3ReferenceToVideo');
+    expect(graph['136'].inputs).toMatchObject({
+      prompt: editedPrompt,
+      ref_image_size: 'match',
+      audio_vae: ['184', 0],
+    });
+    expect(graph['136'].inputs).not.toHaveProperty('ref_images');
+    expect(
+      Object.keys(graph['136'].inputs).filter((key) => key.startsWith('ref_images.')),
+    ).toEqual(
+      Array.from({ length: 9 }, (_, index) => `ref_images.ref_image_${index}`),
+    );
+    for (let index = 0; index < 9; index += 1) {
+      const nodeId = index === 0 ? '226' : `ref${index + 1}`;
+      expect(graph['136'].inputs[`ref_images.ref_image_${index}`]).toEqual([nodeId, 0]);
+      expect(graph[nodeId]).toEqual({
+        class_type: 'LoadImage',
+        inputs: { image: `${jobId}-${index}.png` },
+      });
+    }
+    expect(graph.ref1).toBeUndefined();
+    expect(graph.ref10).toBeUndefined();
+    expect(graph['132'].inputs.value).toBe(11);
+    expect(graph['269'].inputs.seed).toBe(999);
+    expect(graph['124'].inputs.steps).toBe(12);
+    expect(graph['180'].inputs.filename_prefix).toBe(`SMO-H3/${jobId}`);
+    expect(await readdir(join(dataDirectory, 'uploads'))).toEqual([]);
+    for (const [index, referencePath] of referencePaths.entries()) {
+      expect(await readFile(referencePath)).toEqual(originalReferences[index]);
+    }
+    const outputName = (await readdir(join(outputDirectory, 'SMO-H3', jobId)))
+      .find((name) => name.endsWith('.mp4'));
+    expect(outputName).toBeDefined();
+
+    await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const work = page.locator('.works-list article').filter({ hasText: jobId });
+    await expect(work).toBeVisible();
+    await expect(work).toContainText('已完成');
+    await expect(work.locator('video')).toBeVisible();
   });
 
   test('audio digital human', async () => {
@@ -1243,7 +1572,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page.locator('#image-prompt')).toHaveValue(prompt);
     await page.click('#reference-image-tab');
     await expect(page.locator('#image-prompt')).toHaveValue(prompt);
-    await expect(page.locator('.reference-image-preview img')).toHaveCount(1);
+    await expect(page.locator('#image-main-panel .reference-image-preview img')).toHaveCount(1);
     await expect(referencePreview).toBeVisible();
     await page.selectOption('#image-resolution', '1');
     await expect(page.locator('#image-resolution')).toHaveValue('1');
@@ -1397,10 +1726,11 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       });
       await expect(selectButton).toBeEnabled();
       await selectButton.click();
-      await expect(page.locator('.reference-image-count')).toHaveText(
+      await expect(page.locator('#image-main-panel .reference-image-count')).toHaveText(
         `${index + 1} / 4`,
       );
-      await expect(page.locator('.reference-image-preview img')).toHaveCount(index + 1);
+      await expect(page.locator('#image-main-panel .reference-image-preview img'))
+        .toHaveCount(index + 1);
       const preview = page.getByRole('img', {
         name: `参考图 ${index + 1}：reference-${index + 1}.png`,
       });
@@ -1409,7 +1739,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         preview.evaluate((element) => (element as HTMLImageElement).naturalWidth),
       ).toBe(definition.width);
     }
-    await expect(page.locator('.reference-image-filename')).toHaveText(
+    await expect(page.locator('#image-main-panel .reference-image-filename')).toHaveText(
       referencePaths.map((_, index) => `reference-${index + 1}.png`),
     );
     await expect(
@@ -1420,8 +1750,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page.locator('#image-prompt')).toHaveValue(prompt);
     await page.click('#reference-image-tab');
     await expect(page.locator('#image-prompt')).toHaveValue(prompt);
-    await expect(page.locator('.reference-image-count')).toHaveText('4 / 4');
-    await expect(page.locator('.reference-image-preview img')).toHaveCount(4);
+    await expect(page.locator('#image-main-panel .reference-image-count')).toHaveText('4 / 4');
+    await expect(page.locator('#image-main-panel .reference-image-preview img')).toHaveCount(4);
     await page.selectOption('#image-resolution', '4');
     await expect(page.locator('#image-resolution')).toHaveValue('4');
     await expect(page.locator('#image-main-panel .form-notice')).toContainText(
@@ -1433,7 +1763,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await setViewport(app, page, 960, 640);
     await assertViewLayout(page, 'studio-reference-four-960x640', [
       '#image-prompt',
-      '.reference-image-picker',
+      '#image-main-panel .reference-image-picker',
       '#image-resolution',
       '#image-steps',
       '#image-main-panel .button-generate',
@@ -1570,11 +1900,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!, avatarName);
 
-    await page!.fill('#original-text', 'Works list test.');
-    await page!.click('button:has-text("AI 润色")');
-    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
-    await page!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(page!);
+    await selectCurrentAvatarReference(page!);
+    await page!.fill('#reference-original-text', 'Works list test.');
+    await page!.click('#reference-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#reference-polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await page!.click('#reference-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleReferenceJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
 
     await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
@@ -1628,14 +1959,15 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!, avatarName);
 
-    await page!.fill('#original-text', 'Failure scenario test.');
-    await page!.click('button:has-text("AI 润色")');
-    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await selectCurrentAvatarReference(page!);
+    await page!.fill('#reference-original-text', 'Failure scenario test.');
+    await page!.click('#reference-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#reference-polished-tab')).toBeEnabled({ timeout: 30_000 });
 
     comfyMock.failNext();
     const previousCount = comfyMock.submittedPromptIds.length;
-    await page!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(page!);
+    await page!.click('#reference-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleReferenceJobId(page!);
     await waitForStableStatus(page!, jobId, 'failed');
     expect(comfyMock.submittedPromptIds.length).toBe(previousCount + 1);
 
@@ -1680,11 +2012,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!, avatarName);
 
-    await page!.fill('#original-text', 'Deletion removes the record and the video.');
-    await page!.click('button:has-text("AI 润色")');
-    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
-    await page!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(page!);
+    await selectCurrentAvatarReference(page!);
+    await page!.fill('#reference-original-text', 'Deletion removes the record and the video.');
+    await page!.click('#reference-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#reference-polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await page!.click('#reference-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleReferenceJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
 
     const workOutputDirectory = join(outputDirectory, 'SMO-H3', jobId);
@@ -1703,7 +2036,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await work.getByRole('button', { name: `删除作品 ${jobId}` }).click();
     const dialog = page!.getByRole('dialog', { name: '删除作品' });
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(avatarName);
+    await expect(dialog).not.toContainText(avatarName);
     await expect(dialog).toContainText(outputName!);
     await dialog.getByRole('button', { name: '确认删除' }).click();
 
@@ -1724,11 +2057,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!, avatarName);
 
-    await page!.fill('#original-text', 'Restart persistence test.');
-    await page!.click('button:has-text("AI 润色")');
-    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
-    await page!.click('#text-mode-panel button:has-text("生成视频")');
-    const jobId = await readVisibleTextJobId(page!);
+    await selectCurrentAvatarReference(page!);
+    await page!.fill('#reference-original-text', 'Restart persistence test.');
+    await page!.click('#reference-mode-panel button:has-text("AI 润色")');
+    await expect(page!.locator('#reference-polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await page!.click('#reference-mode-panel button:has-text("生成视频")');
+    const jobId = await readVisibleReferenceJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
 
     await app!.close();
@@ -1846,10 +2180,10 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       // text mode explicitly instead of relying on an implicit reset.
       await page!.click('#text-mode-tab');
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
-      await assertStudioReferenceLayout(page!, `studio-${viewport.width}x${viewport.height}`);
+      await assertStudioAvatarLayout(page!, `studio-${viewport.width}x${viewport.height}`);
       await assertViewLayout(page!, 'studio-text', [
         '.person-preview .avatar-image img',
-        '.person-preview .reference-label',
+        '#reference-mode-tab',
         '#original-text',
         '#polished-tab',
         '#text-mode-panel .button-generate',
@@ -1971,10 +2305,10 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     await page!.locator('#studio-video-button').click();
     await expect(page!.locator('#text-mode-panel')).toBeVisible();
-    await assertStudioReferenceLayout(page!, 'studio-200-zoom');
+    await assertStudioAvatarLayout(page!, 'studio-200-zoom');
     await assertViewLayout(page!, 'studio-200-zoom', [
       '.person-preview .avatar-image img',
-      '.person-preview .reference-label',
+      '#reference-mode-tab',
       '#original-text',
       '#text-mode-panel .button-generate',
     ]);
