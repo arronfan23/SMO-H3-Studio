@@ -11,6 +11,7 @@ import {
 import {
   pythonRoundHalfEven,
   resolveH3Resolution,
+  resolveReferenceResolution,
   resolveResolutionForDimensions,
 } from '../../src/shared/resolution';
 
@@ -62,6 +63,38 @@ describe('pythonRoundHalfEven', () => {
   ])('rounds %s to %s with ties to even', (value, expected) => {
     expect(pythonRoundHalfEven(value)).toBe(expected);
   });
+});
+
+describe('resolveReferenceResolution', () => {
+  test.each([
+    [2048, 2048, 2048],
+    [1440, 1440, 1440],
+    [1024, 1024, 1024],
+    [1344, 768, 1024],
+    [1920, 1080, 1440],
+    [1000, 1000, 992],
+  ])(
+    'resolves %sx%s to the geometric-mean 32-pixel grid value %s',
+    (width, height, expected) => {
+      expect(resolveReferenceResolution(width, height)).toBe(expected);
+    },
+  );
+
+  test.each([
+    [48, 48, 64],
+    [80, 80, 64],
+    [112, 112, 128],
+  ])('rounds %sx%s grid-unit ties to even as %s', (width, height, expected) => {
+    expect(resolveReferenceResolution(width, height)).toBe(expected);
+  });
+
+  test.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'rejects invalid reference dimension %s',
+    (dimension) => {
+      expect(() => resolveReferenceResolution(dimension, 1024)).toThrow(RangeError);
+      expect(() => resolveReferenceResolution(1024, dimension)).toThrow(RangeError);
+    },
+  );
 });
 
 describe('resolveH3Resolution', () => {

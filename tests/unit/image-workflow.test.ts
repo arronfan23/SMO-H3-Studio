@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import {
   patchQwenImageWorkflow,
+  patchQwenReferenceImageWorkflow,
   type ImageWorkflowGraph,
   type QwenImagePatchOptions,
 } from '../../src/main/image-workflow';
@@ -75,6 +76,31 @@ function renameNodes(graph: ImageWorkflowGraph): ImageWorkflowGraph {
       },
     ]),
   );
+}
+
+function inputNodeIds(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    if (value.length === 2 && typeof value[0] === 'string' && typeof value[1] === 'number') {
+      return [value[0]];
+    }
+    return value.flatMap(inputNodeIds);
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.values(value).flatMap(inputNodeIds);
+  }
+  return [];
+}
+
+function reachableNodeIds(graph: ImageWorkflowGraph, start: string): Set<string> {
+  const reached = new Set<string>();
+  const pending = [start];
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (reached.has(id)) continue;
+    reached.add(id);
+    pending.push(...inputNodeIds(graph[id].inputs));
+  }
+  return reached;
 }
 
 describe('frozen Qwen Image 2.1 API graph', () => {
@@ -298,5 +324,145 @@ describe('patchQwenImageWorkflow', () => {
         seed: options.seed,
       });
     }
+  });
+
+  test('keeps the empty latent path when no reference images are supplied', () => {
+    const { graph, nodeIds } = patchQwenImageWorkflow(frozenGraph(), validOptions);
+
+    expect(graph[nodeIds.sampler].inputs.latent_image).toEqual([nodeIds.latent, 0]);
+    expect(graph[nodeIds.text].inputs).not.toHaveProperty('images');
+    expect(graph[nodeIds.text].inputs).not.toHaveProperty('vae');
+  });
+});
+
+describe('patchQwenReferenceImageWorkflow', () => {
+  test.each([1, 4])(
+    'adds %s ordered references and preserves model, decode, and output links',
+    (count) => {
+      const source = frozenGraph();
+      const before = structuredClone(source);
+      const uploadedNames = Array.from({ length: count }, (_, index) => `image-${index + 1}.png`);
+      const options = {
+        ...validOptions,
+        width: 1440,
+        height: 1440,
+        seed: 987,
+        steps: 36,
+      };
+      const { graph, nodeIds } = patchQwenReferenceImageWorkflow(
+        source,
+        options,
+        uploadedNames,
+      );
+      const expectedImages = Object.fromEntries(
+        uploadedNames.map((_, index) => [`image_${index + 1}`, [`ref${index + 1}`, 0]]),
+      );
+
+      for (const [index, uploadedName] of uploadedNames.entries()) {
+        expect(graph[`ref${index + 1}`]).toEqual({
+          class_type: 'LoadImage',
+          inputs: { image: uploadedName },
+        });
+      }
+      expect(graph[nodeIds.text].inputs).toMatchObject({
+        clip: [nodeIds.clip, 0],
+        prompt: options.prompt,
+        vae: [nodeIds.vae, 0],
+        resolution: 1440,
+      });
+      expect(graph[nodeIds.text].inputs.images).toEqual(expectedImages);
+      expect(Object.keys(graph[nodeIds.text].inputs.images as object)).toEqual(
+        uploadedNames.map((_, index) => `image_${index + 1}`),
+      );
+      expect(graph[nodeIds.latent].inputs).toMatchObject({
+        width: options.width,
+        height: options.height,
+      });
+      expect(graph[nodeIds.sampler].inputs).toMatchObject({
+        model: [nodeIds.cache, 0],
+        positive: [nodeIds.text, 0],
+        negative: [nodeIds.text, 1],
+        latent_image: [nodeIds.text, 2],
+        seed: options.seed,
+        steps: options.steps,
+      });
+      expect(graph[nodeIds.cache].inputs).toEqual(before[nodeIds.cache].inputs);
+      expect(graph[nodeIds.decode].inputs).toEqual(before[nodeIds.decode].inputs);
+      expect(graph[nodeIds.output].inputs).toEqual(before[nodeIds.output].inputs);
+      expect(reachableNodeIds(graph, nodeIds.output)).not.toContain(nodeIds.latent);
+      expect(source).toEqual(before);
+    },
+  );
+
+  test('uses dynamically discovered node ids', () => {
+    const source = renameNodes(frozenGraph());
+    const { graph, nodeIds } = patchQwenReferenceImageWorkflow(source, validOptions, [
+      'reference.png',
+    ]);
+
+    expect(nodeIds.text).toBe('text');
+    expect(graph.ref1).toEqual({
+      class_type: 'LoadImage',
+      inputs: { image: 'reference.png' },
+    });
+    expect(graph.text.inputs).toMatchObject({
+      vae: ['vae', 0],
+      resolution: 1024,
+      images: { image_1: ['ref1', 0] },
+    });
+    expect(graph.sampler.inputs).toMatchObject({
+      model: ['cache', 0],
+      latent_image: ['text', 2],
+    });
+    expect(graph.decode.inputs).toEqual(source.decode.inputs);
+    expect(graph.output.inputs).toEqual(source.output.inputs);
+  });
+
+  test('does not accumulate reference nodes across calls on the same frozen source', () => {
+    const source = Object.freeze(frozenGraph());
+    const before = structuredClone(source);
+    const first = patchQwenReferenceImageWorkflow(source, validOptions, ['one.png', 'two.png']);
+    const second = patchQwenReferenceImageWorkflow(source, validOptions, ['one.png', 'two.png']);
+
+    expect(second.graph).toEqual(first.graph);
+    expect(Object.keys(second.graph).filter((id) => /^ref[1-4]$/.test(id))).toEqual([
+      'ref1',
+      'ref2',
+    ]);
+    expect(source).toEqual(before);
+  });
+
+  test.each<{ uploadedNames: string[] }>([
+    { uploadedNames: [] },
+    { uploadedNames: ['one.png', 'two.png', 'three.png', 'four.png', 'five.png'] },
+  ])(
+    'rejects invalid uploaded image count $uploadedNames',
+    ({ uploadedNames }) => {
+      expect(() =>
+        patchQwenReferenceImageWorkflow(frozenGraph(), validOptions, uploadedNames),
+      ).toThrow(/uploadedNames/);
+    },
+  );
+
+  test.each(['', '   '])('rejects empty uploaded image name %s', (emptyName) => {
+    expect(() =>
+      patchQwenReferenceImageWorkflow(frozenGraph(), validOptions, ['valid.png', emptyName]),
+    ).toThrow(/non-empty/);
+  });
+
+  test.each(['ref1', 'ref4'])('rejects an existing %s node without overwriting it', (id) => {
+    const source = frozenGraph();
+    source[id] = { class_type: 'LoadImage', inputs: { image: 'existing.png' } };
+    const before = structuredClone(source);
+
+    expect(() =>
+      patchQwenReferenceImageWorkflow(source, validOptions, [
+        'one.png',
+        'two.png',
+        'three.png',
+        'four.png',
+      ]),
+    ).toThrow(new RegExp(`${id}.*already exists`));
+    expect(source).toEqual(before);
   });
 });

@@ -1,3 +1,5 @@
+import { resolveReferenceResolution } from '../shared/resolution';
+
 export interface ImageWorkflowNode {
   class_type: string;
   inputs: Record<string, unknown>;
@@ -74,6 +76,44 @@ export function patchQwenImageWorkflow(
   graph[nodeIds.latent].inputs.height = options.height;
   graph[nodeIds.sampler].inputs.seed = options.seed;
   graph[nodeIds.sampler].inputs.steps = options.steps;
+
+  return { graph, nodeIds };
+}
+
+export function patchQwenReferenceImageWorkflow(
+  source: ImageWorkflowGraph,
+  options: QwenImagePatchOptions,
+  uploadedNames: string[],
+): { graph: ImageWorkflowGraph; nodeIds: QwenImageNodeIds } {
+  if (uploadedNames.length < 1 || uploadedNames.length > 4) {
+    throw new RangeError('uploadedNames must contain between 1 and 4 image names');
+  }
+  if (uploadedNames.some((name) => typeof name !== 'string' || name.trim().length === 0)) {
+    throw new Error('uploadedNames must contain only non-empty image names');
+  }
+
+  const referenceIds = uploadedNames.map((_, index) => `ref${index + 1}`);
+  for (const id of referenceIds) {
+    if (Object.prototype.hasOwnProperty.call(source, id)) {
+      throw new Error(`Reference image node id ${id} already exists`);
+    }
+  }
+
+  const { graph, nodeIds } = patchQwenImageWorkflow(source, options);
+  const images: Record<string, [string, number]> = {};
+  for (const [index, uploadedName] of uploadedNames.entries()) {
+    const id = referenceIds[index];
+    graph[id] = { class_type: 'LoadImage', inputs: { image: uploadedName } };
+    images[`image_${index + 1}`] = [id, 0];
+  }
+
+  graph[nodeIds.text].inputs.vae = [nodeIds.vae, 0];
+  graph[nodeIds.text].inputs.resolution = resolveReferenceResolution(
+    options.width,
+    options.height,
+  );
+  graph[nodeIds.text].inputs.images = images;
+  graph[nodeIds.sampler].inputs.latent_image = [nodeIds.text, 2];
 
   return { graph, nodeIds };
 }

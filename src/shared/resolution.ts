@@ -28,6 +28,18 @@ export function pythonRoundHalfEven(value: number): number {
   return floor % 2 === 0 ? floor : floor + 1;
 }
 
+/** Matches the Qwen reference encoder's geometric-mean resolution input. */
+export function resolveReferenceResolution(width: number, height: number): number {
+  if (!Number.isFinite(width) || width <= 0) {
+    throw new RangeError('width must be a finite positive number');
+  }
+  if (!Number.isFinite(height) || height <= 0) {
+    throw new RangeError('height must be a finite positive number');
+  }
+
+  return pythonRoundHalfEven(Math.sqrt(width * height) / 32) * 32;
+}
+
 /** Matches the H3 ResolutionSelector node's pixel math (multiple-of-32 grid). */
 export function resolveH3Resolution(
   aspectRatio: AspectRatio,
