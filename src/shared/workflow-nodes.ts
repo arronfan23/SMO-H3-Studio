@@ -47,3 +47,27 @@ export const ALLOWED_WORKFLOW_PATHS: ReadonlySet<string> = new Set([
   ...Object.values(WORKFLOW_PATHS.text),
   ...Object.values(WORKFLOW_PATHS.audio),
 ]);
+
+type WorkflowGraph = Record<
+  string,
+  { class_type: string; inputs: Record<string, unknown> }
+>;
+
+export function createNoReferenceTextWorkflow<T extends WorkflowGraph>(source: T): T {
+  const promptId = WORKFLOW_NODES.text.prompt;
+  const promptNode = source[promptId];
+  if (!promptNode) {
+    throw new Error(`Missing workflow node: ${promptId}`);
+  }
+  const { clip, vae, prompt, width, height, length } = promptNode.inputs;
+  const copy: WorkflowGraph = {
+    ...source,
+    [promptId]: {
+      ...promptNode,
+      class_type: 'MiniMaxH3ImageToVideo',
+      inputs: { clip, vae, prompt, width, height, length },
+    },
+  };
+  delete copy[WORKFLOW_NODES.text.image];
+  return copy as T;
+}

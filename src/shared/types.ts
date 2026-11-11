@@ -5,11 +5,12 @@ export type SpeechMode = 'custom' | 'clone';
 
 export interface VideoGenerationRequest {
   mode: VideoMode;
-  avatarId: string;
+  avatarId: string | null;
   prompt: string;
   duration: number;
   seed: number;
   steps: number;
+  referenceImagePaths?: string[];
   audioPath?: string;
   trimStart?: number;
   retryOf?: string;

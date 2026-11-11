@@ -85,6 +85,7 @@ const generationRequest = {
   duration: 8,
   seed: 42,
   steps: 12,
+  referenceImagePaths: [] as string[],
 } as const;
 
 const speechGenerationRequest: SpeechGenerationRequest = {
@@ -333,6 +334,90 @@ describe('IPC input schema', () => {
         payload: { ...generationRequest, mode: 'audio' },
       }),
     ).toThrow(/audioPath/i);
+  });
+
+  test('accepts no reference text generation with a null avatarId', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: {
+        ...generationRequest,
+        avatarId: null,
+        referenceImagePaths: [],
+      },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('defaults no reference paths for a legacy avatar request', () => {
+    const { referenceImagePaths: _referenceImagePaths, ...payload } =
+      generationRequest;
+
+    expect(
+      createIpcSchema().parse({ channel: 'jobs:start', payload }),
+    ).toEqual({
+      channel: 'jobs:start',
+      payload: { ...payload, avatarId: 'avatar-1', referenceImagePaths: [] },
+    });
+  });
+
+  test('accepts nine ordered reference paths at the IPC boundary', () => {
+    const referenceImagePaths = Array.from(
+      { length: 9 },
+      (_, index) => `G:\\refs\\${9 - index}.png`,
+    );
+    const request = {
+      channel: 'jobs:start',
+      payload: { ...generationRequest, avatarId: null, referenceImagePaths },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([
+    Array.from({ length: 10 }, (_, index) => `G:\\refs\\${index}.png`),
+    [''],
+    ['   '],
+    ['G:\\refs\\valid.png', 42],
+    null,
+    'G:\\refs\\not-an-array.png',
+  ])('rejects invalid video reference paths: %j', (referenceImagePaths) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...generationRequest, avatarId: null, referenceImagePaths },
+      }),
+    ).toThrow();
+  });
+
+  test.each([
+    { avatarId: '' },
+    { avatarId: '   ' },
+    { unknown: true },
+  ])('keeps no reference video input strict: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...generationRequest, avatarId: null, ...override },
+      }),
+    ).toThrow();
+  });
+
+  test.each([
+    { avatarId: null, referenceImagePaths: [] },
+    { avatarId: 'avatar-1', referenceImagePaths: ['G:\\refs\\one.png'] },
+  ])('keeps audio avatar and no reference constraints: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: {
+          ...generationRequest,
+          mode: 'audio',
+          audioPath: 'G:\\audio\\voice.mp3',
+          ...override,
+        },
+      }),
+    ).toThrow();
   });
 
   test('rejects subtitle preferences in new generation requests', () => {

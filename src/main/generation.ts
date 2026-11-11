@@ -18,7 +18,11 @@ import {
   type SparkAccelerationEnvironment,
 } from './spark-acceleration';
 import { patchWorkflow } from '../shared/workflow';
-import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
+import {
+  createNoReferenceTextWorkflow,
+  WORKFLOW_NODES,
+  WORKFLOW_PATHS,
+} from '../shared/workflow-nodes';
 import type {
   GenerationRequest,
   GenerationStartResult,
@@ -103,6 +107,7 @@ function sanitizeRequest(request: VideoGenerationRequest): VideoGenerationReques
     duration: request.duration,
     seed: request.seed,
     steps: request.steps,
+    referenceImagePaths: [...(request.referenceImagePaths ?? [])],
   };
   if (request.audioPath !== undefined) {
     sanitized.audioPath = request.audioPath;
@@ -115,10 +120,25 @@ function sanitizeRequest(request: VideoGenerationRequest): VideoGenerationReques
 
 function validateRequest(request: VideoGenerationRequest): void {
   if (
-    typeof request.avatarId !== 'string' ||
-    request.avatarId.trim().length === 0
+    request.avatarId !== null &&
+    (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0)
   ) {
     throw new Error('avatarId must not be empty');
+  }
+  const referenceImagePaths = request.referenceImagePaths === undefined
+    ? []
+    : request.referenceImagePaths;
+  if (
+    !Array.isArray(referenceImagePaths) ||
+    referenceImagePaths.length > 9 ||
+    referenceImagePaths.some(
+      (path) => typeof path !== 'string' || path.trim().length === 0,
+    )
+  ) {
+    throw new Error('referenceImagePaths must contain at most 9 non-empty strings');
+  }
+  if (referenceImagePaths.length > 0) {
+    throw new Error('Video reference images are not supported yet');
   }
   if (typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
     throw new Error('Generation prompt must not be empty');
@@ -137,6 +157,9 @@ function validateRequest(request: VideoGenerationRequest): void {
   }
   if (request.mode !== 'audio') {
     throw new Error(`Invalid video mode: ${String(request.mode)}`);
+  }
+  if (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0) {
+    throw new Error('avatarId must not be empty');
   }
   if (typeof request.audioPath !== 'string' || request.audioPath.trim().length === 0) {
     throw new Error('audioPath is required for audio generation');
@@ -315,10 +338,10 @@ export function createGenerationHandler(
       throw new Error('Image generation requires the image generation handler');
     }
     validateRequest(input);
-    const avatar = store
-      .listAvatars()
-      .find((candidate) => candidate.id === input.avatarId);
-    if (!avatar) {
+    const avatar = input.avatarId === null
+      ? null
+      : store.listAvatars().find((candidate) => candidate.id === input.avatarId);
+    if (input.avatarId !== null && !avatar) {
       throw new Error(`Avatar not found: ${input.avatarId}`);
     }
     if (jobCoordinator.activeCount > 0) {
@@ -531,10 +554,12 @@ export function createGenerationHandler(
         await options.ensureReady?.();
         throwIfCancelled();
         setExecution('uploading');
-        const image = await comfy.uploadFile({
-          filePath: avatar.photoPath,
-          kind: 'image',
-        });
+        const image = request.avatarId === null
+          ? undefined
+          : await comfy.uploadFile({
+              filePath: avatar!.photoPath,
+              kind: 'image',
+            });
         throwIfCancelled();
         const audio =
           request.mode === 'audio'
@@ -559,7 +584,9 @@ export function createGenerationHandler(
         const changes: Record<string, unknown> =
           request.mode === 'text'
             ? {
-                [WORKFLOW_PATHS.text.image]: image,
+                ...(request.avatarId === null
+                  ? {}
+                  : { [WORKFLOW_PATHS.text.image]: image }),
                 [WORKFLOW_PATHS.text.prompt]: request.prompt,
                 [WORKFLOW_PATHS.text.duration]: request.duration,
                 [WORKFLOW_PATHS.text.seed]: request.seed,
@@ -580,7 +607,10 @@ export function createGenerationHandler(
         if (request.mode === 'text' && request.steps === 1) {
           changes[WORKFLOW_PATHS.text.sigmaRefinerStart] = 20;
         }
-        const patched = patchWorkflow(frozen, changes);
+        const patchedWithReferences = patchWorkflow(frozen, changes);
+        const patched = request.mode === 'text' && request.avatarId === null
+          ? createNoReferenceTextWorkflow(patchedWithReferences)
+          : patchedWithReferences;
         if (request.mode === 'audio' && request.steps === 1) {
           // A one-step BasicScheduler is [sigma, 0]. Force one intermediate
           // sigma so SelfLift can run one low- and one high-resolution NFE.
@@ -704,8 +734,22 @@ function isRetryableRequest(value: unknown): value is RetryableRequest {
   if (request.mode !== 'text' && request.mode !== 'audio') {
     return false;
   }
-  if (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0) {
+  const hasAvatar =
+    typeof request.avatarId === 'string' && request.avatarId.trim().length > 0;
+  if (!hasAvatar && !(request.mode === 'text' && request.avatarId === null)) {
     return false;
+  }
+  if (request.referenceImagePaths !== undefined) {
+    if (
+      !Array.isArray(request.referenceImagePaths) ||
+      request.referenceImagePaths.length > 9 ||
+      request.referenceImagePaths.some(
+        (path) => typeof path !== 'string' || path.trim().length === 0,
+      ) ||
+      request.referenceImagePaths.length > 0
+    ) {
+      return false;
+    }
   }
   if (typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
     return false;
@@ -843,21 +887,25 @@ export function createRetryHandler(
       ...storedRequest,
       steps: storedRequest.steps ?? (storedRequest.mode === 'text' ? 8 : 6),
     };
-    const avatar = store.listAvatars().find((candidate) => candidate.id === request.avatarId);
-    if (avatar === undefined) {
-      throw new Error(`Avatar not found: ${request.avatarId}`);
-    }
+    if (request.avatarId !== null) {
+      const avatar = store
+        .listAvatars()
+        .find((candidate) => candidate.id === request.avatarId);
+      if (avatar === undefined) {
+        throw new Error(`Avatar not found: ${request.avatarId}`);
+      }
 
-    try {
-      const photoStats = await stat(avatar.photoPath);
-      if (!photoStats.isFile()) {
-        throw new Error('Avatar photo is not a file');
+      try {
+        const photoStats = await stat(avatar.photoPath);
+        if (!photoStats.isFile()) {
+          throw new Error('Avatar photo is not a file');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error('Original avatar photo is missing');
+        }
+        throw error;
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new Error('Original avatar photo is missing');
-      }
-      throw error;
     }
 
     if (request.mode === 'audio') {

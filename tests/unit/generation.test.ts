@@ -19,8 +19,10 @@ import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 import { MediaRegistry } from '../../src/main/media';
 import type { SparkAccelerationEnvironment } from '../../src/main/spark-acceleration';
 import { Store } from '../../src/main/store';
+import { createNoReferenceTextWorkflow } from '../../src/shared/workflow-nodes';
 import type {
   GenerationRequest,
+  VideoGenerationRequest,
   Work,
   WorkExecutionState,
   WorkProgress,
@@ -244,6 +246,7 @@ async function createHarness(
     duration: 8,
     seed: 42,
     steps: 12,
+    referenceImagePaths: [],
   };
   const audioRequest: GenerationRequest = {
     ...textRequest,
@@ -1000,6 +1003,267 @@ describe('GenerationHandler workflows', () => {
   });
 });
 
+describe('GenerationHandler no reference text to video', () => {
+  function noReferenceRequest(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+  ): VideoGenerationRequest {
+    return {
+      ...harness.textRequest,
+      mode: 'text',
+      avatarId: null,
+      referenceImagePaths: [],
+    } as VideoGenerationRequest;
+  }
+
+  test('submits T2VA without avatar lookup or image upload and records the output', async () => {
+    const harness = await createHarness();
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    const workflowPath = join(workflowsDirectory, 'text-ref2va.json');
+    const frozenSource = await readFile(workflowPath, 'utf8');
+    const request = noReferenceRequest(harness);
+
+    const result = await harness.startGeneration(request);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    const expected = JSON.parse(frozenSource) as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    delete expected['226'];
+    expected['136'].class_type = 'MiniMaxH3ImageToVideo';
+    expected['136'].inputs = {
+      clip: expected['136'].inputs.clip,
+      vae: expected['136'].inputs.vae,
+      prompt: request.prompt,
+      width: expected['136'].inputs.width,
+      height: expected['136'].inputs.height,
+      length: expected['136'].inputs.length,
+    };
+    expected['132'].inputs.value = request.duration;
+    expected['269'].inputs.seed = request.seed;
+    expected['124'].inputs.steps = request.steps;
+    expected['180'].inputs.filename_prefix = `SMO-H3/${result.id}`;
+    expect(harness.comfy.submissions).toEqual([expected]);
+    expect(work).toMatchObject({
+      id: result.id,
+      avatarId: null,
+      mode: 'text',
+      status: 'done',
+      outputPath: join(harness.outputDirectory, 'SMO-H3', 'result.mp4'),
+      promptId: 'prompt-1',
+      metadata: { request, workflowVersion: 'text-ref2va.json' },
+    });
+    expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
+  });
+
+  test('creates an immutable T2VA graph without flat or nested reference inputs', () => {
+    const source = {
+      '136': {
+        class_type: 'MiniMaxH3ReferenceToVideo',
+        inputs: {
+          clip: ['128', 0],
+          vae: ['194', 0],
+          prompt: 'prompt',
+          width: ['115', 0],
+          height: ['115', 1],
+          length: ['131', 1],
+          audio_vae: ['184', 0],
+          ref_image_size: 'match',
+          'ref_images.ref_image_0': ['226', 0],
+          ref_images: { ref_image_1: ['227', 0] },
+        },
+      },
+      '226': { class_type: 'LoadImage', inputs: { image: 'avatar.png' } },
+      '180': { class_type: 'SaveVideo', inputs: { filename_prefix: 'SMO-H3' } },
+    };
+    const snapshot = structuredClone(source);
+
+    const converted = createNoReferenceTextWorkflow(source);
+
+    expect(source).toEqual(snapshot);
+    expect(converted).not.toBe(source);
+    expect(converted['136']).toMatchObject({
+      class_type: 'MiniMaxH3ImageToVideo',
+      inputs: {
+        clip: ['128', 0],
+        vae: ['194', 0],
+        prompt: 'prompt',
+        width: ['115', 0],
+        height: ['115', 1],
+        length: ['131', 1],
+      },
+    });
+    expect(converted['136'].inputs).not.toHaveProperty('image');
+    expect(converted).not.toHaveProperty('226');
+    expect(converted['180']).toBe(source['180']);
+  });
+
+  test.each([
+    null,
+    'G:\\refs\\not-an-array.png',
+    [''],
+    ['   '],
+    ['G:\\refs\\valid.png', 42],
+    Array.from({ length: 10 }, (_, index) => `G:\\refs\\${index}.png`),
+  ])('rejects invalid no reference paths before creating a work: %j', async (
+    referenceImagePaths,
+  ) => {
+    const harness = await createHarness();
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    const request = {
+      ...noReferenceRequest(harness),
+      referenceImagePaths,
+    } as unknown as GenerationRequest;
+
+    await expect(harness.startGeneration(request)).rejects.toThrow(
+      /referenceImagePaths/i,
+    );
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test('rejects a reference image explicitly instead of silently using T2VA', async () => {
+    const harness = await createHarness();
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    const request = {
+      ...noReferenceRequest(harness),
+      referenceImagePaths: ['G:\\refs\\one.png'],
+    };
+
+    await expect(harness.startGeneration(request)).rejects.toThrow(
+      /reference images.*not supported/i,
+    );
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test.each([
+    { avatarId: null, referenceImagePaths: [] },
+    { avatarId: 'avatar-1', referenceImagePaths: ['G:\\refs\\one.png'] },
+  ])('keeps direct audio avatar and reference validation: %j', async (override) => {
+    const harness = await createHarness();
+    const request = {
+      ...harness.audioRequest,
+      ...override,
+    } as GenerationRequest;
+
+    await expect(harness.startGeneration(request)).rejects.toThrow(
+      /avatarId|reference images/i,
+    );
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+  });
+
+  test('keeps the legacy avatar Ref2VA workflow when reference paths are omitted', async () => {
+    const harness = await createHarness();
+    const {
+      referenceImagePaths: _referenceImagePaths,
+      ...legacyRequest
+    } = harness.textRequest;
+
+    const result = await harness.startGeneration(legacyRequest);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(work.avatarId).toBe(harness.avatar.id);
+    expect(work.metadata?.request).toEqual({
+      ...legacyRequest,
+      referenceImagePaths: [],
+    });
+    expect(harness.comfy.uploads).toEqual([
+      { filePath: harness.avatar.photoPath, kind: 'image' },
+    ]);
+    const graph = harness.comfy.submissions[0] as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(graph['136'].class_type).toBe('MiniMaxH3ReferenceToVideo');
+    expect(graph['226'].inputs.image).toBe('uploaded/avatar.png');
+  });
+
+  test('cancels no reference execution by prompt id without an image upload', async () => {
+    const harness = await createHarness();
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    harness.comfy.completionGate = deferred();
+
+    const result = await harness.startGeneration(noReferenceRequest(harness));
+    await vi.waitFor(() => expect(harness.comfy.waits).toEqual(['prompt-1']));
+    await harness.jobCoordinator.cancelActive();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('Generation cancelled');
+    expect(harness.comfy.cancelRequests).toEqual(['prompt-1']);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(listAvatars).not.toHaveBeenCalled();
+  });
+
+  test('retries a new no reference work without avatar lookup or upload', async () => {
+    const harness = await createHarness();
+    const original = await harness.startGeneration(noReferenceRequest(harness));
+    await waitForWork(harness.store, original.id, 'done');
+    harness.store.updateWork(original.id, { status: 'failed', error: 'forced failure' });
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    await rm(harness.avatar.photoPath);
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(retryWork).toMatchObject({
+      avatarId: null,
+      metadata: {
+        request: noReferenceRequest(harness),
+        retryOf: original.id,
+      },
+    });
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toHaveLength(2);
+  });
+
+  test('retries legacy no reference metadata without steps or reference paths', async () => {
+    const harness = await createHarness();
+    const legacyRequest = {
+      mode: 'text',
+      avatarId: null,
+      prompt: 'Legacy no reference prompt',
+      duration: 8,
+      seed: 7,
+    } as unknown as GenerationRequest;
+    const original = harness.store.addWork({
+      id: 'legacy-no-reference',
+      avatarId: null,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+      metadata: { request: legacyRequest, workflowVersion: 'text-ref2va.json' },
+    });
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    await rm(harness.avatar.photoPath);
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(retryWork.metadata?.request).toEqual({
+      ...legacyRequest,
+      steps: 8,
+      referenceImagePaths: [],
+    });
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    const graph = harness.comfy.submissions[0] as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(graph['124'].inputs.steps).toBe(8);
+    expect(graph['136'].class_type).toBe('MiniMaxH3ImageToVideo');
+  });
+});
+
 
 describe('GenerationHandler Spark acceleration', () => {
   const sm120: SparkAccelerationEnvironment = {
@@ -1718,6 +1982,7 @@ describe('GenerationHandler retry', () => {
       const source = mode === 'text' ? harness.textRequest : harness.audioRequest;
       const legacyRequest: Partial<GenerationRequest> = { ...source };
       delete legacyRequest.steps;
+      delete legacyRequest.referenceImagePaths;
       if (mode === 'audio') {
         harness.comfy.outputs = [
           outputFile({ nodeId: '65', filename: 'legacy-audio.mp4' }),
@@ -1887,6 +2152,12 @@ describe('GenerationHandler retry', () => {
     { scenario: 'invalid audioPath type', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 123 } },
     { scenario: 'invalid trimStart', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', trimStart: -1 } },
     { scenario: 'invalid subtitles type', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, subtitles: 'yes' } },
+    { scenario: 'null reference paths', request: { mode: 'text', avatarId: null, prompt: 'p', duration: 8, seed: 1, referenceImagePaths: null } },
+    { scenario: 'blank reference path', request: { mode: 'text', avatarId: null, prompt: 'p', duration: 8, seed: 1, referenceImagePaths: [' '] } },
+    { scenario: 'too many reference paths', request: { mode: 'text', avatarId: null, prompt: 'p', duration: 8, seed: 1, referenceImagePaths: Array.from({ length: 10 }, (_, index) => `${index}.png`) } },
+    { scenario: 'unsupported reference image', request: { mode: 'text', avatarId: null, prompt: 'p', duration: 8, seed: 1, referenceImagePaths: ['a.png'] } },
+    { scenario: 'audio null avatar', request: { mode: 'audio', avatarId: null, prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', referenceImagePaths: [] } },
+    { scenario: 'audio reference image', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', referenceImagePaths: ['a.png'] } },
   ])('rejects a work with $scenario in metadata', async ({ request }) => {
     const harness = await createHarness();
     const work = harness.store.addWork({

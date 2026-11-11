@@ -136,11 +136,12 @@ const httpUrlSchema = z.string().superRefine((value, context) => {
 const videoGenerationRequestSchema = z
   .object({
     mode: z.enum(['text', 'audio']),
-    avatarId: nonEmptyString,
+    avatarId: nonEmptyString.nullable(),
     prompt: nonEmptyString,
     duration: positiveFiniteNumber,
     seed: z.number().int().nonnegative(),
     steps: z.number().int().min(1).max(100),
+    referenceImagePaths: z.array(nonEmptyString).max(9).default([]),
     audioPath: nonEmptyString.optional(),
     trimStart: nonNegativeFiniteNumber.optional(),
     retryOf: z.string().optional(),
@@ -152,6 +153,23 @@ const videoGenerationRequestSchema = z
         code: 'custom',
         path: ['audioPath'],
         message: 'audioPath is required for audio generation',
+      });
+    }
+    if (
+      request.mode === 'audio' &&
+      (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['avatarId'],
+        message: 'avatarId is required for audio generation',
+      });
+    }
+    if (request.mode === 'audio' && request.referenceImagePaths.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['referenceImagePaths'],
+        message: 'referenceImagePaths must be empty for audio generation',
       });
     }
   }) satisfies z.ZodType<VideoGenerationRequest>;
