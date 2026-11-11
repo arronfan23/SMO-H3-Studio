@@ -11,7 +11,11 @@ import {
   type ImageResolutionMegapixels,
 } from '../shared/image-options';
 import type { MediaComponentId, MediaComponentState } from '../shared/media-components';
-import { resolveH3Resolution, resolveResolutionForDimensions } from '../shared/resolution';
+import {
+  resolveH3Resolution,
+  resolveResolutionForDimensions,
+  type H3Resolution,
+} from '../shared/resolution';
 import { ComponentGate } from './ComponentGate';
 import { JobStatus } from './JobStatus';
 import { ReferenceImagePicker } from './ReferenceImagePicker';
@@ -21,6 +25,22 @@ import { useMediaUrl } from './useMediaUrl';
 
 const JOB_SYNC_ERROR = '任务状态同步失败，正在等待活动任务状态，请勿重复提交。';
 type ImageMode = 'text' | 'reference';
+
+function isValidImageResolution({ width, height }: H3Resolution): boolean {
+  return [width, height].every((dimension) =>
+    Number.isInteger(dimension) &&
+    dimension >= 256 &&
+    dimension <= 4096 &&
+    dimension % 32 === 0
+  );
+}
+
+function invalidImageResolutionMessage(
+  { width, height }: H3Resolution,
+  megapixels: number,
+): string {
+  return `输出尺寸无效：当前 ${megapixels} MP 为 ${width} × ${height} px。每边须为 256–4096 的整数，且为 32 的倍数，请调整分辨率或首图。`;
+}
 
 export function ImageForm({
   active = true,
@@ -82,6 +102,10 @@ export function ImageForm({
         currentReferenceDimensions.naturalHeight,
         megapixels,
       )
+    : null;
+  const referenceResolutionError = referenceResolution !== null &&
+    !isValidImageResolution(referenceResolution)
+    ? invalidImageResolutionMessage(referenceResolution, megapixels)
     : null;
   const interactionActive = active && pageActive;
   const interactionActiveRef = useRef(interactionActive);
@@ -302,7 +326,9 @@ export function ImageForm({
     component?.status !== 'ready' ||
     componentOperation !== null ||
     (imageMode === 'reference' &&
-      (referenceImagePaths.length === 0 || referenceResolution === null));
+      (referenceImagePaths.length === 0 ||
+        referenceResolution === null ||
+        referenceResolutionError !== null));
 
   const readFirstReferenceDimensions = (image: HTMLImageElement): void => {
     const path = firstReferencePath;
@@ -366,6 +392,10 @@ export function ImageForm({
       setError('首图尺寸尚未读取完成，请稍候再生成。');
       return;
     }
+    if (!isValidImageResolution(resolution)) {
+      setError(invalidImageResolutionMessage(resolution, megapixels));
+      return;
+    }
     const { width, height } = resolution;
     generationRef.current = true;
     awaitingSynchronizationRef.current = null;
@@ -425,9 +455,10 @@ export function ImageForm({
         id="image-resolution"
         value={String(megapixels)}
         disabled={submitting || busy}
-        onChange={(event) =>
-          setMegapixels(Number(event.target.value) as ImageResolutionMegapixels)
-        }
+        onChange={(event) => {
+          setMegapixels(Number(event.target.value) as ImageResolutionMegapixels);
+          setError(null);
+        }}
       >
         {IMAGE_RESOLUTION_OPTIONS.map((option) => {
           const resolution = imageMode === 'reference'
@@ -439,11 +470,16 @@ export function ImageForm({
                   option.value,
                 )
             : resolveH3Resolution(aspectRatio, option.value);
+          const valid = resolution === null || isValidImageResolution(resolution);
           return (
-            <option key={option.value} value={String(option.value)}>
+            <option
+              key={option.value}
+              value={String(option.value)}
+              disabled={!valid}
+            >
               {resolution === null
                 ? `${option.value} MP（等待首图尺寸）`
-                : `${resolution.width} × ${resolution.height} px`}
+                : `${resolution.width} × ${resolution.height} px${valid ? '' : '（不可用）'}`}
             </option>
           );
         })}
@@ -631,11 +667,13 @@ export function ImageForm({
           <p className="form-notice" role="status">
             {referenceImagePaths.length === 0
               ? '请至少添加 1 张参考图后再生成。'
-              : referenceResolution === null
-                ? firstReferenceError ?? '正在读取首图尺寸，完成后才能生成图像。'
-                : currentReferenceDimensions !== null
-                  ? `首图 ${currentReferenceDimensions.naturalWidth} × ${currentReferenceDimensions.naturalHeight} px，输出 ${referenceResolution.width} × ${referenceResolution.height} px。`
-                  : ''}
+              : referenceResolutionError !== null
+                ? referenceResolutionError
+                : referenceResolution === null
+                  ? firstReferenceError ?? '正在读取首图尺寸，完成后才能生成图像。'
+                  : currentReferenceDimensions !== null
+                    ? `首图 ${currentReferenceDimensions.naturalWidth} × ${currentReferenceDimensions.naturalHeight} px，输出 ${referenceResolution.width} × ${referenceResolution.height} px。`
+                    : ''}
           </p>
         )}
         {error && <p className="form-error" role="alert">{error}</p>}

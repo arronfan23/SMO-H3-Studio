@@ -286,6 +286,64 @@ describe('图像工作区', () => {
     ));
   });
 
+  test.each([
+    { naturalWidth: 10000, naturalHeight: 1, width: 102400, height: 0 },
+    { naturalWidth: 100000, naturalHeight: 1000, width: 10240, height: 96 },
+  ])('极端首图 $naturalWidth × $naturalHeight 的无效输出被禁止', async ({
+    naturalWidth,
+    naturalHeight,
+    width,
+    height,
+  }) => {
+    const { panel } = await renderImage();
+    await waitForImageReady();
+    fireEvent.change(panel.getByLabelText('图像提示词'), {
+      target: { value: '极端比例不能提交' },
+    });
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
+    await addReference(panel, 'G:\\refs\\extreme.png');
+    await loadFirstReference(panel, naturalWidth, naturalHeight);
+
+    const submit = panel.getByRole('button', { name: '生成图像' });
+    expect(submit).toBeDisabled();
+    expect(panel.getByText(/输出尺寸无效/)).toHaveTextContent(/256.*4096.*32/);
+    const resolution = panel.getByLabelText('分辨率');
+    expect(within(resolution).getByRole('option', {
+      name: new RegExp(`${width} × ${height} px`),
+    })).toBeDisabled();
+
+    fireEvent.submit(submit.closest('form') as HTMLFormElement);
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test('无效 MP 可改回有效档位并恢复提交', async () => {
+    const { panel } = await renderImage();
+    await waitForImageReady();
+    fireEvent.change(panel.getByLabelText('图像提示词'), {
+      target: { value: '调整 MP 恢复提交' },
+    });
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
+    await addReference(panel, 'G:\\refs\\wide.png');
+    await loadFirstReference(panel, 10000, 1000);
+
+    const resolution = panel.getByLabelText('分辨率');
+    fireEvent.change(resolution, { target: { value: '0.3' } });
+    const submit = panel.getByRole('button', { name: '生成图像' });
+    expect(submit).toBeDisabled();
+    fireEvent.submit(submit.closest('form') as HTMLFormElement);
+    expect(await panel.findByRole('alert')).toHaveTextContent('输出尺寸无效');
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+
+    fireEvent.change(resolution, { target: { value: '1' } });
+    expect(panel.queryByRole('alert')).not.toBeInTheDocument();
+    expect(panel.getByText(/输出 3232 × 320 px/)).toBeInTheDocument();
+    expect(panel.getByRole('button', { name: '生成图像' })).toBeEnabled();
+    fireEvent.click(panel.getByRole('button', { name: '生成图像' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 3232, height: 320 }),
+    ));
+  });
+
   test('参考生图按选择顺序提交 4 张参考图路径', async () => {
     const paths = Array.from({ length: 4 }, (_, index) => `G:\\refs\\ordered-${index + 1}.png`);
     const { panel } = await renderImage();
@@ -313,22 +371,40 @@ describe('图像工作区', () => {
     ));
   });
 
-  test('删除首图后重新读取新首图且旧加载回调不能覆盖', async () => {
+  test('删除首图后旧 mediaUrl 响应不能替换新首图', async () => {
+    const oldPath = 'G:\\refs\\old-first.png';
+    const newPath = 'G:\\refs\\new-first.png';
+    const newUrl = 'smo-media://media/new-first.png';
+    const oldMedia = deferred<string>();
+    const newMedia = deferred<string>();
+    smo.files.mediaUrl.mockImplementation(async (path: string) => {
+      if (path === oldPath) return oldMedia.promise;
+      if (path === newPath) return newMedia.promise;
+      return `smo-media://media/${encodeURIComponent(path)}`;
+    });
     const { panel } = await renderImage();
     await waitForImageReady();
     fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
-    await addReference(panel, 'G:\\refs\\old-first.png');
-    await addReference(panel, 'G:\\refs\\new-first.png');
-    const oldImage = await loadFirstReference(panel, 1920, 1080);
+    await addReference(panel, oldPath);
+    await addReference(panel, newPath);
+    await waitFor(() => expect(smo.files.mediaUrl).toHaveBeenCalledWith(oldPath));
 
     fireEvent.click(panel.getByRole('button', { name: '删除参考图 1' }));
     expect(panel.getByRole('button', { name: '生成图像' })).toBeDisabled();
     expect(panel.getByText(/正在读取首图尺寸/)).toBeInTheDocument();
+    await act(async () => {
+      newMedia.resolve(newUrl);
+      await newMedia.promise;
+    });
     await loadFirstReference(panel, 1200, 1600);
     await waitFor(() => expect(panel.getByRole('button', { name: '生成图像' })).toBeEnabled());
     expect(panel.getByText(/输出 896 × 1184 px/)).toBeInTheDocument();
 
-    fireEvent.load(oldImage);
+    await act(async () => {
+      oldMedia.resolve('smo-media://media/old-first.png');
+      await oldMedia.promise;
+    });
+    expect(panel.getByTestId('reference-image-dimensions')).toHaveAttribute('src', newUrl);
     expect(panel.getByRole('button', { name: '生成图像' })).toBeEnabled();
     expect(panel.getByText(/输出 896 × 1184 px/)).toBeInTheDocument();
 
@@ -337,7 +413,7 @@ describe('图像工作区', () => {
     expect(panel.getByText(/至少.*1.*参考图/)).toBeInTheDocument();
   });
 
-  test('同路径删除重选使旧尺寸失效且旧加载回调不能覆盖新代次', async () => {
+  test('同路径删除重选使旧尺寸失效并创建新 probe', async () => {
     const path = 'G:\\refs\\same-path.png';
     const { panel } = await renderImage();
     await waitForImageReady();
@@ -350,15 +426,48 @@ describe('图像工作区', () => {
     await addReference(panel, path);
     expect(panel.getByRole('button', { name: '生成图像' })).toBeDisabled();
     expect(panel.getByText(/正在读取首图尺寸/)).toBeInTheDocument();
-    fireEvent.load(oldImage);
-    expect(panel.getByRole('button', { name: '生成图像' })).toBeDisabled();
 
     const newImage = await loadFirstReference(panel, 1200, 1600);
     expect(newImage).not.toBe(oldImage);
     await waitFor(() => expect(panel.getByRole('button', { name: '生成图像' })).toBeEnabled());
     expect(panel.getByText(/输出 896 × 1184 px/)).toBeInTheDocument();
+  });
 
-    fireEvent.load(oldImage);
+  test('同路径重选时旧 mediaUrl 响应不能替换新代次', async () => {
+    const path = 'G:\\refs\\same-path-race.png';
+    const newUrl = 'smo-media://media/same-path-new.png';
+    const oldMedia = deferred<string>();
+    const newMedia = deferred<string>();
+    let selectingNew = false;
+    smo.files.mediaUrl.mockImplementation(async (mediaPath: string) => {
+      if (mediaPath !== path) {
+        return `smo-media://media/${encodeURIComponent(mediaPath)}`;
+      }
+      return selectingNew ? newMedia.promise : oldMedia.promise;
+    });
+    const { panel } = await renderImage();
+    await waitForImageReady();
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
+    await addReference(panel, path);
+    await waitFor(() => expect(smo.files.mediaUrl).toHaveBeenCalledWith(path));
+
+    fireEvent.click(panel.getByRole('button', { name: '删除参考图 1' }));
+    selectingNew = true;
+    await addReference(panel, path);
+    expect(panel.getByRole('button', { name: '生成图像' })).toBeDisabled();
+    await act(async () => {
+      newMedia.resolve(newUrl);
+      await newMedia.promise;
+    });
+    await loadFirstReference(panel, 1200, 1600);
+    await waitFor(() => expect(panel.getByRole('button', { name: '生成图像' })).toBeEnabled());
+    expect(panel.getByText(/输出 896 × 1184 px/)).toBeInTheDocument();
+
+    await act(async () => {
+      oldMedia.resolve('smo-media://media/same-path-old.png');
+      await oldMedia.promise;
+    });
+    expect(panel.getByTestId('reference-image-dimensions')).toHaveAttribute('src', newUrl);
     expect(panel.getByText(/输出 896 × 1184 px/)).toBeInTheDocument();
     expect(panel.queryByText(/输出 1376 × 768 px/)).not.toBeInTheDocument();
   });
