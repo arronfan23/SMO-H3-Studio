@@ -53,6 +53,23 @@ export function StudioPage({
     generationPendingRef.current = pending;
     setIsGenerationPending(pending);
   }, []);
+  const syncRevisionRef = useRef(syncRevision);
+  const handoffRevisionRef = useRef<number | null>(null);
+  syncRevisionRef.current = syncRevision;
+
+  useEffect(() => {
+    const handoffRevision = handoffRevisionRef.current;
+    if (handoffRevision === null || syncRevision <= handoffRevision) {
+      return;
+    }
+    handoffRevisionRef.current = null;
+    onGenerationPendingChange(false);
+  }, [onGenerationPendingChange, syncRevision]);
+
+  const onJobStarted = useCallback((): Promise<boolean> => {
+    handoffRevisionRef.current = syncRevisionRef.current;
+    return refresh();
+  }, [refresh]);
 
   const setMode = useCallback((nextMode: StudioMode): void => {
     if (controlledMode === undefined) {
@@ -346,7 +363,7 @@ export function StudioPage({
                   isGenerationPending={isGenerationPending}
                   generationPendingRef={generationPendingRef}
                   onGenerationPendingChange={onGenerationPendingChange}
-                  onJobStarted={refresh}
+                  onJobStarted={onJobStarted}
                 />
               </div>
               <div
@@ -364,7 +381,7 @@ export function StudioPage({
                   isGenerationPending={isGenerationPending}
                   generationPendingRef={generationPendingRef}
                   onGenerationPendingChange={onGenerationPendingChange}
-                  onJobStarted={refresh}
+                  onJobStarted={onJobStarted}
                 />
               </div>
               <div
@@ -392,7 +409,7 @@ export function StudioPage({
                     isGenerationPending={isGenerationPending}
                     generationPendingRef={generationPendingRef}
                     onGenerationPendingChange={onGenerationPendingChange}
-                    onJobStarted={refresh}
+                    onJobStarted={onJobStarted}
                     intent={intent}
                   />
                 )}

@@ -277,6 +277,7 @@ export function AudioDigitalHumanForm({
     setSubmitting(true);
     setError(null);
     setJobId(null);
+    let handoffToStudio = false;
     try {
       await window.smo.hardware.apply({
         mode: 'audio',
@@ -295,12 +296,17 @@ export function AudioDigitalHumanForm({
         steps,
       });
       setJobId(result.id);
-      void onJobStarted?.();
+      if (onJobStarted !== undefined) {
+        handoffToStudio = onGenerationPendingChange !== undefined;
+        await onJobStarted();
+      }
     } catch (startError) {
       setError(errorMessage(startError));
     } finally {
       operationRef.current = null;
-      onGenerationPendingChange?.(false);
+      if (!handoffToStudio) {
+        onGenerationPendingChange?.(false);
+      }
       setSubmitting(false);
     }
   };

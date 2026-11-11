@@ -217,6 +217,7 @@ export function TextToVideoForm({
     setSubmitting(true);
     setError(null);
     setJobId(null);
+    let handoffToStudio = false;
     try {
       await window.smo.hardware.apply({
         mode: 'text',
@@ -234,14 +235,19 @@ export function TextToVideoForm({
         referenceImagePaths: mode === 'reference' ? [...referenceImagePaths] : [],
       });
       setJobId(result.id);
-      void onJobStarted?.();
+      if (onJobStarted !== undefined) {
+        handoffToStudio = onGenerationPendingChange !== undefined;
+        await onJobStarted();
+      }
     } catch (startError) {
       setError(errorMessage(startError));
     } finally {
       if (operationRef.current === 'generation') {
         operationRef.current = null;
       }
-      onGenerationPendingChange?.(false);
+      if (!handoffToStudio) {
+        onGenerationPendingChange?.(false);
+      }
       setSubmitting(false);
     }
   };

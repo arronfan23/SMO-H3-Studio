@@ -1277,6 +1277,48 @@ describe('text-to-video studio', () => {
     await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
   });
 
+  test('handoff jobs.getState 未决时保持共享 pending，revision 前进后恢复', async () => {
+    const handoff = deferred<{ activeId: string | null }>();
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\handoff-pending.png');
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(videoSubpanel('reference'));
+    fireEvent.click(referencePanel.getByRole('button', { name: '选择参考图' }));
+    expect(await referencePanel.findByText('handoff-pending.png')).toBeInTheDocument();
+    fireEvent.change(referencePanel.getByLabelText('原始文字'), {
+      target: { value: '等待 handoff 的 reference 任务' },
+    });
+    const referenceForm = referencePanel.getByRole('button', { name: '生成视频' })
+      .closest('form') as HTMLFormElement;
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: 'jobs.start 已完成但状态未同步' },
+    });
+    smo.jobs.getState.mockReset();
+    smo.jobs.getState
+      .mockImplementationOnce(() => handoff.promise)
+      .mockResolvedValue({ activeId: null });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    fireEvent.submit(referenceForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('tab', { name: '图片生视频' })).toBeDisabled();
+
+    await act(async () => {
+      handoff.resolve({ activeId: null });
+      await handoff.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '图片生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(referenceForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
+  });
+
   test('图片生视频仅在点击后显式加入当前模特并处理重复', async () => {
     const panel = await openReferenceStudio();
     expect(panel.getByText('尚未选择参考图')).toBeInTheDocument();
@@ -3570,6 +3612,50 @@ describe('audio digital human studio', () => {
     await act(async () => {
       pending.resolve({ id: 'shared-audio-job' });
       await pending.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '文生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(textForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
+  });
+
+  test('handoff 同步失败后保持 pending，后续 revision 成功才释放', async () => {
+    const retry = deferred<{ activeId: string | null }>();
+    await renderLoadedAudio('G:\\recordings\\handoff-retry.mp3', 8);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '首次状态同步失败的 audio 任务' },
+    });
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '等待后续 revision 的 text 任务' },
+    });
+    const textForm = textVideoField('原始文字').closest('form') as HTMLFormElement;
+    smo.jobs.getState.mockReset();
+    smo.jobs.getState
+      .mockRejectedValueOnce(new Error('首次状态同步失败'))
+      .mockImplementationOnce(() => retry.promise)
+      .mockResolvedValue({ activeId: null });
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    fireEvent.submit(textForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('tab', { name: '文生视频' })).toBeDisabled();
+
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(2), {
+      timeout: 3_000,
+    });
+    fireEvent.submit(textForm);
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      retry.resolve({ activeId: null });
+      await retry.promise;
     });
     await waitFor(() =>
       expect(screen.getByRole('tab', { name: '文生视频' })).toBeEnabled(),
