@@ -1,0 +1,137 @@
+# H3 文生与多参考视频实现计划
+
+> **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
+
+**目标：** 支持无参考图文生视频，以及 1-9 张参考图的图片生视频，并将两类画面视频与音频数字人清晰区分。
+
+**架构：** 沿用当前 H3 工作流。无参考时把 `MiniMaxH3ReferenceToVideo` 替换为 `MiniMaxH3ImageToVideo` 并删除 `ref_images`；多参考时保留 Ref2VA 节点并动态连接 `ref_image_1..9`。请求沿用 `mode: 'text'`，以参考数组和可空 avatarId 区分输入，不迁移旧作品。
+
+**技术栈：** MiniMax H3、Electron、React、TypeScript、Zod、Vitest、Playwright。
+
+**规格：** `docs/superpowers/specs/2026-11-11-studio-navigation-reference-media-design.md`
+
+**前置：** `docs/superpowers/plans/2026-11-11-studio-foundation.md`
+
+---
+
+## 文件职责
+
+- 修改 `src/shared/types.ts`、`src/shared/ipc.ts`：可空 avatarId 和 `referenceImagePaths`。
+- 修改 `src/main/generation.ts`、`src/shared/workflow-nodes.ts`：无参考替换和多参考连接。
+- 修改 `src/renderer/TextToVideoForm.tsx`、`StudioPage.tsx`：三类视频模式及可选模特。
+- 修改 `src/main/llm.ts`：按 0-9 张图和 t2va/ref2va 润色。
+- 新增对应单元和 E2E 测试。
+
+### 任务 1：无参考视频请求与工作流
+
+**文件：** `src/shared/types.ts`、`src/shared/ipc.ts`、`src/main/generation.ts`、`src/shared/workflow-nodes.ts`、`tests/unit/ipc.test.ts`、`tests/unit/generation.test.ts`
+
+- [ ] **步骤 1：编写失败测试**
+
+验证 `mode:'text'`、`avatarId:null`、`referenceImagePaths:[]` 合法且不上传图片；提交图中 `MiniMaxH3ImageToVideo` 没有 `ref_images`，其他调度、Spark、步数、输出不变。旧请求含 avatarId 仍走原 Ref2VA。
+
+- [ ] **步骤 2：运行测试确认失败**
+
+运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/generation.test.ts -t "no reference|无参考"`
+
+- [ ] **步骤 3：实现可空输入和无参考替换**
+
+```ts
+interface VideoGenerationRequest {
+  mode: VideoMode;
+  avatarId: string | null;
+  referenceImagePaths?: string[];
+  // 其余现有字段保持
+}
+```
+
+`referenceImagePaths` 缺省为 `[]`。无参考且 avatarId 为空时不再读取模特，work.avatarId=null。将 ReferenceToVideo 改为 ImageToVideo 并删除 ref_images 输入；不上传头像。保留所有调度器、输出和低步数 Refiner 修补。
+
+- [ ] **步骤 4：运行测试和类型检查**
+
+运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/generation.test.ts && npm run typecheck`
+
+- [ ] **步骤 5：提交**
+
+```bash
+git add src/shared/types.ts src/shared/ipc.ts src/main/generation.ts src/shared/workflow-nodes.ts tests/unit/ipc.test.ts tests/unit/generation.test.ts
+git commit -m "Allow H3 text to video without a reference image"
+```
+
+### 任务 2：1-9 张参考图上传与 Ref2VA 连接
+
+**文件：** `src/main/generation.ts`、`src/shared/workflow-nodes.ts`、`tests/unit/generation.test.ts`
+
+- [ ] **步骤 1：编写失败测试**
+
+用 1 张和 9 张验证 `ref_image_1..9` 顺序、`MiniMaxH3ReferenceToVideo` 保留、上传授权、临时文件清理、取消和重试不重复节点。超过 9、空数组元素和未授权路径拒绝。
+
+- [ ] **步骤 2：运行测试确认失败**
+
+运行：`npx vitest run tests/unit/generation.test.ts -t "reference images|参考图"`
+
+- [ ] **步骤 3：实现多图上传与动态节点**
+
+参考路径长度 1-9 时按顺序调用 `comfy.uploadFile({kind:'image'})`，首图使用现有节点 226，其他 LoadImage 节点使用 `ref2..ref9`：
+
+```ts
+refNode.inputs.ref_images = Object.fromEntries(
+  uploaded.map((name, index) => [`ref_image_${index + 1}`, [index === 0 ? '226' : `ref${index + 1}`, 0]]),
+);
+```
+
+数组存在时只使用数组，不隐式重复当前模特。旧请求只有 avatarId 时维持原一张 Ref2VA 行为。
+
+- [ ] **步骤 4：运行测试和类型检查**
+
+运行：`npx vitest run tests/unit/generation.test.ts tests/unit/ipc.test.ts && npm run typecheck`
+
+- [ ] **步骤 5：提交**
+
+```bash
+git add src/main/generation.ts src/shared/workflow-nodes.ts tests/unit/generation.test.ts tests/unit/ipc.test.ts
+git commit -m "Support up to nine H3 reference images"
+```
+
+### 任务 3：三类视频 UI 与提示词润色
+
+**文件：** `src/renderer/TextToVideoForm.tsx`、`src/renderer/StudioPage.tsx`、`src/main/llm.ts`、`tests/unit/studio.test.tsx`、`tests/e2e/studio.spec.ts`
+
+- [ ] **步骤 1：编写失败测试**
+
+验证视频细分为“文生视频 / 图片生视频 / 音频数字人”。文生视频无模特可提交，图片生视频必须至少一张、最多九张；当前模特仅能通过显式按钮加入，不自动注入。三类草稿、焦点和 busy 保持。
+
+润色验证：无参考时 `imageCount:0/mode:t2va/referenceLabels:[]`；N 图时 `imageCount:N/mode:ref2va` 且 labels 为 Picture1..N。
+
+- [ ] **步骤 2：运行测试确认失败**
+
+运行：`npx vitest run tests/unit/studio.test.tsx -t "文生视频|图片生视频|无模特"`
+
+- [ ] **步骤 3：实现三类表单和润色输入**
+
+videoMode 改为 `'text'|'reference'|'audio'`。文字面板 `avatarId=null/referenceImagePaths=[]`；参考面板使用共享 picker，只有 `avatar` 存在时显示“使用当前模特”按钮。无 avatar 不再显示全页空状态，参考模式不强制模特预览。
+
+- [ ] **步骤 4：运行单元、类型和 Electron 测试**
+
+运行：`npx vitest run tests/unit/studio.test.tsx && npm run typecheck && npm run build && npx playwright test tests/e2e/studio.spec.ts`
+
+- [ ] **步骤 5：提交**
+
+```bash
+git add src/renderer/TextToVideoForm.tsx src/renderer/StudioPage.tsx src/main/llm.ts tests/unit/studio.test.tsx tests/e2e/studio.spec.ts
+git commit -m "Separate text and reference H3 video modes"
+```
+
+### 任务 4：真实视频验收
+
+- [ ] **步骤 1：无参考真实生成**
+
+用固定提示词和 1 step 低负载运行 4 秒无参考视频，确认无图像上传、MiniMaxH3ImageToVideo 节点、非空输出和任务锁释放。
+
+- [ ] **步骤 2：多参考真实生成**
+
+用 1 张和 9 张合成参考图分别运行 Ref2VA，检查上传顺序、ref_image 连接、Spark/transition 与非空输出。删除测试作品后无媒体残留，用户原图不动。
+
+- [ ] **步骤 3：完整回归并记录**
+
+运行类型检查、排除已知旧环境导入测试的 Vitest、studio/package E2E，将结果写入本计划并只提交计划文件。
