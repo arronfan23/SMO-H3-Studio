@@ -489,6 +489,31 @@ describe('image generation validation and submission', () => {
     });
   });
 
+  test('image reports uploading before the first reference upload completes', async () => {
+    const harness = await createHarness();
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const uploadGate = deferred();
+    harness.comfy.uploadGate = uploadGate;
+
+    const result = await harness.startImage({
+      ...harness.request,
+      referenceImagePaths: [referencePath],
+    });
+    await vi.waitFor(() => expect(harness.comfy.uploads).toHaveLength(1));
+    try {
+      expect(harness.store.getWork(result.id)?.metadata?.execution?.stage).toBe(
+        'uploading',
+      );
+    } finally {
+      uploadGate.resolve();
+    }
+
+    const work = await waitForWork(harness.store, result.id, 'done');
+    expect(work.metadata?.execution?.stage).toBe('finalizing');
+  });
+
   test('image uploads four references in array order with exclusive staged copies', async () => {
     const copy = vi.fn<typeof copyFile>(async (source, destination, mode) => {
       await copyFile(source, destination, mode);

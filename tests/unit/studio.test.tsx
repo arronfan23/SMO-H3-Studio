@@ -943,6 +943,12 @@ describe('text-to-video studio', () => {
     expect(videoSubpanel('text')).not.toHaveTextContent('还没有数字模特');
     expect(videoSubpanel('reference')).not.toHaveTextContent('还没有数字模特');
     expect(videoSubpanel('audio')).toHaveTextContent('还没有数字模特');
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    const handoff = deferred<{ activeId: string | null }>();
+    smo.jobs.getState.mockReset();
+    smo.jobs.getState
+      .mockImplementationOnce(() => handoff.promise)
+      .mockResolvedValue({ activeId: null });
 
     fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
     const panel = within(videoSubpanel('reference'));
@@ -960,9 +966,17 @@ describe('text-to-video studio', () => {
         referenceImagePaths: ['G:\\refs\\no-avatar.png'],
       }),
     );
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('tab', { name: '音频数字人' })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
-    fireEvent.click(screen.getByRole('button', { name: '新建数字模特' }));
+    await act(async () => {
+      handoff.resolve({ activeId: null });
+      await handoff.promise;
+    });
+    const audioTab = screen.getByRole('tab', { name: '音频数字人' });
+    await waitFor(() => expect(audioTab).toBeEnabled());
+    fireEvent.click(audioTab);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
     expect(onCreateAvatar).toHaveBeenCalledTimes(1);
   });
 
@@ -5105,6 +5119,27 @@ describe('works deletion', () => {
     expect(screen.getByText('已完成（done）')).toBeInTheDocument();
   });
 
+  test('describes a no-avatar video naturally in the deletion dialog', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'no-avatar-work',
+        avatarId: null,
+        status: 'done',
+        outputPath,
+      }),
+    ]);
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 no-avatar-work' }));
+
+    const dialog = screen.getByRole('dialog', { name: '删除作品' });
+    expect(dialog).toHaveTextContent(
+      '确定要删除无数字模特的作品“finished.mp4”吗？作品记录和视频文件将一起删除，此操作不可撤销。',
+    );
+    expect(dialog).not.toHaveTextContent('未知模特');
+  });
+
   test('deletes a completed work after confirmation, closes the dialog, and refreshes', async () => {
     smo.works.list
       .mockResolvedValueOnce([createWork({ id: 'done-work', status: 'done', outputPath })])
@@ -5331,6 +5366,18 @@ describe('works title and completion time', () => {
 
     expect(await screen.findByRole('heading', { name: '新品发布会' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '薄荷主播' })).toBeInTheDocument();
+  });
+
+  test('distinguishes no avatar from a missing legacy avatar in video titles', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'no-avatar-work', avatarId: null }),
+      createWork({ id: 'legacy-work', avatarId: 'deleted-avatar' }),
+    ]);
+
+    await openWorksPage();
+
+    expect(await screen.findByRole('heading', { name: '无数字模特' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '未知模特' })).toBeInTheDocument();
   });
 
   test('shows the completion time and elapsed duration for a done work', async () => {

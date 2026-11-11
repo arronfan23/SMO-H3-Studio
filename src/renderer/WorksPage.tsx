@@ -198,7 +198,9 @@ export function WorksPage({
   }, [works, workType, videoType, status]);
 
   const avatarName = (id: string | null): string =>
-    avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
+    id === null
+      ? '无数字模特'
+      : avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
 
   const workTitle = (work: Work): string =>
     work.title !== null && work.title.trim().length > 0
@@ -218,7 +220,9 @@ export function WorksPage({
       : (() => {
           const owner =
             deleteTarget.mode === 'text' || deleteTarget.mode === 'audio'
-              ? `模特“${avatarName(deleteTarget.avatarId)}”的`
+              ? deleteTarget.avatarId === null
+                ? '无数字模特的'
+                : `模特“${avatarName(deleteTarget.avatarId)}”的`
               : '';
           const mediaType =
             deleteTarget.mode === 'speech'

@@ -524,6 +524,9 @@ export function createImageGenerationHandler(
           await readFile(workflowPath, 'utf8'),
         ) as ImageWorkflowGraph;
         throwIfCancelled();
+        if ((request.referenceImagePaths?.length ?? 0) > 0) {
+          setExecution('uploading');
+        }
         const uploadedNames: string[] = [];
         for (const [index, sourcePath] of (
           request.referenceImagePaths ?? []
