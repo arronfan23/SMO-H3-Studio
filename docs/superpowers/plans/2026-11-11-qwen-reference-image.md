@@ -27,17 +27,17 @@
 
 **文件：** `src/shared/types.ts`、`src/shared/ipc.ts`、`src/shared/image-options.ts`、`src/shared/resolution.ts`、`src/renderer/ImageForm.tsx`、`tests/unit/ipc.test.ts`、`tests/unit/image-form.test.tsx`、`tests/unit/resolution.test.ts`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 `referenceImagePaths` 缺省为 `[]`，1-4 张合法，超过 4、空路径、非字符串拒绝，未知字段拒绝。UI 有“文字生图 / 参考生图”，参考模式显示 1-4 张增删、预览和提示词；隐藏参考图时不能提交。
 
 分辨率选项包含 2MP、4MP，1:1 对应约 1448×1448、2048×2048，其他比例按 32 像素网格计算。视频选项不变。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/image-form.test.tsx tests/unit/resolution.test.ts`
 
-- [ ] **步骤 3：实现请求和双模式表单**
+- [x] **步骤 3：实现请求和双模式表单**
 
 类型：
 
@@ -56,16 +56,18 @@ export interface ImageGenerationRequest {
 
 `ImageForm` 保留原纯文字模式。参考模式调用共享 picker，显示 `<image1..4>` 编号和编辑说明。输出尺寸按 `resolveH3Resolution` 计算，参考输出保留第一张图宽高比，不把自定义比例强行拉伸到参考图上。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/image-form.test.tsx tests/unit/resolution.test.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/shared/types.ts src/shared/ipc.ts src/shared/image-options.ts src/shared/resolution.ts src/renderer/ImageForm.tsx tests/unit/ipc.test.ts tests/unit/image-form.test.tsx tests/unit/resolution.test.ts
 git commit -m "Add Qwen reference image controls and 2K options"
 ```
+
+实际完成：共享请求/分辨率提交 `a0b3cd85`，表单提交 `95099905`，生命周期修复 `5ab0eb3a`，极端尺寸校验 `cda31105`。最终 IPC/分辨率 305/305、表单 36/36，类型检查通过；规格与代码质量审查均通过。2MP 方形按 32 像素网格实际为 1440×1440，4MP 为 2048×2048。
 
 ### 任务 2：多图工作流补丁与上传
 
