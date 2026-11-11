@@ -1,7 +1,7 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Image as ImageIcon, Mic, UserPlus, Video } from 'lucide-react';
 import type { Avatar } from '../shared/types';
-import type { StudioIntent } from './App';
+import type { StudioIntent, StudioMode } from './App';
 import { AudioDigitalHumanForm } from './AudioDigitalHumanForm';
 import { AvatarImage } from './AvatarImage';
 import { ImageForm } from './ImageForm';
@@ -9,7 +9,6 @@ import { SpeechForm } from './SpeechForm';
 import { TextToVideoForm } from './TextToVideoForm';
 import { useActiveJob } from './useActiveJob';
 
-type StudioMode = 'speech' | 'image' | 'video';
 const STUDIO_MODES: readonly StudioMode[] = ['speech', 'image', 'video'];
 
 export function StudioPage({
@@ -20,6 +19,8 @@ export function StudioPage({
   onCreateAvatar,
   pageActive = true,
   intent = null,
+  mode: controlledMode,
+  onModeChange,
 }: {
   avatar: Avatar | null;
   loading: boolean;
@@ -28,8 +29,11 @@ export function StudioPage({
   onCreateAvatar: () => void;
   pageActive?: boolean;
   intent?: StudioIntent | null;
+  mode?: StudioMode;
+  onModeChange?: (mode: StudioMode) => void;
 }) {
-  const [mode, setMode] = useState<StudioMode>('video');
+  const [internalMode, setInternalMode] = useState<StudioMode>('video');
+  const mode = controlledMode ?? internalMode;
   const [videoMode, setVideoMode] = useState<'text' | 'audio'>('text');
   const speechModeTabRef = useRef<HTMLButtonElement | null>(null);
   const imageModeTabRef = useRef<HTMLButtonElement | null>(null);
@@ -39,6 +43,13 @@ export function StudioPage({
   const handledIntentTokenRef = useRef<number | null>(null);
   const pendingIntentFocusTokenRef = useRef<number | null>(null);
   const { busy, syncRevision, refresh } = useActiveJob();
+
+  const setMode = useCallback((nextMode: StudioMode): void => {
+    if (controlledMode === undefined) {
+      setInternalMode(nextMode);
+    }
+    onModeChange?.(nextMode);
+  }, [controlledMode, onModeChange]);
 
   useEffect(() => {
     if (intent === null) {
@@ -52,7 +63,7 @@ export function StudioPage({
     pendingIntentFocusTokenRef.current = intent.token;
     setMode(intent.mode);
     setVideoMode(intent.videoMode);
-  }, [intent]);
+  }, [intent, setMode]);
 
   useEffect(() => {
     if (
@@ -144,57 +155,60 @@ export function StudioPage({
 
   return (
     <div className="studio-page">
-      <div
-        className="tab-list main-mode-tabs"
-        role="tablist"
-        aria-label="主制作模式"
-        onKeyDown={handleModeKeyDown}
-      >
-        <button
-          ref={speechModeTabRef}
-          id="speech-main-tab"
-          type="button"
-          role="tab"
-          aria-selected={mode === 'speech'}
-          aria-controls="speech-main-panel"
-          tabIndex={mode === 'speech' ? 0 : -1}
-          onClick={() => setMode('speech')}
+      {controlledMode === undefined && (
+        <div
+          className="tab-list main-mode-tabs"
+          role="tablist"
+          aria-label="主制作模式"
+          onKeyDown={handleModeKeyDown}
         >
-          <Mic size={17} aria-hidden="true" />
-          语音
-        </button>
-        <button
-          ref={imageModeTabRef}
-          id="image-main-tab"
-          type="button"
-          role="tab"
-          aria-selected={mode === 'image'}
-          aria-controls="image-main-panel"
-          tabIndex={mode === 'image' ? 0 : -1}
-          onClick={() => setMode('image')}
-        >
-          <ImageIcon size={17} aria-hidden="true" />
-          图像
-        </button>
-        <button
-          ref={videoModeTabRef}
-          id="video-main-tab"
-          type="button"
-          role="tab"
-          aria-selected={mode === 'video'}
-          aria-controls="video-main-panel"
-          tabIndex={mode === 'video' ? 0 : -1}
-          onClick={() => setMode('video')}
-        >
-          <Video size={17} aria-hidden="true" />
-          视频
-        </button>
-      </div>
+          <button
+            ref={speechModeTabRef}
+            id="speech-main-tab"
+            type="button"
+            role="tab"
+            aria-selected={mode === 'speech'}
+            aria-controls="speech-main-panel"
+            tabIndex={mode === 'speech' ? 0 : -1}
+            onClick={() => setMode('speech')}
+          >
+            <Mic size={17} aria-hidden="true" />
+            语音
+          </button>
+          <button
+            ref={imageModeTabRef}
+            id="image-main-tab"
+            type="button"
+            role="tab"
+            aria-selected={mode === 'image'}
+            aria-controls="image-main-panel"
+            tabIndex={mode === 'image' ? 0 : -1}
+            onClick={() => setMode('image')}
+          >
+            <ImageIcon size={17} aria-hidden="true" />
+            图像
+          </button>
+          <button
+            ref={videoModeTabRef}
+            id="video-main-tab"
+            type="button"
+            role="tab"
+            aria-selected={mode === 'video'}
+            aria-controls="video-main-panel"
+            tabIndex={mode === 'video' ? 0 : -1}
+            onClick={() => setMode('video')}
+          >
+            <Video size={17} aria-hidden="true" />
+            视频
+          </button>
+        </div>
+      )}
 
-      <div
+      <section
         id="speech-main-panel"
-        role="tabpanel"
-        aria-labelledby="speech-main-tab"
+        role={controlledMode === undefined ? 'tabpanel' : undefined}
+        aria-label={controlledMode === undefined ? undefined : '语音制作'}
+        aria-labelledby={controlledMode === undefined ? 'speech-main-tab' : undefined}
         hidden={mode !== 'speech'}
       >
         <section className="production-controls speech-controls" aria-label="语音控制区">
@@ -205,12 +219,13 @@ export function StudioPage({
             onJobStarted={refresh}
           />
         </section>
-      </div>
+      </section>
 
-      <div
+      <section
         id="image-main-panel"
-        role="tabpanel"
-        aria-labelledby="image-main-tab"
+        role={controlledMode === undefined ? 'tabpanel' : undefined}
+        aria-label={controlledMode === undefined ? undefined : '图像制作'}
+        aria-labelledby={controlledMode === undefined ? 'image-main-tab' : undefined}
         hidden={mode !== 'image'}
       >
         <section className="production-controls image-controls" aria-label="图像控制区">
@@ -222,12 +237,13 @@ export function StudioPage({
             onJobStarted={refresh}
           />
         </section>
-      </div>
+      </section>
 
-      <div
+      <section
         id="video-main-panel"
-        role="tabpanel"
-        aria-labelledby="video-main-tab"
+        role={controlledMode === undefined ? 'tabpanel' : undefined}
+        aria-label={controlledMode === undefined ? undefined : '视频制作'}
+        aria-labelledby={controlledMode === undefined ? 'video-main-tab' : undefined}
         hidden={mode !== 'video'}
       >
         {error && <p className="form-error" role="alert">模特列表加载失败：{error}</p>}
@@ -317,7 +333,7 @@ export function StudioPage({
             </section>
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }

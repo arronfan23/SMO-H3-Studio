@@ -567,7 +567,11 @@ async function saveLlmProfile(page: Page, baseUrl: string): Promise<void> {
 }
 
 async function openStudio(page: Page, avatarName: string): Promise<void> {
-  await page.click('nav[aria-label="主导航"] button:has-text("制作台")');
+  const parent = page.locator('#studio-nav-button');
+  if (await parent.getAttribute('aria-expanded') !== 'true') {
+    await parent.click();
+  }
+  await page.locator('#studio-video-button').click();
   await expect(
     page.locator(`.person-preview h2:has-text("${avatarName}")`),
   ).toBeVisible();
@@ -723,6 +727,49 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page!.locator('.avatar-list article')).toHaveCount(1);
   });
 
+  test('二级制作目录支持键盘导航、切页和收起草稿保留', async () => {
+    const avatarName = 'E2E Sidebar Avatar';
+    await createAvatar(page!, avatarName);
+    await openStudio(page!, avatarName);
+    await page!.fill('#original-text', 'Keep the video draft from the sidebar.');
+
+    const parent = page!.locator('#studio-nav-button');
+    await expect(parent).toHaveAttribute('aria-expanded', 'true');
+    await expect(parent).toHaveAttribute('aria-controls', 'studio-mode-navigation');
+    await page!.locator('#studio-image-button').click();
+    await expect(page!.locator('#image-main-panel')).toBeVisible();
+    await expect(page!.locator('#studio-image-button')).toHaveAttribute('aria-current', 'page');
+    await page!.fill('#image-prompt', 'Keep the image draft while collapsed.');
+
+    await parent.focus();
+    await page!.keyboard.press('Enter');
+    await expect(parent).toHaveAttribute('aria-expanded', 'false');
+    await expect(parent).toBeFocused();
+    await expect(page!.locator('#studio-mode-navigation')).toBeHidden();
+    await expect(page!.locator('#image-prompt')).toHaveValue(
+      'Keep the image draft while collapsed.',
+    );
+
+    await page!.keyboard.press('Enter');
+    await expect(parent).toHaveAttribute('aria-expanded', 'true');
+    await page!.keyboard.press('Tab');
+    await expect(page!.locator('#studio-speech-button')).toBeFocused();
+    await page!.keyboard.press('Tab');
+    await expect(page!.locator('#studio-image-button')).toBeFocused();
+    await page!.keyboard.press('Enter');
+    await expect(page!.locator('#image-main-panel')).toBeVisible();
+    await expect(page!.locator('#studio-image-button')).toBeFocused();
+
+    await page!.click('nav[aria-label="主导航"] button:has-text("设置")');
+    await page!.locator('#studio-video-button').click();
+    await expect(page!.locator('#text-mode-panel')).toBeVisible();
+    await expect(page!.locator('#original-text')).toHaveValue(
+      'Keep the video draft from the sidebar.',
+    );
+    await expect(page!.getByRole('tablist', { name: '主制作模式' })).toHaveCount(0);
+    await expect(page!.getByRole('tablist', { name: '制作模式' })).toBeVisible();
+  });
+
   test('keeps studio draft across navigation', async () => {
     const draft = 'Keep this draft across every module.';
     await createAvatar(page!, 'E2E Draft Avatar');
@@ -731,7 +778,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       await page!.click(`nav[aria-label="主导航"] button:has-text("${moduleName}")`);
-      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await page!.locator('#studio-video-button').click();
       await expect(page!.locator('#original-text')).toHaveValue(draft);
     }
   });
@@ -782,7 +829,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       await page!.click(`nav[aria-label="主导航"] button:has-text("${moduleName}")`);
-      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await page!.locator('#studio-video-button').click();
       await expect(page!.locator('#audio-mode-panel')).toBeVisible();
       await expect(page!.locator('.audio-file')).toContainText('voice.mp3');
       await expect(page!.locator('#audio-polished-text')).toHaveValue(
@@ -814,7 +861,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await page!.click('#audio-mode-tab');
       await page!.fill('#audio-prompt', 'Keep audio video draft.');
       await page!.fill('#audio-steps', '17');
-      await page!.click('#speech-main-tab');
+      await page!.click('#studio-speech-button');
       await page!.fill('#custom-speech-prompt', 'Keep speech draft.');
       await page!.fill('#custom-speech-instruct', 'Calm and warm.');
 
@@ -836,7 +883,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await expect(work).toBeVisible();
       await work.getByRole('button', { name: `用于音频数字人 ${workId}` }).click();
 
-      await expect(page!.locator('#video-main-tab')).toHaveAttribute('aria-selected', 'true');
+      await expect(page!.locator('#studio-video-button')).toHaveAttribute('aria-current', 'page');
       await expect(page!.locator('#audio-mode-tab')).toHaveAttribute('aria-selected', 'true');
       await expect(page!.locator('#audio-mode-tab')).toBeFocused();
       await expect(page!.locator('#audio-mode-panel')).toBeVisible();
@@ -861,12 +908,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await page!.click('#text-mode-tab');
       await expect(page!.locator('#original-text')).toHaveValue('Keep text video draft.');
       await expect(page!.locator('#text-steps')).toHaveValue('13');
-      await page!.click('#speech-main-tab');
+      await page!.click('#studio-speech-button');
       await expect(page!.locator('#custom-speech-prompt')).toHaveValue('Keep speech draft.');
       await expect(page!.locator('#custom-speech-instruct')).toHaveValue('Calm and warm.');
       expect(comfyMock.submittedPromptIds).toHaveLength(submittedBefore);
 
-      await page!.click('#video-main-tab');
+      await page!.click('#studio-video-button');
       await page!.click('#audio-mode-tab');
       await page!.click('#audio-mode-panel button:has-text("生成视频")');
       const jobLocator = page!.locator(
@@ -1011,7 +1058,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page.reload();
     await expect(page).toHaveTitle('SMO.H3 Studio');
 
-    await page.click('#image-main-tab');
+    await page.click('#studio-image-button');
     await expect(page.locator('#image-main-panel')).toBeVisible();
     await expect(page.locator('.person-preview:visible')).toHaveCount(0);
     await expect(page.locator('#image-main-panel button:has-text("生成图像")')).toBeEnabled();
@@ -1342,7 +1389,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       expect(contentInset).not.toBeNull();
       expect(contentInset!).toBeGreaterThanOrEqual(6);
 
-      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await page!.locator('#studio-video-button').click();
       // The studio preserves the previously selected mode, so switch back to
       // text mode explicitly instead of relying on an implicit reset.
       await page!.click('#text-mode-tab');
@@ -1363,7 +1410,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#audio-mode-panel .button-generate',
       ]);
 
-      await page!.click('#image-main-tab');
+      await page!.click('#studio-image-button');
       await expect(page!.locator('#image-main-panel')).toBeVisible();
       await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
       await assertViewLayout(page!, 'studio-image', [
@@ -1393,7 +1440,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#image-resolution',
         '1024 × 1024 px',
       );
-      await page!.click('#video-main-tab');
+      await page!.click('#studio-video-button');
 
       await page!.click('nav[aria-label="主导航"] button:has-text("数字模特")');
       await expect(page!.locator('.avatar-list')).toBeVisible();
@@ -1418,7 +1465,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '.settings-actions .button-primary',
       ]);
 
-      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await page!.locator('#studio-video-button').click();
       // We left the studio in audio mode; the mode must be preserved.
       await expect(page!.locator('#audio-mode-panel')).toBeVisible();
       await page!.click('#text-mode-tab');
@@ -1470,7 +1517,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     });
     expect(violations).toEqual([]);
 
-    await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+    await page!.locator('#studio-video-button').click();
     await expect(page!.locator('#text-mode-panel')).toBeVisible();
     await assertStudioReferenceLayout(page!, 'studio-200-zoom');
     await assertViewLayout(page!, 'studio-200-zoom', [
@@ -1480,7 +1527,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       '#text-mode-panel .button-generate',
     ]);
 
-    await page!.click('#image-main-tab');
+    await page!.click('#studio-image-button');
     await expect(page!.locator('#image-main-panel')).toBeVisible();
     await assertViewLayout(page!, 'studio-image-200-zoom', [
       '#image-prompt',

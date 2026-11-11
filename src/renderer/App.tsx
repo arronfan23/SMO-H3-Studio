@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Clapperboard, FolderOpen, Settings, Users } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  Clapperboard,
+  FolderOpen,
+  Image,
+  Mic,
+  Settings,
+  Users,
+  Video,
+} from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import { AvatarsPage } from './AvatarsPage';
 import { EnvironmentWizard } from './EnvironmentWizard';
@@ -19,6 +29,13 @@ const NAVIGATION = [
 ] as const;
 
 type PageId = (typeof NAVIGATION)[number]['id'];
+export type StudioMode = 'speech' | 'image' | 'video';
+
+const STUDIO_NAVIGATION = [
+  { mode: 'speech', label: '语音', icon: Mic },
+  { mode: 'image', label: '图像', icon: Image },
+  { mode: 'video', label: '视频', icon: Video },
+] as const;
 
 export type StudioIntent = {
   token: number;
@@ -33,6 +50,8 @@ interface StudioApplicationProps {
 
 function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
   const [page, setPage] = useState<PageId>('studio');
+  const [studioMode, setStudioMode] = useState<StudioMode>('video');
+  const [studioExpanded, setStudioExpanded] = useState(true);
   const [avatars, setAvatars] = useState<Avatar[]>([]);
   const [selectedAvatarId, setSelectedAvatarId] = useState<string | null>(null);
   const [avatarsLoading, setAvatarsLoading] = useState(true);
@@ -89,7 +108,13 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
   const useSpeechInAudioDigitalHuman = (audioPath: string): void => {
     const token = ++studioIntentTokenRef.current;
     setStudioIntent({ token, mode: 'video', videoMode: 'audio', audioPath });
+    setStudioMode('video');
     setPage('studio');
+  };
+
+  const selectStudioMode = (mode: StudioMode): void => {
+    setPage('studio');
+    setStudioMode(mode);
   };
 
   return (
@@ -106,18 +131,65 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
             </div>
           </div>
           <nav className="main-nav" aria-label="主导航">
-            {NAVIGATION.map(({ id, label, icon: Icon }) => (
-              <button
-                key={id}
-                type="button"
-                className={page === id ? 'nav-item nav-item-active' : 'nav-item'}
-                aria-current={page === id ? 'page' : undefined}
-                onClick={() => setPage(id)}
-              >
-                <Icon size={18} aria-hidden="true" />
-                <span>{label}</span>
-              </button>
-            ))}
+            {NAVIGATION.map(({ id, label, icon: Icon }) =>
+              id === 'studio' ? (
+                <div key={id} className="nav-directory">
+                  <button
+                    id="studio-nav-button"
+                    type="button"
+                    className={page === id ? 'nav-item nav-item-active' : 'nav-item'}
+                    aria-current={page === id ? 'page' : undefined}
+                    aria-expanded={studioExpanded}
+                    aria-controls="studio-mode-navigation"
+                    onClick={() => setStudioExpanded((expanded) => !expanded)}
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span>{label}</span>
+                    {studioExpanded ? (
+                      <ChevronDown className="nav-chevron" size={16} aria-hidden="true" />
+                    ) : (
+                      <ChevronRight className="nav-chevron" size={16} aria-hidden="true" />
+                    )}
+                  </button>
+                  <div
+                    id="studio-mode-navigation"
+                    className="nav-submenu"
+                    role="group"
+                    aria-label="制作模式"
+                    hidden={!studioExpanded}
+                  >
+                    {STUDIO_NAVIGATION.map(({ mode, label: modeLabel, icon: ModeIcon }) => {
+                      const active = page === 'studio' && studioMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          id={`studio-${mode}-button`}
+                          type="button"
+                          className={active ? 'nav-item nav-item-active' : 'nav-item'}
+                          aria-current={active ? 'page' : undefined}
+                          aria-controls={`${mode}-main-panel`}
+                          onClick={() => selectStudioMode(mode)}
+                        >
+                          <ModeIcon size={17} aria-hidden="true" />
+                          <span>{modeLabel}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <button
+                  key={id}
+                  type="button"
+                  className={page === id ? 'nav-item nav-item-active' : 'nav-item'}
+                  aria-current={page === id ? 'page' : undefined}
+                  onClick={() => setPage(id)}
+                >
+                  <Icon size={18} aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              ),
+            )}
           </nav>
         </aside>
         <main className="main-content">
@@ -130,6 +202,8 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
               onCreateAvatar={() => setPage('avatars')}
               pageActive={page === 'studio'}
               intent={studioIntent}
+              mode={studioMode}
+              onModeChange={setStudioMode}
             />
           </div>
           {page === 'avatars' && (

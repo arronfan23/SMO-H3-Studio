@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
 import { AudioDigitalHumanForm } from '../../src/renderer/AudioDigitalHumanForm';
 import { AudioRecorder } from '../../src/renderer/AudioRecorder';
+import { StudioPage } from '../../src/renderer/StudioPage';
 import { SKILL_NAMES } from '../../src/shared/skills';
 import {
   AUTO_SKILL_OPTION,
@@ -97,6 +98,22 @@ function studioSpeechField(label: string, mode: 'custom' | 'clone' = 'custom') {
     name: mode === 'custom' ? '固定音色' : '声音克隆',
   });
   return within(panel).getByLabelText(label);
+}
+
+function studioModeButton(label: '语音' | '图像' | '视频') {
+  return within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', {
+    name: label,
+    exact: true,
+  });
+}
+
+function studioModePanel(label: '语音' | '图像' | '视频') {
+  const mode = { 语音: 'speech', 图像: 'image', 视频: 'video' }[label];
+  const panel = document.getElementById(`${mode}-main-panel`);
+  if (panel === null) {
+    throw new Error(`Missing ${label} studio panel`);
+  }
+  return panel;
 }
 
 beforeEach(() => {
@@ -235,7 +252,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
   });
 
-  test('keeps the unsubmitted text draft when switching modules', async () => {
+  test('切换导航页面时保留未提交文字草稿', async () => {
     await renderStudio();
     fireEvent.change(screen.getByLabelText('原始文字'), {
       target: { value: '切换模块后保留这段草稿' },
@@ -243,7 +260,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      fireEvent.click(studioModeButton('视频'));
       expect(screen.getByLabelText('原始文字')).toHaveValue('切换模块后保留这段草稿');
     }
   });
@@ -282,7 +299,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     });
     await screen.findByRole('heading', { name: '新模特' });
     expect(smo.avatars.list).toHaveBeenCalledTimes(2);
-    fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+    fireEvent.click(studioModeButton('视频'));
     expect(await screen.findByRole('heading', { name: '新模特' })).toBeInTheDocument();
   });
 
@@ -819,30 +836,35 @@ describe('SMO.H3 Studio navigation and avatars', () => {
 });
 
 describe('text-to-video studio', () => {
-  test('语音、图像、视频三主 tab 与视频子模式保持清晰的面板 ARIA 关系', async () => {
+  test('二级制作目录提供语音、图像、视频按钮和完整面板 ARIA', async () => {
     await renderStudio();
 
-    const mainTabs = screen.getByRole('tablist', { name: '主制作模式' });
-    expect(within(mainTabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
-      '语音',
-      '图像',
-      '视频',
-    ]);
-    expect(within(mainTabs).getByRole('tab', { name: '视频' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    expect(parent).toHaveAttribute('aria-expanded', 'true');
+    expect(parent).toHaveAttribute('aria-controls', 'studio-mode-navigation');
+    expect(parent).toHaveAttribute('aria-current', 'page');
+
+    const directory = screen.getByRole('group', { name: '制作模式' });
+    expect(directory).toHaveAttribute('id', 'studio-mode-navigation');
+    expect(within(directory).getAllByRole('button').map((button) => button.textContent))
+      .toEqual(['语音', '图像', '视频']);
+    expect(studioModeButton('视频')).toHaveAttribute('aria-current', 'page');
+    expect(studioModeButton('语音')).not.toHaveAttribute('aria-current');
+    expect(studioModeButton('图像')).toHaveAttribute('aria-controls', 'image-main-panel');
+
     expect(document.getElementById('speech-main-panel')).not.toBeVisible();
     expect(document.getElementById('image-main-panel')).not.toBeVisible();
     expect(document.getElementById('video-main-panel')).toBeVisible();
-    expect(screen.getByRole('tab', { name: '图像' })).toHaveAttribute(
-      'aria-controls',
-      'image-main-panel',
+    expect(screen.getByRole('region', { name: '视频制作', exact: true })).toBe(
+      studioModePanel('视频'),
     );
     expect(document.getElementById('image-main-panel')).toHaveAttribute(
-      'aria-labelledby',
-      'image-main-tab',
+      'aria-label',
+      '图像制作',
     );
+    expect(document.getElementById('image-main-panel')).not.toHaveAttribute('aria-labelledby');
+    expect(screen.queryByRole('tablist', { name: '主制作模式' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: '视频', exact: true })).not.toBeInTheDocument();
 
     const preview = screen.getByRole('region', { name: '当前人物预览' });
     const controls = screen.getByRole('region', { name: '制作控制区' });
@@ -873,13 +895,52 @@ describe('text-to-video studio', () => {
     expect(audioTab).toHaveAttribute('aria-selected', 'true');
   });
 
-  test('语音、图像、视频主 tab 支持 roving tabindex 和键盘循环导航', async () => {
-    await renderStudio();
+  test('独立受控 StudioPage 使用自包含的面板可访问名称', () => {
+    const onModeChange = vi.fn();
+    const props = {
+      avatar,
+      loading: false,
+      error: null,
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      onCreateAvatar: vi.fn(),
+      onModeChange,
+    };
+    const view = render(<StudioPage {...props} mode="speech" />);
+
+    for (const { mode, label } of [
+      { mode: 'speech', label: '语音制作' },
+      { mode: 'image', label: '图像制作' },
+      { mode: 'video', label: '视频制作' },
+    ] as const) {
+      view.rerender(<StudioPage {...props} mode={mode} />);
+      const panel = document.getElementById(`${mode}-main-panel`);
+      expect(panel).not.toBeNull();
+      expect(panel).toHaveAttribute('aria-label', label);
+      expect(panel).not.toHaveAttribute('aria-labelledby');
+      expect(panel).toHaveAccessibleName(label);
+      expect(panel).toBeVisible();
+    }
+    expect(screen.queryByRole('tablist', { name: '主制作模式' })).not.toBeInTheDocument();
+    expect(document.getElementById('studio-speech-button')).not.toBeInTheDocument();
+  });
+
+  test('非受控主 tab 支持方向键、Home/End 和 roving tabindex', () => {
+    render(
+      <StudioPage
+        avatar={avatar}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={vi.fn()}
+      />,
+    );
 
     const mainTabs = screen.getByRole('tablist', { name: '主制作模式' });
     const speechTab = within(mainTabs).getByRole('tab', { name: '语音' });
     const imageTab = within(mainTabs).getByRole('tab', { name: '图像' });
     const videoTab = within(mainTabs).getByRole('tab', { name: '视频' });
+    expect(videoTab).toHaveAttribute('aria-selected', 'true');
+    expect(videoTab).toHaveAttribute('tabindex', '0');
 
     videoTab.focus();
     fireEvent.keyDown(videoTab, { key: 'ArrowRight' });
@@ -894,7 +955,6 @@ describe('text-to-video studio', () => {
     expect(imageTab).toHaveAttribute('aria-selected', 'true');
     expect(imageTab).toHaveAttribute('tabindex', '0');
     expect(speechTab).toHaveAttribute('tabindex', '-1');
-    expect(videoTab).toHaveAttribute('tabindex', '-1');
 
     fireEvent.keyDown(imageTab, { key: 'ArrowRight' });
     expect(videoTab).toHaveFocus();
@@ -908,12 +968,97 @@ describe('text-to-video studio', () => {
     fireEvent.keyDown(speechTab, { key: 'End' });
     expect(videoTab).toHaveFocus();
     expect(videoTab).toHaveAttribute('aria-selected', 'true');
+    expect(videoTab).toHaveAttribute('tabindex', '0');
   });
 
-  test('图像草稿在语音、视频主 tab 和应用页面切换后保留', async () => {
+  test('二级目录子项同时切换应用页面和制作模式，父目录只切换展开状态', async () => {
     await renderStudio();
-    fireEvent.click(screen.getByRole('tab', { name: '图像' }));
-    const panel = within(screen.getByRole('tabpanel', { name: '图像' }));
+
+    fireEvent.click(studioModeButton('图像'));
+    expect(studioModePanel('图像')).toBeVisible();
+    expect(studioModePanel('视频')).not.toBeVisible();
+    expect(studioModeButton('图像')).toHaveAttribute('aria-current', 'page');
+
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    fireEvent.click(parent);
+    expect(parent).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('heading', { name: '设置' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: '制作模式' })).not.toBeInTheDocument();
+
+    fireEvent.click(parent);
+    fireEvent.click(studioModeButton('语音'));
+    expect(studioModePanel('语音')).toBeVisible();
+    expect(screen.queryByRole('heading', { name: '设置' })).not.toBeInTheDocument();
+    expect(studioModeButton('语音')).toHaveAttribute('aria-current', 'page');
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    fireEvent.click(studioModeButton('视频'));
+    expect(studioModePanel('视频')).toBeVisible();
+    expect(studioModeButton('视频')).toHaveAttribute('aria-current', 'page');
+  });
+
+  test('收起二级目录不卸载语音、图像和视频草稿', async () => {
+    await renderStudio();
+    const videoDraft = screen.getByLabelText('原始文字');
+    fireEvent.change(videoDraft, { target: { value: '收起目录后保留视频草稿' } });
+
+    fireEvent.click(studioModeButton('图像'));
+    const imageDraft = screen.getByLabelText('图像提示词');
+    fireEvent.change(imageDraft, { target: { value: '收起目录后保留图像草稿' } });
+
+    fireEvent.click(studioModeButton('语音'));
+    const speechDraft = studioSpeechField('口播文字');
+    fireEvent.change(speechDraft, { target: { value: '收起目录后保留语音草稿' } });
+
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    fireEvent.click(parent);
+    expect(parent).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById('studio-mode-navigation')).not.toBeVisible();
+    expect(studioModePanel('语音')).toBeVisible();
+    expect(speechDraft).toHaveValue('收起目录后保留语音草稿');
+
+    fireEvent.click(parent);
+    fireEvent.click(studioModeButton('图像'));
+    expect(screen.getByLabelText('图像提示词')).toBe(imageDraft);
+    expect(imageDraft).toHaveValue('收起目录后保留图像草稿');
+    fireEvent.click(studioModeButton('视频'));
+    expect(screen.getByLabelText('原始文字')).toBe(videoDraft);
+    expect(videoDraft).toHaveValue('收起目录后保留视频草稿');
+    fireEvent.click(studioModeButton('语音'));
+    expect(studioSpeechField('口播文字')).toBe(speechDraft);
+  });
+
+  test('二级目录导航保留父项与激活子项的键盘焦点', async () => {
+    await renderStudio();
+
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    parent.focus();
+    fireEvent.click(parent);
+    expect(parent).toHaveFocus();
+    expect(parent).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(parent);
+    expect(parent).toHaveFocus();
+    const imageButton = studioModeButton('图像');
+    imageButton.focus();
+    fireEvent.click(imageButton);
+    expect(imageButton).toHaveFocus();
+    expect(studioModePanel('图像')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    const videoButton = studioModeButton('视频');
+    videoButton.focus();
+    fireEvent.click(videoButton);
+    expect(videoButton).toHaveFocus();
+    expect(studioModePanel('视频')).toBeVisible();
+  });
+
+  test('图像草稿在二级语音、视频目录和应用页面切换后保留', async () => {
+    await renderStudio();
+    fireEvent.click(studioModeButton('图像'));
+    const panel = within(studioModePanel('图像'));
 
     fireEvent.change(panel.getByLabelText('图像提示词'), {
       target: { value: '切换后保留的图像草稿' },
@@ -927,18 +1072,18 @@ describe('text-to-video studio', () => {
       target: { value: '31' },
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    fireEvent.click(studioModeButton('语音'));
     expect(document.getElementById('image-main-panel')).not.toBeVisible();
-    fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    fireEvent.click(studioModeButton('视频'));
     fireEvent.change(screen.getByLabelText('原始文字'), {
       target: { value: '图像切换后仍保留的视频草稿' },
     });
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
-      fireEvent.click(screen.getByRole('tab', { name: '图像' }));
+      fireEvent.click(studioModeButton('图像'));
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
-      const currentPanel = within(screen.getByRole('tabpanel', { name: '图像' }));
+      fireEvent.click(studioModeButton('图像'));
+      const currentPanel = within(studioModePanel('图像'));
       expect(currentPanel.getByLabelText('图像提示词')).toHaveValue('切换后保留的图像草稿');
       expect(currentPanel.getByLabelText('图像比例')).toHaveValue('16:9 (Widescreen)');
       expect(currentPanel.getByLabelText('分辨率')).toHaveValue('0.7');
@@ -946,20 +1091,20 @@ describe('text-to-video studio', () => {
       expect(currentPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(31);
     }
 
-    fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    fireEvent.click(studioModeButton('视频'));
     expect(screen.getByLabelText('原始文字')).toHaveValue('图像切换后仍保留的视频草稿');
-    fireEvent.click(screen.getByRole('tab', { name: '图像' }));
+    fireEvent.click(studioModeButton('图像'));
     expect(screen.getByLabelText('图像提示词')).toHaveValue('切换后保留的图像草稿');
   });
 
-  test('语音与视频草稿在切换主模式和应用页面后保留', async () => {
+  test('语音与视频草稿在切换二级目录和应用页面后保留', async () => {
     smo.files.selectAudio.mockResolvedValue('G:\\recordings\\speech-clone.wav');
     await renderStudio();
 
     fireEvent.change(screen.getByLabelText('原始文字'), {
       target: { value: '主模式切换后保留的视频草稿' },
     });
-    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    fireEvent.click(studioModeButton('语音'));
     fireEvent.change(studioSpeechField('口播文字'), {
       target: { value: '主模式切换后保留的口播草稿' },
     });
@@ -976,9 +1121,9 @@ describe('text-to-video studio', () => {
       target: { value: '保留的参考原文' },
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    fireEvent.click(studioModeButton('视频'));
     expect(screen.getByLabelText('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
-    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    fireEvent.click(studioModeButton('语音'));
     expect(studioSpeechField('口播文字', 'clone')).toHaveValue('主模式切换后保留的口播草稿');
     expect(studioSpeechField('输出格式', 'clone')).toHaveValue('mp3');
     expect(studioSpeechField('参考原文（可选）', 'clone')).toHaveValue('保留的参考原文');
@@ -988,13 +1133,13 @@ describe('text-to-video studio', () => {
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      fireEvent.click(studioModeButton('语音'));
       expect(studioSpeechField('口播文字')).toHaveValue('主模式切换后保留的口播草稿');
       expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
       expect(studioSpeechField('输出格式')).toHaveValue('mp3');
     }
 
-    fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    fireEvent.click(studioModeButton('视频'));
     expect(screen.getByLabelText('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
   });
 
@@ -1008,7 +1153,7 @@ describe('text-to-video studio', () => {
     await waitFor(() => expect(smo.components.getState).toHaveBeenCalledWith('speech'));
 
     expect(smo.speech.getCapabilities).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    fireEvent.click(studioModeButton('语音'));
     await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
@@ -1019,7 +1164,7 @@ describe('text-to-video studio', () => {
     });
     expect(document.getElementById('custom-speech-speaker')).toHaveValue('');
 
-    fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+    fireEvent.click(studioModeButton('语音'));
     await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(2));
     await act(async () => {
       second.resolve({ speakers: ['ReturnVoice'], languages: ['Chinese'] });
@@ -1397,7 +1542,7 @@ describe('text-to-video studio', () => {
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      fireEvent.click(studioModeButton('视频'));
       audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
       expect(audioPanel.getByLabelText('所选音频')).toBe(selectedAudio);
       expect(audioPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
@@ -1513,18 +1658,9 @@ describe('用于音频数字人', () => {
 
       const panel = await useSpeechWork(id);
 
-      expect(screen.getByRole('tab', { name: '视频', exact: true })).toHaveAttribute(
-        'aria-selected',
-        'true',
-      );
-      expect(screen.getByRole('tab', { name: '视频', exact: true })).toHaveAttribute(
-        'tabindex',
-        '0',
-      );
-      expect(screen.getByRole('tab', { name: '语音', exact: true })).toHaveAttribute(
-        'aria-selected',
-        'false',
-      );
+      expect(studioModeButton('视频')).toHaveAttribute('aria-current', 'page');
+      expect(studioModeButton('视频')).toHaveAttribute('aria-controls', 'video-main-panel');
+      expect(studioModeButton('语音')).not.toHaveAttribute('aria-current');
       expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveAttribute(
         'aria-selected',
         'true',
@@ -1586,7 +1722,7 @@ describe('用于音频数字人', () => {
       target: { value: '3' },
     });
 
-    fireEvent.click(screen.getByRole('tab', { name: '语音', exact: true }));
+    fireEvent.click(studioModeButton('语音'));
     fireEvent.change(studioSpeechField('口播文字'), {
       target: { value: '保留语音作品草稿' },
     });
@@ -1612,7 +1748,7 @@ describe('用于音频数字人', () => {
       }),
     ).toHaveValue(13);
 
-    fireEvent.click(screen.getByRole('tab', { name: '语音', exact: true }));
+    fireEvent.click(studioModeButton('语音'));
     expect(studioSpeechField('口播文字')).toHaveValue('保留语音作品草稿');
     expect(studioSpeechField('情绪/语气')).toHaveValue('温和坚定');
   });
@@ -2619,7 +2755,7 @@ describe('audio digital human studio', () => {
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      fireEvent.click(studioModeButton('视频'));
       expect(panel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
         '跨模块保留的润色草稿',
       );
@@ -3550,7 +3686,7 @@ describe('generation options and hardware apply', () => {
     const directoryInput = await screen.findByLabelText('模型目录');
     fireEvent.change(directoryInput, { target: { value: 'D:\\自定义模型目录' } });
 
-    fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+    fireEvent.click(studioModeButton('视频'));
     const panel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
     fireEvent.change(panel.getByLabelText('原始文字'), {
       target: { value: '共享目录后的生成' },
@@ -4088,39 +4224,39 @@ describe('works page actions', () => {
       expect(cards[0]).toHaveTextContent(id);
     };
 
-    fireEvent.click(screen.getByRole('button', { name: '语音' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '语音' }));
     expectPressedFilter('语音');
     expectOnlyWork('speech-running');
 
-    fireEvent.click(screen.getByRole('button', { name: '图像' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '图像' }));
     expectPressedFilter('图像');
     expectOnlyWork('image-done');
 
-    fireEvent.click(screen.getByRole('button', { name: '文字生视频' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '文字生视频' }));
     expectPressedFilter('文字生视频');
     expect(screen.getByText('text-done')).toBeInTheDocument();
     expect(screen.getByText('text-pending')).toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: '音频数字人' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '音频数字人' }));
     expectPressedFilter('音频数字人');
     expectOnlyWork('audio-failed');
 
-    fireEvent.click(screen.getByRole('button', { name: '运行中' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '运行中' }));
     expectPressedFilter('运行中');
     expectOnlyWork('speech-running');
 
-    fireEvent.click(screen.getByRole('button', { name: '已完成' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '已完成' }));
     expectPressedFilter('已完成');
     expect(screen.getByText('text-done')).toBeInTheDocument();
     expect(screen.getByText('image-done')).toBeInTheDocument();
     expect(screen.getAllByRole('article')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: '失败' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '失败' }));
     expectPressedFilter('失败');
     expectOnlyWork('audio-failed');
 
-    fireEvent.click(screen.getByRole('button', { name: '全部' }));
+    fireEvent.click(within(filters).getByRole('button', { name: '全部' }));
     expectPressedFilter('全部');
     expect(screen.getAllByRole('article')).toHaveLength(5);
     expect(screen.getByText('text-pending')).toBeInTheDocument();

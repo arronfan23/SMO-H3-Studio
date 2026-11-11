@@ -602,7 +602,8 @@ describe('ready environment entry', () => {
 
     for (const name of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      fireEvent.click(screen.getByRole('button', { name: '视频', exact: true }));
+      expect(document.getElementById('video-main-panel')).toBeVisible();
       expect(screen.getByLabelText('原始文字')).toHaveValue('环境检查后仍保留草稿');
     }
   });

@@ -440,6 +440,14 @@ async function saveLlmProfile(page: Page, baseUrl: string): Promise<void> {
   await expect(page.locator('#llm-api-key')).toHaveValue('');
 }
 
+async function openStudioVideo(page: Page): Promise<void> {
+  const parent = page.getByRole('button', { name: '制作台', exact: true });
+  if (await parent.getAttribute('aria-expanded') !== 'true') {
+    await parent.click();
+  }
+  await page.getByRole('button', { name: '视频', exact: true }).click();
+}
+
 async function readVisibleTextJobId(page: Page): Promise<string> {
   const jobId = page.locator(
     '#text-mode-panel section[aria-label="任务状态"]:visible code',
@@ -741,7 +749,7 @@ test.describe('SMO.H3 Studio portable package', () => {
     await expect(page!.locator('h3:has-text("ComfyUI 连接正常")')).toBeVisible();
 
     // Non-empty studio preview comes from the seeded avatar.
-    await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+    await openStudioVideo(page!);
     await expect(
       page!.locator(`.person-preview h2:has-text("${AVATAR_NAME}")`),
     ).toBeVisible();
@@ -821,7 +829,7 @@ test.describe('SMO.H3 Studio portable package', () => {
     ]) {
       await setViewport(app!, page!, width, height);
 
-      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await openStudioVideo(page!);
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
       await assertViewWithinViewport(page!, `package-studio-${width}`, [
         '.brand-lockup',

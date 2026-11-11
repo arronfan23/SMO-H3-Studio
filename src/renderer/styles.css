@@ -294,6 +294,11 @@ body[data-window-maximized='true'] .window-resize-handle {
   flex: 0 0 auto;
 }
 
+.nav-item > span {
+  min-width: 0;
+  flex: 1;
+}
+
 .nav-item:hover {
   color: #ffffff;
   background: #333b35;
@@ -304,6 +309,36 @@ body[data-window-maximized='true'] .window-resize-handle {
   color: #8ce3bd;
   background: #36473e;
   border-color: #465d50;
+}
+
+.nav-directory {
+  min-width: 0;
+}
+
+.nav-directory > .nav-item {
+  gap: 8px;
+  padding-inline: 10px;
+}
+
+.nav-chevron {
+  margin-left: auto;
+}
+
+.nav-submenu {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0 14px;
+}
+
+.nav-submenu[hidden] {
+  display: none;
+}
+
+.nav-submenu .nav-item {
+  min-height: 38px;
+  padding: 8px 10px;
+  gap: 9px;
+  font-size: 13px;
 }
 
 .main-content {
