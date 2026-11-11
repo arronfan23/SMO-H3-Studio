@@ -33,6 +33,14 @@ function formatTimestamp(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
 }
 
+function createT2VaPrompt(): string {
+  return [
+    'integrated_multimodal_description: [Shot 1] Live-action, a static shot holds on a quiet studio.',
+    'overall_soundscape: Soft room tone continues throughout the video.',
+    'non_diegetic_music: N/A',
+  ].join('\n\n');
+}
+
 function createRef2VaPrompt(duration: number): string {
   const tailStart = Math.max(0, duration - 2);
   return [
@@ -98,7 +106,9 @@ export async function startLlmMock(): Promise<LocalLlmMock> {
                 index: 0,
                 message: {
                   role: 'assistant',
-                  content: createRef2VaPrompt(duration),
+                  content: userContent.includes('Input mode: T2VA.')
+                    ? createT2VaPrompt()
+                    : createRef2VaPrompt(duration),
                 },
                 finish_reason: 'stop',
               },

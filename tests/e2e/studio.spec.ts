@@ -652,6 +652,26 @@ async function readVisibleReferenceJobId(page: Page): Promise<string> {
   return (await jobId.textContent())!;
 }
 
+function expectNoLlmPathLeaks(
+  messages: ReadonlyArray<{ role: string; content: string }>,
+  sensitivePaths: readonly string[],
+): void {
+  expect(messages.length).toBeGreaterThan(0);
+  for (const [messageIndex, message] of messages.entries()) {
+    const normalizedContent = message.content.replaceAll('\\', '/');
+    for (const sensitivePath of sensitivePaths) {
+      const directory = dirname(sensitivePath);
+      const context = `message ${messageIndex} (${message.role})`;
+      expect(message.content, `${context}: native path`).not.toContain(sensitivePath);
+      expect(message.content, `${context}: native dirname`).not.toContain(directory);
+      expect(normalizedContent, `${context}: POSIX path`)
+        .not.toContain(sensitivePath.replaceAll('\\', '/'));
+      expect(normalizedContent, `${context}: POSIX dirname`)
+        .not.toContain(directory.replaceAll('\\', '/'));
+    }
+  }
+}
+
 function reachableImageNodeIds(
   graph: Record<string, { inputs: Record<string, unknown> }>,
   entryId: string,
@@ -1003,7 +1023,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page!.locator('text=测试通过')).toBeVisible({ timeout: 15_000 });
   });
 
-  test('无模特文生验证 T2VA 润色参数与原文生成', async () => {
+  test('无模特文生完成 T2VA 原文与润色后生成', async () => {
     const originalText = 'A quiet studio shot with no reference image.';
     await saveLlmProfile(page!, llmMock.baseUrl);
     await openStudio(page!);
@@ -1052,11 +1072,10 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     const requestsBefore = llmMock.requests.length;
     await page!.click('#text-mode-panel button:has-text("AI 润色")');
-    // The shared LLM fixture returns a Ref2VA-shaped completion. For T2VA,
-    // verify the real outgoing request and generate from the original draft.
-    await expect(
-      page!.locator('#text-mode-panel button:has-text("AI 润色")'),
-    ).toBeEnabled({ timeout: 30_000 });
+    await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
+    await expect(page!.locator('#polished-tab')).toHaveAttribute('aria-selected', 'true');
+    const polishedResult = await page!.inputValue('#polished-text');
+    expect(polishedResult).toContain('integrated_multimodal_description:');
     const llmRequest = llmMock.requests
       .slice(requestsBefore)
       .find((request) => request.method === 'POST' && request.url === '/v1/chat/completions');
@@ -1071,13 +1090,50 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     expect(llmUserContent).toContain('Reference labels: None.');
     expect(comfyMock.submittedPrompts).toHaveLength(1);
 
-    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    const editedPrompt = 'Edited T2VA polished prompt for the second generation.';
+    await page!.fill('#polished-text', editedPrompt);
+    await page!.click('#text-mode-panel button:has-text("生成视频")');
+    const polishedJobId = await readVisibleTextJobId(page!);
+    await waitForStableStatus(page!, polishedJobId, 'done');
+
+    expect(comfyMock.uploadedImages).toEqual([]);
+    expect(comfyMock.submittedPrompts).toHaveLength(2);
+    const polishedGraph = comfyMock.submittedPrompts[1].prompt as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(polishedGraph['136'].class_type).toBe('MiniMaxH3ImageToVideo');
+    expect(polishedGraph['136'].inputs.prompt).toBe(editedPrompt);
+    expect(polishedGraph['136'].inputs).not.toHaveProperty('audio_vae');
+    expect(polishedGraph['136'].inputs).not.toHaveProperty('ref_image_size');
+    expect(polishedGraph['136'].inputs).not.toHaveProperty('ref_images');
     expect(
-      existsSync(join(outputDirectory, 'SMO-H3', originalJobId, originalMp4!)),
-    ).toBe(true);
-    const work = page!.locator('.works-list article').filter({ hasText: originalJobId });
-    await expect(work).toContainText('已完成');
-    await expect(work.locator('video')).toBeVisible();
+      Object.keys(polishedGraph['136'].inputs).filter((key) =>
+        key.startsWith('ref_images.'),
+      ),
+    ).toEqual([]);
+    expect(polishedGraph['226']).toBeUndefined();
+    expect(polishedGraph['132'].inputs.value).toBe(7);
+    expect(polishedGraph['269'].inputs.seed).toBe(314);
+    expect(polishedGraph['124'].inputs.steps).toBe(9);
+    expect(polishedGraph['180'].inputs.filename_prefix).toBe(
+      `SMO-H3/${polishedJobId}`,
+    );
+    const polishedMp4 = (await readdir(
+      join(outputDirectory, 'SMO-H3', polishedJobId),
+    )).find((name) => name.endsWith('.mp4'));
+    expect(polishedMp4).toBeDefined();
+
+    await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+    for (const [jobId, outputName] of [
+      [originalJobId, originalMp4],
+      [polishedJobId, polishedMp4],
+    ] as const) {
+      expect(existsSync(join(outputDirectory, 'SMO-H3', jobId, outputName!))).toBe(true);
+      const work = page!.locator('.works-list article').filter({ hasText: jobId });
+      await expect(work).toContainText('已完成');
+      await expect(work.locator('video')).toBeVisible();
+    }
   });
 
   test('1 图显式当前模特使用 Ref2VA 且只上传一张', async () => {
@@ -1106,6 +1162,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       .toHaveCount(1);
     const [avatarPhotoName] = await readdir(join(dataDirectory, 'avatars'));
     expect(avatarPhotoName).toMatch(/^[0-9a-f-]{36}\.png$/);
+    const managedAvatarPath = join(dataDirectory, 'avatars', avatarPhotoName);
     await expect(page!.locator('#reference-mode-panel .reference-image-filename'))
       .toHaveText(avatarPhotoName);
     expect(comfyMock.uploadedImages).toEqual([]);
@@ -1146,7 +1203,10 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     )?.content;
     expect(llmUserContent).toContain('Input mode: REF2VA.');
     expect(llmUserContent).toContain('Reference labels: <Picture 1>.');
-    expect(llmRequest!.body).not.toContain(launchOptions.fileDialogPaths[0]);
+    expectNoLlmPathLeaks(llmBody.messages, [
+      launchOptions.fileDialogPaths[0],
+      managedAvatarPath,
+    ]);
 
     await page!.click('#reference-original-tab');
     await expect(page!.locator('#reference-original-text')).toHaveValue(originalText);
@@ -1160,7 +1220,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     const jobId = await readVisibleReferenceJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
-    expect(comfyMock.uploadedImages).toEqual([`${jobId}-0.png`]);
+    expect(comfyMock.uploadedImages.map((image) => image.filename)).toEqual([
+      `${jobId}-0.png`,
+    ]);
     const graph = comfyMock.submittedPrompts[previousCount].prompt as Record<
       string,
       { class_type: string; inputs: Record<string, unknown> }
@@ -1281,15 +1343,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         (_, index) => `<Picture ${index + 1}>`,
       ).join(', ')}.`,
     );
-    const normalizedLlmUserContent = llmUserContent!.replaceAll('\\', '/');
-    for (const referencePath of referencePaths) {
-      const directory = dirname(referencePath);
-      expect(llmUserContent).not.toContain(referencePath);
-      expect(llmUserContent).not.toContain(directory);
-      // JSON.parse restores native separators; normalization also catches POSIX-style leaks.
-      expect(normalizedLlmUserContent).not.toContain(referencePath.replaceAll('\\', '/'));
-      expect(normalizedLlmUserContent).not.toContain(directory.replaceAll('\\', '/'));
-    }
+    expectNoLlmPathLeaks(llmBody.messages, referencePaths);
 
     const editedPrompt = 'Polished nine-reference prompt in the selected order.';
     await page.fill('#reference-polished-text', editedPrompt);
@@ -1298,9 +1352,15 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await waitForStableStatus(page, jobId, 'done');
 
     expect(comfyMock.submittedPrompts).toHaveLength(1);
-    expect(comfyMock.uploadedImages).toEqual(
+    expect(comfyMock.uploadedImages.map((image) => image.filename)).toEqual(
       Array.from({ length: 9 }, (_, index) => `${jobId}-${index}.png`),
     );
+    for (const [index, uploadedImage] of comfyMock.uploadedImages.entries()) {
+      const sourceBytes = await readFile(referencePaths[index]);
+      expect(sourceBytes.length).toBeGreaterThan(0);
+      expect(uploadedImage.data.length).toBeGreaterThan(0);
+      expect(uploadedImage.data.equals(sourceBytes)).toBe(true);
+    }
     const graph = comfyMock.submittedPrompts[0].prompt as Record<
       string,
       { class_type: string; inputs: Record<string, unknown> }

@@ -21,7 +21,10 @@ export interface ComfyMock {
   baseUrl: string;
   close: () => Promise<void>;
   failNext: () => void;
-  uploadedImages: string[];
+  uploadedImages: Array<{
+    filename: string;
+    data: Buffer;
+  }>;
   submittedPromptIds: string[];
   submittedPrompts: Array<{
     promptId: string;
@@ -176,7 +179,7 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
   const records = new Map<string, PromptRecord>();
   const sockets = new Set<WebSocket>();
   const submittedPromptIds: string[] = [];
-  const uploadedImages: string[] = [];
+  const uploadedImages: ComfyMock['uploadedImages'] = [];
   let activePromptId: string | null = null;
   let shouldFailNext = false;
   const submittedPrompts: ComfyMock['submittedPrompts'] = [];
@@ -229,7 +232,10 @@ export async function startComfyMock(options: ComfyMockOptions): Promise<ComfyMo
             sendJson(response, 400, { error: 'Missing image field' });
             return;
           }
-          uploadedImages.push(imagePart.filename);
+          uploadedImages.push({
+            filename: imagePart.filename,
+            data: Buffer.from(imagePart.data),
+          });
           sendJson(response, 200, {
             name: imagePart.filename,
             subfolder: '',
