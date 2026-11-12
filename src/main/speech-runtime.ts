@@ -158,7 +158,7 @@ export class SpeechRuntime {
     if (!(await fileExists(pythonPath))) return false;
     try {
       const { stdout } = await this.execFile(pythonPath, ['--version'], commandOptions);
-      return /^Python 3\.12\.\d+(?:\s+.*)?$/.test(stdout.trim());
+      return /^Python 3\.11\.\d+(?:\s+.*)?$/.test(stdout.trim());
     } catch {
       commandOptions.signal?.throwIfAborted();
       return false;
@@ -268,11 +268,11 @@ export class SpeechRuntime {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
       signal.throwIfAborted();
-      await this.execFile(uvPath, ['python', 'install', '3.12'], commandOptions);
+      await this.execFile(uvPath, ['python', 'install', '3.11'], commandOptions);
       signal.throwIfAborted();
       await this.execFile(
         uvPath,
-        ['venv', '--python', '3.12', venvDirectory],
+        ['venv', '--python', '3.11', venvDirectory],
         commandOptions,
       );
     }

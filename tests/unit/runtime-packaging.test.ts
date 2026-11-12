@@ -253,7 +253,12 @@ describe('electron-builder.yml', () => {
     const speech = config.extraResources?.find(
       (resource) => resource.from === 'resources/speech',
     );
-    const projectFiles = ['pyproject.toml', 'qwen_tts_service.py', 'uv.lock'];
+    const projectFiles = [
+      'pyproject.toml',
+      'index_tts_service.py',
+      'index_tts_models.json',
+      'uv.lock',
+    ];
 
     expect(speech).toMatchObject({
       from: 'resources/speech',

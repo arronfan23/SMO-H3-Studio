@@ -134,7 +134,7 @@ describe('SpeechProcessManager', () => {
     });
     const manager = new SpeechProcessManager({
       pythonPath: 'G:\\speech runtime\\python.exe',
-      serviceScript: 'G:\\app\\resources\\speech\\qwen_tts_service.py',
+      serviceScript: 'G:\\app\\resources\\speech\\index_tts_service.py',
       modelDirectory: 'G:\\data\\components\\speech\\models',
       startupTimeoutMs: 200,
       healthTimeoutMs: 60,
@@ -159,11 +159,15 @@ describe('SpeechProcessManager', () => {
         '-I',
         '-X',
         'utf8',
-        'G:\\app\\resources\\speech\\qwen_tts_service.py',
+        'G:\\app\\resources\\speech\\index_tts_service.py',
         '--model-root',
         'G:\\data\\components\\speech\\models',
       ],
-      expect.objectContaining({ shell: false, windowsHide: true }),
+      expect.objectContaining({
+        shell: false,
+        windowsHide: true,
+        cwd: 'G:\\data\\components\\speech\\models',
+      }),
     );
     expect(requests[0]?.url.href).toBe('http://127.0.0.1:43127/health');
   });
@@ -218,7 +222,7 @@ describe('SpeechProcessManager', () => {
     expect(child.kill).toHaveBeenCalled();
   });
 
-  test('sends fixed-voice fields and returns WAV bytes', async () => {
+  test('sends IndexTTS2 reference and emotion fields without a Qwen speaker', async () => {
     const { manager, requests } = createSpeech();
 
     await expect(
@@ -228,6 +232,7 @@ describe('SpeechProcessManager', () => {
         language: 'Chinese',
         speaker: 'Vivian',
         instruct: '温柔地说',
+        referenceAudioPath: 'G:\\authorized.wav',
       }),
     ).resolves.toEqual(WAV);
 
@@ -237,7 +242,7 @@ describe('SpeechProcessManager', () => {
       voice_mode: 'custom',
       text: '固定音色测试',
       language: 'Chinese',
-      speaker: 'Vivian',
+      ref_audio: 'G:\\authorized.wav',
       instruct: '温柔地说',
     });
   });
@@ -313,12 +318,10 @@ describe('SpeechProcessManager', () => {
       text: '测试',
       language: 'Auto',
       ref_audio: 'G:\\authorized.wav',
-      ref_text: '参考原文',
-      x_vector_only_mode: false,
     });
   });
 
-  test('enables x-vector-only cloning when the reference text is blank', async () => {
+  test('does not send Qwen-only clone fields when reference text is blank', async () => {
     const { manager, requests } = createSpeech();
 
     await manager.generate({
@@ -330,9 +333,11 @@ describe('SpeechProcessManager', () => {
     });
 
     const request = requests.find(({ url }) => url.pathname === '/generate');
-    expect(JSON.parse(String(request?.init?.body))).toMatchObject({
-      ref_text: '  ',
-      x_vector_only_mode: true,
+    expect(JSON.parse(String(request?.init?.body))).toEqual({
+      voice_mode: 'clone',
+      text: '没有参考文本',
+      language: 'Auto',
+      ref_audio: 'G:\\authorized.wav',
     });
   });
 

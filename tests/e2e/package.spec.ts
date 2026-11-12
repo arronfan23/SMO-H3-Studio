@@ -718,11 +718,17 @@ test.describe('SMO.H3 Studio portable package', () => {
 
     const speechDirectory = join(packagedResourcesPath, 'resources', 'speech');
     expect((await readdir(speechDirectory)).sort()).toEqual([
+      'index_tts_models.json',
+      'index_tts_service.py',
       'pyproject.toml',
-      'qwen_tts_service.py',
       'uv.lock',
     ]);
-    for (const file of ['pyproject.toml', 'qwen_tts_service.py', 'uv.lock']) {
+    for (const file of [
+      'pyproject.toml',
+      'index_tts_service.py',
+      'index_tts_models.json',
+      'uv.lock',
+    ]) {
       expect((await stat(join(speechDirectory, file))).size).toBeGreaterThan(0);
     }
 

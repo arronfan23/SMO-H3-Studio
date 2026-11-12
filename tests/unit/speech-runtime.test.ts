@@ -116,7 +116,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
         await writeFile(join(outputDirectory, 'uv.exe'), 'uv fixture');
       }
       if (command === pythonPath && args.length === 1 && args[0] === '--version') {
-        return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+        return { stdout: 'Python 3.11.13\r\n', stderr: '' };
       }
       if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
         versionChecks += 1;
@@ -147,7 +147,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
     return { runtime, execFile, calls, versionChecks: () => versionChecks };
   }
 
-  test('verifies uv and runs Python 3.12, venv, and locked sync without a shell', async () => {
+  test('verifies uv and runs Python 3.11, venv, and locked sync without a shell', async () => {
     const { runtime, calls } = createRuntime();
 
     const result = await runtime.prepare();
@@ -156,11 +156,11 @@ describe('SpeechRuntime mocked command orchestration', () => {
     const uvCalls = calls.filter(({ command }) => command.endsWith('uv.exe'));
     expect(uvCalls).toHaveLength(4);
     expect(uvCalls[0]?.args).toEqual(['--version']);
-    expect(uvCalls[1]?.args).toEqual(['python', 'install', '3.12']);
+    expect(uvCalls[1]?.args).toEqual(['python', 'install', '3.11']);
     expect(uvCalls[2]?.args).toEqual([
       'venv',
       '--python',
-      '3.12',
+      '3.11',
       venvDirectory,
     ]);
     expect(uvCalls[3]?.args).toEqual([
@@ -190,7 +190,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
     expect(result.environment.PYTHONHOME).toBeUndefined();
   });
 
-  test('reuses a valid Python 3.12 venv and continues directly to locked sync', async () => {
+  test('reuses a valid Python 3.11 venv and continues directly to locked sync', async () => {
     const toolDirectory = join(runtimeDirectory, 'tools', `uv-${UV_VERSION}`);
     const venvDirectory = join(runtimeDirectory, 'venv');
     const pythonPath = join(venvDirectory, 'Scripts', 'python.exe');
@@ -207,7 +207,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
     const { runtime, calls } = createRuntime({
       execFileImpl: async (command, args) => {
         if (command === pythonPath && args.length === 1 && args[0] === '--version') {
-          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+          return { stdout: 'Python 3.11.13\r\n', stderr: '' };
         }
         if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
           return { stdout: `uv ${UV_VERSION}`, stderr: '' };
@@ -268,7 +268,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
           if (command === pythonPath && args.length === 1 && args[0] === '--version') {
             if (pythonState === 'error') throw new Error('broken Python installation');
             return {
-              stdout: pythonState === 'no-config' ? 'Python 3.12.13\r\n' : 'Python 3.11.9\r\n',
+              stdout: pythonState === 'no-config' ? 'Python 3.11.13\r\n' : 'Python 3.12.13\r\n',
               stderr: '',
             };
           }
@@ -404,7 +404,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
       const uvCalls = calls.filter(({ command }) => command.endsWith('uv.exe'));
       expect(uvCalls[0]?.args).toEqual(['--version']);
       expect(uvCalls[1]?.args).toEqual(['--version']);
-      expect(uvCalls[2]?.args).toEqual(['python', 'install', '3.12']);
+      expect(uvCalls[2]?.args).toEqual(['python', 'install', '3.11']);
     },
   );
 
@@ -435,8 +435,8 @@ describe('SpeechRuntime mocked command orchestration', () => {
     expect(second).toBe(first);
     expect(commandSequence(calls)).toEqual([
       'uv --version',
-      'uv python install 3.12',
-      `uv venv --python 3.12 ${venvDirectory}`,
+      'uv python install 3.11',
+      `uv venv --python 3.11 ${venvDirectory}`,
       `uv sync --locked --project ${projectDirectory}`,
     ]);
     expect(existsSync(join(venvDirectory, 'pyvenv.cfg'))).toBe(true);
@@ -453,7 +453,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
     const { runtime, calls } = createRuntime({
       execFileImpl: async (command, args) => {
         if (command === pythonPath && args.length === 1 && args[0] === '--version') {
-          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+          return { stdout: 'Python 3.11.13\r\n', stderr: '' };
         }
         if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
           return { stdout: `uv ${UV_VERSION}`, stderr: '' };
@@ -480,8 +480,8 @@ describe('SpeechRuntime mocked command orchestration', () => {
     expect(secondResult).toBe(firstResult);
     expect(commandSequence(calls)).toEqual([
       'uv --version',
-      'uv python install 3.12',
-      `uv venv --python 3.12 ${venvDirectory}`,
+      'uv python install 3.11',
+      `uv venv --python 3.11 ${venvDirectory}`,
       `uv sync --locked --project ${projectDirectory}`,
     ]);
   });
@@ -500,7 +500,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
     const { runtime, calls } = createRuntime({
       execFileImpl: async (command, args, options) => {
         if (command === pythonPath && args.length === 1 && args[0] === '--version') {
-          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+          return { stdout: 'Python 3.11.13\r\n', stderr: '' };
         }
         if (args.length === 1 && args[0] === '--version') {
           return { stdout: `uv ${UV_VERSION}`, stderr: '' };
@@ -541,8 +541,8 @@ describe('SpeechRuntime mocked command orchestration', () => {
     expect(syncAttempts).toBe(2);
     expect(commandSequence(calls)).toEqual([
       'uv --version',
-      'uv python install 3.12',
-      `uv venv --python 3.12 ${venvDirectory}`,
+      'uv python install 3.11',
+      `uv venv --python 3.11 ${venvDirectory}`,
       `uv sync --locked --project ${projectDirectory}`,
       'uv --version',
       'venv-python --version',
@@ -569,7 +569,7 @@ describe('SpeechRuntime mocked command orchestration', () => {
     const { runtime, calls } = createRuntime({
       execFileImpl: async (command, args, options) => {
         if (command === pythonPath && args.length === 1 && args[0] === '--version') {
-          return { stdout: 'Python 3.12.13\r\n', stderr: '' };
+          return { stdout: 'Python 3.11.13\r\n', stderr: '' };
         }
         if (command.endsWith('uv.exe') && args.length === 1 && args[0] === '--version') {
           return { stdout: `uv ${UV_VERSION}`, stderr: '' };
@@ -618,11 +618,11 @@ describe('SpeechRuntime mocked command orchestration', () => {
     expect(existsSync(join(venvDirectory, 'pyvenv.cfg'))).toBe(true);
     expect(commandSequence(calls)).toEqual([
       'uv --version',
-      'uv python install 3.12',
-      `uv venv --python 3.12 ${venvDirectory}`,
+      'uv python install 3.11',
+      `uv venv --python 3.11 ${venvDirectory}`,
       'uv --version',
-      'uv python install 3.12',
-      `uv venv --python 3.12 ${venvDirectory}`,
+      'uv python install 3.11',
+      `uv venv --python 3.11 ${venvDirectory}`,
       `uv sync --locked --project ${projectDirectory}`,
     ]);
     expect(calls.filter(({ args }) => args[0] === 'sync')).toHaveLength(1);

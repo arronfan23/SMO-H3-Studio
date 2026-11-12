@@ -82,14 +82,8 @@ export function validateSpeechGenerationRequest(
   ) {
     throw new Error('referenceAudioPath must not be empty');
   }
-  if (request.speechMode === 'custom' && !nonEmptyString(request.speaker)) {
-    throw new Error('speaker is required for custom speech generation');
-  }
-  if (
-    request.speechMode === 'clone' &&
-    !nonEmptyString(request.referenceAudioPath)
-  ) {
-    throw new Error('referenceAudioPath is required for clone speech generation');
+  if (!nonEmptyString(request.referenceAudioPath)) {
+    throw new Error('referenceAudioPath is required for speech generation');
   }
 }
 
@@ -176,7 +170,6 @@ export function createSpeechGenerationHandler(
       throw new Error('Another generation is already running');
     }
     if (
-      input.speechMode === 'clone' &&
       !(await mediaRegistry.isSelectedFile(input.referenceAudioPath!))
     ) {
       throw new Error('referenceAudioPath must be an authorized selected media file');
@@ -248,6 +241,7 @@ export function createSpeechGenerationHandler(
                 language: request.language,
                 speaker: request.speaker,
                 instruct: request.instruct ?? '',
+                referenceAudioPath: request.referenceAudioPath,
               }
             : {
                 voiceMode: 'clone',

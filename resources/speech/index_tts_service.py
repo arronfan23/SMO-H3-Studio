@@ -1,7 +1,8 @@
 import argparse
 import gc
-import io
 import json
+import os
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -9,10 +10,8 @@ from urllib.parse import parse_qs, urlsplit
 
 
 MAXIMUM_REQUEST_BYTES = 64 * 1024
-MODEL_DIRECTORIES = {
-    "custom": "Qwen3-TTS-12Hz-0.6B-CustomVoice",
-    "clone": "Qwen3-TTS-12Hz-0.6B-Base",
-}
+MODEL_DIRECTORY = "IndexTTS-2"
+SUPPORTED_LANGUAGES = ["Auto", "Chinese", "English"]
 
 
 class RequestError(Exception):
@@ -33,40 +32,33 @@ class ModelRegistry:
     def capabilities(self, mode):
         self.validate_mode(mode)
         with self.lock:
-            model = self.load_locked(mode)
-            speakers = (
-                list(model.get_supported_speakers()) if mode == "custom" else []
-            )
-            return {
-                "speakers": speakers,
-                "languages": list(model.get_supported_languages()),
-            }
+            self.load_locked(mode)
+            return {"speakers": [], "languages": list(SUPPORTED_LANGUAGES)}
 
     def generate(self, payload):
         mode = self.validate_generate_payload(payload)
         with self.lock:
             model = self.load_locked(mode)
-            if mode == "custom":
-                wavs, sample_rate = model.generate_custom_voice(
+            instruct = payload.get("instruct", "") if mode == "custom" else ""
+            descriptor, output_path = tempfile.mkstemp(suffix=".wav")
+            os.close(descriptor)
+            Path(output_path).unlink()
+            try:
+                model.infer(
+                    spk_audio_prompt=payload["ref_audio"],
                     text=payload["text"],
-                    language=payload["language"],
-                    speaker=payload["speaker"],
-                    instruct=payload.get("instruct", ""),
+                    output_path=output_path,
+                    use_emo_text=bool(instruct.strip()),
+                    emo_text=instruct.strip() or None,
+                    use_random=False,
+                    verbose=False,
                 )
-            else:
-                wavs, sample_rate = model.generate_voice_clone(
-                    text=payload["text"],
-                    language=payload["language"],
-                    ref_audio=payload["ref_audio"],
-                    ref_text=payload.get("ref_text", ""),
-                    x_vector_only_mode=payload["x_vector_only_mode"],
-                )
-
-            import soundfile as sf
-
-            output = io.BytesIO()
-            sf.write(output, wavs[0], sample_rate, format="WAV")
-            return output.getvalue()
+                output = Path(output_path)
+                if not output.is_file() or output.stat().st_size == 0:
+                    raise RuntimeError("IndexTTS2 did not produce an audio file")
+                return output.read_bytes()
+            finally:
+                Path(output_path).unlink(missing_ok=True)
 
     def close(self):
         with self.lock:
@@ -74,7 +66,7 @@ class ModelRegistry:
 
     @staticmethod
     def validate_mode(mode):
-        if mode not in MODEL_DIRECTORIES:
+        if mode not in {"custom", "clone"}:
             raise RequestError(400, "voiceMode must be custom or clone")
 
     @staticmethod
@@ -83,51 +75,48 @@ class ModelRegistry:
             raise RequestError(400, "The JSON body must be an object")
         mode = payload.get("voice_mode")
         ModelRegistry.validate_mode(mode)
-        common_fields = {"voice_mode", "text", "language"}
-        mode_fields = (
-            {"speaker", "instruct"}
-            if mode == "custom"
-            else {"ref_audio", "ref_text", "x_vector_only_mode"}
-        )
+        common_fields = {"voice_mode", "text", "language", "ref_audio"}
+        mode_fields = {"instruct"} if mode == "custom" else set()
+        if payload.get("ref_audio") is None:
+            raise RequestError(400, "ref_audio is required")
         if set(payload) != common_fields | mode_fields:
             raise RequestError(400, "The request contains missing or unsupported fields")
         for field in ("text", "language"):
             if not isinstance(payload.get(field), str) or not payload[field].strip():
                 raise RequestError(400, f"{field} must be a non-empty string")
-        if mode == "custom":
-            if not isinstance(payload.get("speaker"), str) or not payload["speaker"].strip():
-                raise RequestError(400, "speaker must be a non-empty string")
-            if not isinstance(payload.get("instruct"), str):
-                raise RequestError(400, "instruct must be a string")
-        else:
-            reference_audio = payload.get("ref_audio")
-            if not isinstance(reference_audio, str) or not Path(reference_audio).is_absolute():
-                raise RequestError(400, "ref_audio must be an absolute local path")
-            if not Path(reference_audio).is_file():
-                raise RequestError(400, "ref_audio must name an existing audio file")
-            if not isinstance(payload.get("ref_text"), str):
-                raise RequestError(400, "ref_text must be a string")
-            if not isinstance(payload.get("x_vector_only_mode"), bool):
-                raise RequestError(400, "x_vector_only_mode must be a boolean")
+        reference_audio = payload.get("ref_audio")
+        if not isinstance(reference_audio, str) or not Path(reference_audio).is_absolute():
+            raise RequestError(400, "ref_audio must be an absolute local path")
+        if not Path(reference_audio).is_file():
+            raise RequestError(400, "ref_audio must name an existing audio file")
+        if mode == "custom" and not isinstance(payload.get("instruct"), str):
+            raise RequestError(400, "instruct must be a string")
         return mode
 
     def load_locked(self, mode):
         if self.model is not None and self.mode == mode:
             return self.model
+        if self.model is not None:
+            # Both UI modes use the same model and can share the loaded instance.
+            self.mode = mode
+            return self.model
         self.release_locked()
         try:
+            self.ensure_huggingface_references()
             import torch
-            from qwen_tts import Qwen3TTSModel
+            from indextts.infer_v2 import IndexTTS2
 
-            model_path = self.model_root / MODEL_DIRECTORIES[mode]
-            if not model_path.is_dir():
-                raise FileNotFoundError("The selected speech model is not installed")
+            model_path = self.model_root / MODEL_DIRECTORY
+            config_path = model_path / "config.yaml"
+            if not model_path.is_dir() or not config_path.is_file():
+                raise FileNotFoundError("The IndexTTS2 model is not installed")
             self.torch = torch
-            self.model = Qwen3TTSModel.from_pretrained(
-                str(model_path),
-                device_map="cuda:0",
-                dtype=torch.bfloat16,
-                local_files_only=True,
+            self.model = IndexTTS2(
+                cfg_path=str(config_path),
+                model_dir=str(model_path),
+                use_fp16=torch.cuda.is_available(),
+                use_cuda_kernel=False,
+                use_deepspeed=False,
             )
             self.mode = mode
             return self.model
@@ -136,6 +125,26 @@ class ModelRegistry:
             self.mode = None
             self.collect_cuda_garbage()
             raise
+
+    def ensure_huggingface_references(self):
+        config_path = Path(__file__).with_name("index_tts_models.json")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        repositories = config.get("repositories", {})
+        for repository, revision in repositories.items():
+            if not isinstance(revision, str) or len(revision) != 40:
+                raise ValueError("IndexTTS2 dependency revision is invalid")
+            repository_directory = repository.replace("/", "--")
+            references = (
+                self.model_root
+                / "checkpoints"
+                / "hf_cache"
+                / f"models--{repository_directory}"
+                / "refs"
+            )
+            references.mkdir(parents=True, exist_ok=True)
+            reference_path = references / "main"
+            if not reference_path.exists():
+                reference_path.write_text(f"{revision}\n", encoding="ascii")
 
     def release_locked(self):
         previous = self.model
@@ -159,7 +168,7 @@ class SpeechHTTPServer(ThreadingHTTPServer):
 
 
 class SpeechRequestHandler(BaseHTTPRequestHandler):
-    server_version = "SMOSpeech/1.0"
+    server_version = "SMOIndexTTS/1.0"
     sys_version = ""
 
     def log_message(self, format, *args):
@@ -221,10 +230,8 @@ class SpeechRequestHandler(BaseHTTPRequestHandler):
             size = int(content_length)
         except ValueError:
             raise RequestError(400, "Content-Length is invalid") from None
-        if size < 0:
-            raise RequestError(400, "Content-Length is invalid")
-        if size > MAXIMUM_REQUEST_BYTES:
-            raise RequestError(413, "The request body is too large")
+        if size < 0 or size > MAXIMUM_REQUEST_BYTES:
+            raise RequestError(400, "The request body has an invalid size")
         body = self.rfile.read(size)
         if len(body) != size:
             raise RequestError(400, "The request body is incomplete")

@@ -95,7 +95,7 @@ async function renderStudio() {
 
 function studioSpeechField(label: string, mode: 'custom' | 'clone' = 'custom') {
   const panel = screen.getByRole('tabpanel', {
-    name: mode === 'custom' ? '固定音色' : '声音克隆',
+    name: mode === 'custom' ? '参考音合成' : '声音克隆',
   });
   return within(panel).getByLabelText(label);
 }
@@ -1683,19 +1683,18 @@ describe('text-to-video studio', () => {
     fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
     await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledWith('clone'));
     fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-    expect(await screen.findByText('speech-clone.wav')).toBeInTheDocument();
-    fireEvent.change(studioSpeechField('参考原文（可选）', 'clone'), {
-      target: { value: '保留的参考原文' },
-    });
+    const clonePanel = screen.getByRole('tabpanel', { name: '声音克隆' });
+    expect(await within(clonePanel).findByText('speech-clone.wav')).toBeInTheDocument();
 
     fireEvent.click(studioModeButton('视频'));
     expect(textVideoField('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
     fireEvent.click(studioModeButton('语音'));
     expect(studioSpeechField('口播文字', 'clone')).toHaveValue('主模式切换后保留的口播草稿');
     expect(studioSpeechField('输出格式', 'clone')).toHaveValue('mp3');
-    expect(studioSpeechField('参考原文（可选）', 'clone')).toHaveValue('保留的参考原文');
-    expect(screen.getByText('speech-clone.wav')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '固定音色' }));
+    expect(
+      within(screen.getByRole('tabpanel', { name: '声音克隆' })).getByText('speech-clone.wav'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: '参考音合成' }));
     expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
@@ -1729,7 +1728,7 @@ describe('text-to-video studio', () => {
       first.resolve({ speakers: ['StaleHiddenVoice'], languages: ['StaleHiddenLanguage'] });
       await first.promise;
     });
-    expect(document.getElementById('custom-speech-speaker')).toHaveValue('');
+    expect(document.getElementById('custom-speech-language')).toHaveValue('');
 
     fireEvent.click(studioModeButton('语音'));
     await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(2));
@@ -1737,8 +1736,11 @@ describe('text-to-video studio', () => {
       second.resolve({ speakers: ['ReturnVoice'], languages: ['Chinese'] });
       await second.promise;
     });
-    expect(studioSpeechField('音色')).toHaveValue('ReturnVoice');
     expect(studioSpeechField('语言')).toHaveValue('Chinese');
+    smo.files.selectAudio.mockResolvedValueOnce('G:\\recordings\\capabilities.wav');
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const customPanel = screen.getByRole('tabpanel', { name: '参考音合成' });
+    expect(await within(customPanel).findByText('capabilities.wav')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled();
   });
 

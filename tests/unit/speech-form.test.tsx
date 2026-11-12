@@ -78,22 +78,36 @@ async function renderSpeech(selectedAvatar: Avatar | null = null) {
     />,
   );
   fireEvent.click(screen.getByRole('tab', { name: '语音' }));
-  expect(screen.getByRole('tabpanel', { name: '固定音色' })).toBeVisible();
+  expect(screen.getByRole('tabpanel', { name: '参考音合成' })).toBeVisible();
   await waitFor(() => expect(smo.components.getState).toHaveBeenCalledWith('speech'));
   return { onCreateAvatar, view };
 }
 
 async function waitForSpeechReady() {
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled(),
-  );
+  await waitFor(() => {
+    const activePanel = document.querySelector('.speech-mode-fields:not([hidden])');
+    expect(activePanel).not.toBeNull();
+    expect(within(activePanel as HTMLElement).getByLabelText('语言')).toBeEnabled();
+  });
 }
 
 function speechField(label: string, mode: SpeechMode = 'custom') {
   const panel = screen.getByRole('tabpanel', {
-    name: mode === 'custom' ? '固定音色' : '声音克隆',
+    name: mode === 'custom' ? '参考音合成' : '声音克隆',
   });
   return within(panel).getByLabelText(label);
+}
+
+async function selectReferenceAudio(path = 'G:\\recordings\\reference.wav') {
+  smo.files.selectAudio.mockResolvedValue(path);
+  fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+  const activePanel = document.querySelector('.speech-mode-fields:not([hidden])');
+  expect(activePanel).not.toBeNull();
+  expect(await within(activePanel as HTMLElement).findByText('reference.wav')).toBeInTheDocument();
+}
+
+function cloneSpeechPanel() {
+  return within(document.getElementById('clone-speech-panel') as HTMLElement);
 }
 
 beforeEach(() => {
@@ -160,14 +174,16 @@ describe('语音工作区', () => {
     expect(onCreateAvatar).toHaveBeenCalledTimes(1);
   });
 
-  test('语音固定音色与克隆 tab 展示对应字段、四种格式且无采样步数', async () => {
+  test('语音参考音合成与克隆 tab 展示对应字段、四种格式且无采样步数', async () => {
     await renderSpeech();
     await waitForSpeechReady();
+    await selectReferenceAudio();
 
     const speechPanel = screen.getByRole('tabpanel', { name: '语音' });
-    const customPanel = within(screen.getByRole('tabpanel', { name: '固定音色' }));
+    const customPanel = within(screen.getByRole('tabpanel', { name: '参考音合成' }));
     expect(customPanel.getByLabelText('口播文字')).toBeInTheDocument();
-    expect(customPanel.getByLabelText('音色')).toHaveValue('Vivian');
+    expect(customPanel.getByRole('group', { name: '音频拖放区' })).toBeVisible();
+    expect(customPanel.queryByLabelText('音色')).not.toBeInTheDocument();
     expect(customPanel.getByLabelText('语言')).toHaveValue('Auto');
     expect(customPanel.getByLabelText('情绪/语气')).toBeInTheDocument();
     const output = customPanel.getByLabelText('输出格式');
@@ -180,7 +196,7 @@ describe('语音工作区', () => {
     ]);
     expect(within(speechPanel).queryByLabelText('采样步数')).not.toBeInTheDocument();
 
-    const customTab = within(speechPanel).getByRole('tab', { name: '固定音色' });
+    const customTab = within(speechPanel).getByRole('tab', { name: '参考音合成' });
     const cloneTab = within(speechPanel).getByRole('tab', { name: '声音克隆' });
     customTab.focus();
     fireEvent.keyDown(customTab, { key: 'ArrowRight' });
@@ -189,8 +205,7 @@ describe('语音工作区', () => {
 
     const clonePanel = within(screen.getByRole('tabpanel', { name: '声音克隆' }));
     expect(clonePanel.getByRole('group', { name: '音频拖放区' })).toBeVisible();
-    expect(clonePanel.getByLabelText('参考原文（可选）')).toBeInTheDocument();
-    expect(clonePanel.getByText(/留空质量可能降低/)).toBeInTheDocument();
+    expect(clonePanel.queryByLabelText('参考原文（可选）')).not.toBeInTheDocument();
     expect(clonePanel.queryByLabelText('音色')).not.toBeInTheDocument();
     expect(clonePanel.queryByLabelText('情绪/语气')).not.toBeInTheDocument();
 
@@ -212,21 +227,22 @@ describe('语音工作区', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '重试加载' }));
     await waitForSpeechReady();
-    expect(speechField('音色')).toHaveValue('Vivian');
+    await selectReferenceAudio();
+    expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled();
     expect(screen.queryByText(/音色与语言加载失败/)).not.toBeInTheDocument();
   });
 
-  test('语音 custom 请求包含所选音色、情绪、语言和格式并刷新 busy', async () => {
+  test('语音 custom 请求包含参考音、情绪、语言和格式并刷新 busy', async () => {
     smo.jobs.getState.mockImplementation(async () => ({
       activeId: smo.jobs.start.mock.calls.length > 0 ? 'speech-job-1' : null,
     }));
     await renderSpeech();
     await waitForSpeechReady();
+    await selectReferenceAudio();
 
     fireEvent.change(speechField('口播文字'), {
       target: { value: '欢迎来到本地语音工作区' },
     });
-    fireEvent.change(speechField('音色'), { target: { value: 'Ryan' } });
     fireEvent.change(speechField('情绪/语气'), {
       target: { value: '温暖而从容' },
     });
@@ -239,7 +255,7 @@ describe('语音工作区', () => {
         mode: 'speech',
         speechMode: 'custom',
         prompt: '欢迎来到本地语音工作区',
-        speaker: 'Ryan',
+        referenceAudioPath: 'G:\\recordings\\reference.wav',
         instruct: '温暖而从容',
         language: 'Chinese',
         outputFormat: 'mp3',
@@ -255,6 +271,7 @@ describe('语音工作区', () => {
   test.each(['wav', 'mp3', 'flac', 'm4a'])('语音支持 %s 输出格式', async (outputFormat) => {
     await renderSpeech();
     await waitForSpeechReady();
+    await selectReferenceAudio();
     fireEvent.change(speechField('口播文字'), {
       target: { value: `生成 ${outputFormat} 音频` },
     });
@@ -272,7 +289,7 @@ describe('语音工作区', () => {
     );
   });
 
-  test('语音 clone 接受拖入参考音，参考原文可留空并随请求提交', async () => {
+  test('语音 clone 接受拖入参考音并提交 IndexTTS2 请求', async () => {
     await renderSpeech();
     fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
     await waitForSpeechReady();
@@ -281,7 +298,7 @@ describe('语音工作区', () => {
     fireEvent.drop(screen.getByRole('group', { name: '音频拖放区' }), {
       dataTransfer: { files: [file] },
     });
-    expect(await screen.findByText('reference.wav')).toBeInTheDocument();
+    expect(await cloneSpeechPanel().findByText('reference.wav')).toBeInTheDocument();
     expect(smo.files.authorizeDroppedAudio).toHaveBeenCalledWith(file);
 
     fireEvent.change(speechField('口播文字', 'clone'), {
@@ -297,7 +314,6 @@ describe('语音工作区', () => {
         speechMode: 'clone',
         prompt: '这是克隆声音朗读的文字',
         referenceAudioPath: 'G:\\dropped\\reference.wav',
-        referenceText: '',
         language: 'English',
         outputFormat: 'flac',
       }),
@@ -380,8 +396,8 @@ describe('语音工作区', () => {
       fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
       fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
 
-      expect(await screen.findByText('clone-one.wav')).toBeInTheDocument();
-      expect(await screen.findByLabelText('参考音频')).toHaveAttribute(
+      expect(await cloneSpeechPanel().findByText('clone-one.wav')).toBeInTheDocument();
+      expect(await cloneSpeechPanel().findByLabelText('参考音频')).toHaveAttribute(
         'src',
         `smo-media://media/${encodeURIComponent('G:\\data\\recordings\\clone-one.wav')}`,
       );
@@ -404,7 +420,7 @@ describe('语音工作区', () => {
       smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original-clone.wav');
       await renderCloneRecorder();
       fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-      const originalAudio = await screen.findByLabelText('参考音频');
+      const originalAudio = await cloneSpeechPanel().findByLabelText('参考音频');
       Object.defineProperty(originalAudio, 'duration', {
         configurable: true,
         value: 6.5,
@@ -415,9 +431,9 @@ describe('语音工作区', () => {
       fireEvent.click(screen.getByRole('button', { name: '重录' }));
 
       expect(await screen.findByRole('alert')).toHaveTextContent('麦克风权限被拒绝');
-      expect(screen.getByText('original-clone.wav')).toBeInTheDocument();
-      expect(screen.getByLabelText('参考音频')).toBe(originalAudio);
-      expect(screen.getByText('音频时长：6.50 秒')).toBeInTheDocument();
+      expect(cloneSpeechPanel().getByText('original-clone.wav')).toBeInTheDocument();
+      expect(cloneSpeechPanel().getByLabelText('参考音频')).toBe(originalAudio);
+      expect(cloneSpeechPanel().getByText('音频时长：6.50 秒')).toBeInTheDocument();
       expect(smo.recordings.save).not.toHaveBeenCalled();
     });
 
@@ -428,15 +444,15 @@ describe('语音工作区', () => {
       await renderCloneRecorder();
       fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
       fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
-      const firstAudio = await screen.findByLabelText('参考音频');
-      expect(screen.getByText('clone-one.wav')).toBeInTheDocument();
+      const firstAudio = await cloneSpeechPanel().findByLabelText('参考音频');
+      expect(cloneSpeechPanel().getByText('clone-one.wav')).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('button', { name: '重录' }));
       fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
 
-      expect(await screen.findByText('clone-two.wav')).toBeInTheDocument();
-      expect(screen.queryByText('clone-one.wav')).not.toBeInTheDocument();
-      const secondAudio = await screen.findByLabelText('参考音频');
+      expect(await cloneSpeechPanel().findByText('clone-two.wav')).toBeInTheDocument();
+      expect(cloneSpeechPanel().queryByText('clone-one.wav')).not.toBeInTheDocument();
+      const secondAudio = await cloneSpeechPanel().findByLabelText('参考音频');
       expect(secondAudio).not.toBe(firstAudio);
       expect(secondAudio).toHaveAttribute(
         'src',
@@ -458,14 +474,14 @@ describe('语音工作区', () => {
       await screen.findByRole('button', { name: '停止录音' });
       await finishRecording();
 
-      fireEvent.click(screen.getByRole('tab', { name: '固定音色' }));
+      fireEvent.click(screen.getByRole('tab', { name: '参考音合成' }));
       await act(async () => {
         resolveSave('G:\\data\\recordings\\hidden-clone.wav');
       });
       fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
 
-      expect(await screen.findByText('hidden-clone.wav')).toBeInTheDocument();
-      expect(await screen.findByLabelText('参考音频')).toHaveAttribute(
+      expect(await cloneSpeechPanel().findByText('hidden-clone.wav')).toBeInTheDocument();
+      expect(await cloneSpeechPanel().findByLabelText('参考音频')).toHaveAttribute(
         'src',
         `smo-media://media/${encodeURIComponent('G:\\data\\recordings\\hidden-clone.wav')}`,
       );
@@ -476,7 +492,7 @@ describe('语音工作区', () => {
       smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original-clone.wav');
       await renderCloneRecorder();
       fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-      await screen.findByText('original-clone.wav');
+      await cloneSpeechPanel().findByText('original-clone.wav');
       fireEvent.change(speechField('口播文字', 'clone'), {
         target: { value: '录音期间不能提交旧参考音' },
       });
@@ -501,7 +517,7 @@ describe('语音工作区', () => {
       smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original-clone.wav');
       await renderCloneRecorder();
       fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-      await screen.findByText('original-clone.wav');
+      await cloneSpeechPanel().findByText('original-clone.wav');
       fireEvent.change(speechField('口播文字', 'clone'), {
         target: { value: '保存期间不能提交旧参考音' },
       });
@@ -518,7 +534,7 @@ describe('语音工作区', () => {
       await act(async () => {
         resolveSave('G:\\data\\recordings\\saved-clone.wav');
       });
-      await screen.findByText('saved-clone.wav');
+      await cloneSpeechPanel().findByText('saved-clone.wav');
       await waitFor(() => expect(generate).toBeEnabled());
       fireEvent.click(generate);
       await waitFor(() =>
@@ -541,7 +557,7 @@ describe('语音工作区', () => {
       smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original-clone.wav');
       await renderCloneRecorder();
       fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-      const originalAudio = await screen.findByLabelText('参考音频');
+      const originalAudio = await cloneSpeechPanel().findByLabelText('参考音频');
       smo.files.selectAudio.mockClear();
       fireEvent.click(screen.getByRole('button', { name: '重录' }));
       await screen.findByRole('button', { name: '停止录音' });
@@ -563,8 +579,8 @@ describe('语音工作区', () => {
         });
         expect(smo.files.selectAudio).not.toHaveBeenCalled();
         expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
-        expect(screen.getByText('original-clone.wav')).toBeInTheDocument();
-        expect(screen.getByLabelText('参考音频')).toBe(originalAudio);
+        expect(cloneSpeechPanel().getByText('original-clone.wav')).toBeInTheDocument();
+        expect(cloneSpeechPanel().getByLabelText('参考音频')).toBe(originalAudio);
       };
 
       expectFileOperationsBlocked();
@@ -574,8 +590,8 @@ describe('语音工作区', () => {
       await act(async () => {
         resolveSave('G:\\data\\recordings\\saved-clone.wav');
       });
-      expect(await screen.findByText('saved-clone.wav')).toBeInTheDocument();
-      expect(screen.queryByText('replacement.wav')).not.toBeInTheDocument();
+      expect(await cloneSpeechPanel().findByText('saved-clone.wav')).toBeInTheDocument();
+      expect(cloneSpeechPanel().queryByText('replacement.wav')).not.toBeInTheDocument();
       expect(smo.recordings.save).toHaveBeenCalledTimes(1);
     });
   });
@@ -721,6 +737,7 @@ describe('语音工作区', () => {
     );
     await renderSpeech();
     await waitForSpeechReady();
+    await selectReferenceAudio();
     fireEvent.change(speechField('口播文字'), {
       target: { value: '提交失败后保留这段文字' },
     });
@@ -754,7 +771,6 @@ describe('语音工作区', () => {
 
     await waitForSpeechReady();
     expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(2);
-    expect(speechField('音色')).toHaveValue('Vivian');
     expect(speechField('语言')).toHaveValue('Auto');
     expect(screen.queryByText(/语音模型仍在启动/)).not.toBeInTheDocument();
     expect(screen.queryByText(/音色与语言加载失败/)).not.toBeInTheDocument();
@@ -772,7 +788,7 @@ describe('语音工作区', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
     await waitFor(() => expect(requests).toHaveLength(2));
-    fireEvent.click(screen.getByRole('tab', { name: '固定音色' }));
+    fireEvent.click(screen.getByRole('tab', { name: '参考音合成' }));
     await waitFor(() => expect(requests).toHaveLength(3));
 
     await act(async () => {
@@ -780,16 +796,13 @@ describe('语音工作区', () => {
       requests[0].resolve({ speakers: ['StaleVoice'], languages: ['StaleLanguage'] });
       await Promise.resolve();
     });
-    expect(speechField('音色')).toHaveValue('');
     expect(speechField('语言')).toHaveValue('');
 
     await act(async () => {
       requests[2].resolve({ speakers: ['FreshVoice'], languages: ['FreshLanguage'] });
       await requests[2].promise;
     });
-    expect(speechField('音色')).toHaveValue('FreshVoice');
     expect(speechField('语言')).toHaveValue('FreshLanguage');
-    expect(speechField('音色')).not.toHaveValue('StaleVoice');
   });
 
   test('语音 capabilities 在卸载后返回不会更新状态或报告 React 错误', async () => {
@@ -810,7 +823,7 @@ describe('语音工作区', () => {
 
   test('语音 custom/clone 子面板始终挂载并保持 aria-controls 目标', async () => {
     await renderSpeech();
-    const customTab = screen.getByRole('tab', { name: '固定音色' });
+    const customTab = screen.getByRole('tab', { name: '参考音合成' });
     const cloneTab = screen.getByRole('tab', { name: '声音克隆' });
     const customPanel = document.getElementById('custom-speech-panel');
     const clonePanel = document.getElementById('clone-speech-panel');
@@ -850,31 +863,30 @@ describe('语音工作区', () => {
     await renderSpeech();
     fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
     await waitForSpeechReady();
-
     fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-    const first = await screen.findByLabelText('参考音频');
+    const first = await cloneSpeechPanel().findByLabelText('参考音频');
     expect(first).toHaveAttribute('controls');
     Object.defineProperty(first, 'duration', { configurable: true, value: 6.5 });
     fireEvent.loadedMetadata(first);
-    expect(screen.getByText('音频时长：6.50 秒')).toBeInTheDocument();
+    expect(cloneSpeechPanel().getByText('音频时长：6.50 秒')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-    await waitFor(() => expect(screen.getByLabelText('参考音频')).not.toBe(first));
-    const second = screen.getByLabelText('参考音频');
-    expect(screen.queryByText('音频时长：6.50 秒')).not.toBeInTheDocument();
+    await waitFor(() => expect(cloneSpeechPanel().getByLabelText('参考音频')).not.toBe(first));
+    const second = cloneSpeechPanel().getByLabelText('参考音频');
+    expect(cloneSpeechPanel().queryByText('音频时长：6.50 秒')).not.toBeInTheDocument();
 
     Object.defineProperty(first, 'duration', { configurable: true, value: 12 });
     fireEvent.loadedMetadata(first);
-    expect(screen.queryByText('音频时长：12.00 秒')).not.toBeInTheDocument();
+    expect(cloneSpeechPanel().queryByText('音频时长：12.00 秒')).not.toBeInTheDocument();
     Object.defineProperty(second, 'duration', { configurable: true, value: 2.75 });
     fireEvent.loadedMetadata(second);
-    expect(screen.getByText('音频时长：2.75 秒')).toBeInTheDocument();
+    expect(cloneSpeechPanel().getByText('音频时长：2.75 秒')).toBeInTheDocument();
 
     const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
     fireEvent.click(screen.getByRole('tab', { name: '视频' }));
     expect(pause).toHaveBeenCalled();
     fireEvent.click(screen.getByRole('tab', { name: '语音' }));
-    fireEvent.click(screen.getByRole('tab', { name: '固定音色' }));
+    fireEvent.click(screen.getByRole('tab', { name: '参考音合成' }));
     expect(pause).toHaveBeenCalledTimes(2);
   });
 

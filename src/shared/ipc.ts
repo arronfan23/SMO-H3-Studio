@@ -189,11 +189,11 @@ const speechGenerationRequestSchema = z
   })
   .strict()
   .superRefine((request, context) => {
-    if (request.speechMode === 'custom' && request.speaker === undefined) {
+    if (request.speechMode === 'custom' && request.referenceAudioPath === undefined) {
       context.addIssue({
         code: 'custom',
-        path: ['speaker'],
-        message: 'speaker is required for custom speech generation',
+        path: ['referenceAudioPath'],
+        message: 'referenceAudioPath is required for custom speech generation',
       });
     }
     if (

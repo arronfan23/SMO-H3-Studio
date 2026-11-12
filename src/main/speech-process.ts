@@ -234,6 +234,7 @@ export class SpeechProcessManager {
           windowsHide: true,
           shell: false,
           stdio: 'pipe',
+          cwd: this.options.modelDirectory,
         },
       );
       this.child = child;
@@ -357,19 +358,16 @@ export class SpeechProcessManager {
         voice_mode: 'custom',
         text: request.text,
         language: request.language,
-        speaker: request.speaker,
+        ref_audio: request.referenceAudioPath,
         instruct: request.instruct ?? '',
       };
     }
     if (request.voiceMode === 'clone') {
-      const referenceText = request.referenceText ?? '';
       return {
         voice_mode: 'clone',
         text: request.text,
         language: request.language,
         ref_audio: request.referenceAudioPath,
-        ref_text: referenceText,
-        x_vector_only_mode: referenceText.trim().length === 0,
       };
     }
     throw new Error('Unsupported speech voice mode');

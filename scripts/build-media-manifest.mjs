@@ -1,12 +1,40 @@
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
-const SPEECH_REPOSITORIES = [
-  'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice',
-  'Qwen/Qwen3-TTS-12Hz-0.6B-Base',
-  'Qwen/Qwen3-TTS-Tokenizer-12Hz',
+const INDEX_TTS_REPOSITORY = 'IndexTeam/IndexTTS-2';
+const INDEX_TTS_CORE_PATHS = new Set([
+  'LICENSE.txt',
+  'LICENSE_ZH.txt',
+  'bpe.model',
+  'config.yaml',
+  'feat1.pt',
+  'feat2.pt',
+  'gpt.pth',
+  's2mel.pth',
+  'wav2vec2bert_stats.pt',
+]);
+const INDEX_TTS_QWEN_DIRECTORY = 'qwen0.6bemo4-merge/';
+const INDEX_TTS_AUXILIARIES = [
+  {
+    repository: 'facebook/w2v-bert-2.0',
+    paths: ['config.json', 'preprocessor_config.json'],
+  },
+  {
+    repository: 'amphion/MaskGCT',
+    paths: ['semantic_codec/model.safetensors'],
+  },
+  {
+    repository: 'funasr/campplus',
+    paths: ['campplus_cn_common.bin'],
+  },
+  {
+    repository: 'nvidia/bigvgan_v2_22khz_80band_256x',
+    paths: ['config.json', 'bigvgan_generator.pt'],
+  },
 ];
 const IMAGE_REPOSITORY = 'Comfy-Org/Qwen-Image-2.1';
 const IMAGE_MODEL_PATHS = [
@@ -19,15 +47,6 @@ const UV_VERSION = '0.11.13';
 const UV_ASSET_NAME = 'uv-x86_64-pc-windows-msvc.zip';
 const UV_DOWNLOAD_URL =
   `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ASSET_NAME}`;
-const RUNTIME_EXTENSIONS = [
-  '.safetensors',
-  '.json',
-  '.txt',
-  '.model',
-  '.vocab',
-  '.merges',
-  '.jinja',
-];
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const REVISION_PATTERN = /^[a-f0-9]{40}$/;
 const MAXIMUM_UNTRACKED_FILE_BYTES = 32 * 1024 * 1024;
@@ -37,6 +56,7 @@ const SMALL_FILE_NETWORK_ATTEMPTS = 3;
 const HUGGINGFACE_ORIGIN = 'https://huggingface.co';
 const HUGGINGFACE_METADATA_MIRROR = 'https://hf-mirror.com';
 const METADATA_TIMEOUT_MS = 30_000;
+const execFileAsync = promisify(execFile);
 
 class NonTransientHttpError extends Error {}
 
@@ -59,15 +79,6 @@ function encodeRepositoryPath(path) {
 
 function resolveUrl(repository, revision, path) {
   return `https://huggingface.co/${repository}/resolve/${revision}/${encodeRepositoryPath(path)}`;
-}
-
-function isRuntimeFile(path) {
-  const name = path.split('/').at(-1) ?? '';
-  if (/^(?:LICENSE|LICENCE|NOTICE|COPYING)(?:\.[a-z0-9]+)?$/i.test(name)) {
-    return true;
-  }
-  if (/\.gguf$/i.test(name)) return false;
-  return RUNTIME_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension));
 }
 
 function nextPageUrl(linkHeader) {
@@ -118,6 +129,62 @@ async function fetchRepositoryMetadata(url, init, fetchImpl, timeoutMs) {
     const mirrorUrl = `${HUGGINGFACE_METADATA_MIRROR}${url.slice(HUGGINGFACE_ORIGIN.length)}`;
     return request(mirrorUrl);
   }
+}
+
+async function readUrlWithCurl(url, signal) {
+  signal?.throwIfAborted();
+  const requestUrl = url.hostname === new URL(HUGGINGFACE_ORIGIN).hostname
+    ? new URL(`${HUGGINGFACE_METADATA_MIRROR}${url.pathname}${url.search}`)
+    : url;
+  const { stdout } = await execFileAsync(
+    'curl.exe',
+    [
+      '--fail',
+      '--silent',
+      '--show-error',
+      '--location',
+      '--connect-timeout',
+      '15',
+      '--max-time',
+      '45',
+      '--retry',
+      '2',
+      '--retry-all-errors',
+      '--output',
+      '-',
+      requestUrl.href,
+    ],
+    {
+      encoding: 'buffer',
+      maxBuffer: MAXIMUM_UNTRACKED_FILE_BYTES + 1024,
+      windowsHide: true,
+      shell: false,
+      ...(signal ? { signal } : {}),
+    },
+  );
+  return new Response(Buffer.from(stdout), { status: 200 });
+}
+
+function withCurlFallback(fetchImpl) {
+  const allowedHosts = new Set([
+    'huggingface.co',
+    'hf-mirror.com',
+    'api.github.com',
+    'github.com',
+  ]);
+  return async (input, init) => {
+    const url = new URL(
+      typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
+    );
+    if (!allowedHosts.has(url.hostname)) return fetchImpl(input, init);
+    if (
+      process.platform === 'win32' &&
+      process.env.SMO_MANIFEST_CURL_FALLBACK === '1'
+    ) {
+      return readUrlWithCurl(url, init?.signal);
+    }
+    return fetchImpl(input, init);
+  };
 }
 
 async function fetchRepositoryRevision(repository, fetchImpl, options = {}) {
@@ -228,6 +295,64 @@ async function readSmallFileWithRetry(repository, revision, path, fetchImpl) {
   throw new Error(`Unreachable retry state for ${repository}/${path}`);
 }
 
+async function readSmallFileWithMirrorFallback(repository, revision, path, fetchImpl) {
+  try {
+    return await readSmallFileOnce(repository, revision, path, fetchImpl);
+  } catch (error) {
+    if (error instanceof NonTransientHttpError) throw error;
+    const mirrorFetch = (input, init) => {
+      const url = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
+      );
+      if (url.hostname !== new URL(HUGGINGFACE_ORIGIN).hostname) {
+        return fetchImpl(input, init);
+      }
+      return fetchImpl(
+        `${HUGGINGFACE_METADATA_MIRROR}${url.pathname}${url.search}`,
+        init,
+      );
+    };
+    try {
+      return await readSmallFileWithRetry(repository, revision, path, mirrorFetch);
+    } catch (mirrorError) {
+      if (
+        process.platform !== 'win32' ||
+        process.env.SMO_MANIFEST_CURL_FALLBACK !== '1'
+      ) {
+        throw mirrorError;
+      }
+      const mirrorUrl =
+        `${HUGGINGFACE_METADATA_MIRROR}/${repository}/resolve/${revision}/${encodeRepositoryPath(path)}`;
+      const { stdout } = await execFileAsync(
+        'curl.exe',
+        [
+          '--fail',
+          '--silent',
+          '--show-error',
+          '--location',
+          '--connect-timeout',
+          '15',
+          '--max-time',
+          '45',
+          '--retry',
+          '2',
+          '--retry-all-errors',
+          '--output',
+          '-',
+          mirrorUrl,
+        ],
+        {
+          encoding: 'buffer',
+          maxBuffer: MAXIMUM_UNTRACKED_FILE_BYTES + 1024,
+          windowsHide: true,
+          shell: false,
+        },
+      );
+      return Buffer.from(stdout);
+    }
+  }
+}
+
 async function hashSmallFile(repository, revision, entry, fetchImpl) {
   assertPositiveSafeInteger(entry.size, `${repository}/${entry.path} size`);
   if (entry.size > MAXIMUM_UNTRACKED_FILE_BYTES) {
@@ -238,7 +363,7 @@ async function hashSmallFile(repository, revision, entry, fetchImpl) {
   }
   let data;
   try {
-    data = await readSmallFileWithRetry(repository, revision, entry.path, fetchImpl);
+    data = await readSmallFileWithMirrorFallback(repository, revision, entry.path, fetchImpl);
   } catch (error) {
     if (error instanceof NonTransientHttpError) throw error;
     throw new Error(`Could not read ${repository}/${entry.path}`, { cause: error });
@@ -258,6 +383,9 @@ async function buildFile(
   fetchImpl,
   { outputPath, requireLfs = false } = {},
 ) {
+  if (process.env.SMO_MANIFEST_PROGRESS === '1') {
+    console.error(`Verifying ${repository}/${entry?.path ?? 'unknown'}`);
+  }
   if (
     typeof entry?.path !== 'string' ||
     entry.path.length === 0 ||
@@ -282,6 +410,18 @@ async function buildFile(
     sha256,
     source: repository,
   };
+}
+
+function indexTtsCachePath(repository, revision, path) {
+  const repositoryDirectory = repository.replaceAll('/', '--');
+  return (
+    `checkpoints/hf_cache/models--${repositoryDirectory}/` +
+    `snapshots/${revision}/${path}`
+  );
+}
+
+function isIndexTtsCoreFile(path) {
+  return INDEX_TTS_CORE_PATHS.has(path) || path.startsWith(INDEX_TTS_QWEN_DIRECTORY);
 }
 
 async function fetchJson(url, fetchImpl, label) {
@@ -335,6 +475,7 @@ export async function buildMediaComponentManifest({
   signal,
   metadataTimeoutMs,
 }) {
+  fetchImpl = withCurlFallback(fetchImpl);
   const metadataOptions = { signal, metadataTimeoutMs };
   if (component === 'image') {
     const revision = await fetchRepositoryRevision(
@@ -387,15 +528,50 @@ export async function buildMediaComponentManifest({
 
   const files = [];
   const revisions = {};
-  for (const repository of SPEECH_REPOSITORIES) {
-    const revision = await fetchRepositoryRevision(repository, fetchImpl, metadataOptions);
+  const coreRevision = await fetchRepositoryRevision(
+    INDEX_TTS_REPOSITORY,
+    fetchImpl,
+    metadataOptions,
+  );
+  revisions[INDEX_TTS_REPOSITORY] = coreRevision;
+  const coreTree = await fetchRepositoryTree(
+    INDEX_TTS_REPOSITORY,
+    coreRevision,
+    fetchImpl,
+    metadataOptions,
+  );
+  const coreEntries = coreTree.filter((entry) => isIndexTtsCoreFile(entry.path));
+  const corePaths = new Set(coreEntries.map((entry) => entry.path));
+  for (const path of INDEX_TTS_CORE_PATHS) {
+    if (!corePaths.has(path)) {
+      throw new Error(`IndexTTS2 is missing the required model file: ${path}`);
+    }
+  }
+  for (const entry of coreEntries) {
+    files.push(await buildFile(INDEX_TTS_REPOSITORY, coreRevision, entry, fetchImpl));
+  }
+
+  for (const auxiliary of INDEX_TTS_AUXILIARIES) {
+    const { repository, paths } = auxiliary;
+    const revision = await fetchRepositoryRevision(
+      repository,
+      fetchImpl,
+      metadataOptions,
+    );
     revisions[repository] = revision;
-    const tree = await fetchRepositoryTree(repository, revision, fetchImpl, metadataOptions);
-    const selected = tree
-      .filter((entry) => isRuntimeFile(entry.path))
-      .sort((a, b) => a.path.localeCompare(b.path, 'en'));
-    for (const entry of selected) {
-      files.push(await buildFile(repository, revision, entry, fetchImpl));
+    const tree = await fetchRepositoryTree(
+      repository,
+      revision,
+      fetchImpl,
+      metadataOptions,
+    );
+    const entries = new Map(tree.map((entry) => [entry.path, entry]));
+    for (const path of paths) {
+      const entry = entries.get(path);
+      if (!entry) throw new Error(`IndexTTS2 auxiliary model is missing ${repository}/${path}`);
+      files.push(await buildFile(repository, revision, entry, fetchImpl, {
+        outputPath: indexTtsCachePath(repository, revision, path),
+      }));
     }
   }
   const uv = await buildUvRuntime(fetchImpl);

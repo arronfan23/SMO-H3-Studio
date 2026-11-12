@@ -19,7 +19,8 @@ extraResources:
     filter:
       - pyproject.toml
       - uv.lock
-      - qwen_tts_service.py
+      - index_tts_service.py
+      - index_tts_models.json
 win:
   target:
     - nsis

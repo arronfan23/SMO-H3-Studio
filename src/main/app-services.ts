@@ -131,7 +131,7 @@ function speechProjectDirectory(): string {
   ).resourcesPath;
   if (resourcesPath) {
     const packaged = join(resourcesPath, 'resources', 'speech');
-    if (existsSync(join(packaged, 'qwen_tts_service.py'))) {
+    if (existsSync(join(packaged, 'index_tts_service.py'))) {
       return packaged;
     }
   }
@@ -707,7 +707,7 @@ export async function createAppServices(
           'Scripts',
           'python.exe',
         ),
-        serviceScript: join(speechProject, 'qwen_tts_service.py'),
+        serviceScript: join(speechProject, 'index_tts_service.py'),
         modelDirectory: speechModelDirectory,
       });
     speechProcess = createSpeechProcess();

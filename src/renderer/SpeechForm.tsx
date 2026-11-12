@@ -34,7 +34,6 @@ export function SpeechForm({
 }) {
   const [speechMode, setSpeechMode] = useState<SpeechMode>('custom');
   const [prompt, setPrompt] = useState('');
-  const [speaker, setSpeaker] = useState('');
   const [instruct, setInstruct] = useState('');
   const [languages, setLanguages] = useState<Record<SpeechMode, string>>({
     custom: '',
@@ -44,7 +43,6 @@ export function SpeechForm({
   const [referenceAudioPath, setReferenceAudioPath] = useState<string | null>(null);
   const [referenceAudioRevision, setReferenceAudioRevision] = useState(0);
   const [referenceAudioSeconds, setReferenceAudioSeconds] = useState<number | null>(null);
-  const [referenceText, setReferenceText] = useState('');
   const [capabilities, setCapabilities] = useState<
     Partial<Record<SpeechMode, SpeechCapabilities>>
   >({});
@@ -158,11 +156,6 @@ export function SpeechForm({
         }
         retryCapabilitiesAfterInstallRef.current = false;
         setCapabilities((previous) => ({ ...previous, [speechMode]: next }));
-        if (speechMode === 'custom') {
-          setSpeaker((previous) =>
-            next.speakers.includes(previous) ? previous : next.speakers[0] ?? '',
-          );
-        }
         setLanguages((previous) => ({
           ...previous,
           [speechMode]: next.languages.includes(previous[speechMode])
@@ -302,7 +295,8 @@ export function SpeechForm({
     componentOperation !== null ||
     capabilitiesLoading ||
     capabilitiesError !== null ||
-    !currentCapabilities;
+    !currentCapabilities ||
+    referenceAudioPath === null;
 
   const startGeneration = async (): Promise<void> => {
     if (
@@ -331,11 +325,7 @@ export function SpeechForm({
       setError('请选择语言。');
       return;
     }
-    if (speechMode === 'custom' && speaker.length === 0) {
-      setError('请选择音色。');
-      return;
-    }
-    if (speechMode === 'clone' && referenceAudioPath === null) {
+    if (referenceAudioPath === null) {
       setError('请选择参考音频。');
       return;
     }
@@ -349,11 +339,10 @@ export function SpeechForm({
     };
     const request: SpeechGenerationRequest =
       speechMode === 'custom'
-        ? { ...shared, speaker, instruct: instruct.trim() }
+        ? { ...shared, referenceAudioPath, instruct: instruct.trim() }
         : {
             ...shared,
-            referenceAudioPath: referenceAudioPath as string,
-            referenceText: referenceText.trim(),
+            referenceAudioPath,
           };
 
     generationRef.current = true;
@@ -442,6 +431,52 @@ export function SpeechForm({
     setReferenceAudioSeconds(null);
   };
 
+  const renderReferenceAudioFields = (mode: SpeechMode) => {
+    return (
+    <div className="field">
+      <span className="field-caption">参考音频</span>
+      <AudioInput
+        path={referenceAudioPath}
+        disabled={submitting || busy || recordingBusy}
+        onSelected={handleReferenceAudioSelected}
+        onError={setError}
+      />
+      <AudioRecorder
+        active={active && pageActive && speechMode === mode}
+        disabled={submitting || busy}
+        hasAudio={referenceAudioPath !== null}
+        onBusyChange={setRecordingBusy}
+        onRecorded={handleReferenceAudioSelected}
+        onError={setError}
+      />
+      {referenceAudioPath && referenceAudioSeconds !== null && (
+        <p className="audio-duration">音频时长：{referenceAudioSeconds.toFixed(2)} 秒</p>
+      )}
+      {referenceAudioUrl && (
+        <audio
+          key={`${referenceAudioPath}:${referenceAudioRevision}`}
+          ref={mode === speechMode ? referenceAudioRef : undefined}
+          className="audio-preview"
+          aria-label="参考音频"
+          controls
+          preload="metadata"
+          src={referenceAudioUrl}
+          onLoadedMetadata={(event) => {
+            if (referenceAudioRevision !== referenceAudioRevisionRef.current) return;
+            const seconds = event.currentTarget.duration;
+            if (Number.isFinite(seconds) && seconds > 0) {
+              setReferenceAudioSeconds(seconds);
+            } else {
+              setError('无法读取有效的音频时长。');
+            }
+          }}
+        />
+      )}
+      {referenceMediaError && <p className="form-error" role="alert">{referenceMediaError}</p>}
+    </div>
+    );
+  };
+
   return (
     <section className="speech-workspace" aria-label="语音制作">
       <ComponentGate
@@ -481,7 +516,7 @@ export function SpeechForm({
             onClick={() => focusSpeechMode('custom')}
           >
             <Mic size={16} aria-hidden="true" />
-            固定音色
+            参考音合成
           </button>
           <button
             ref={cloneTabRef}
@@ -525,27 +560,7 @@ export function SpeechForm({
           hidden={speechMode !== 'custom'}
         >
           {renderPromptField('custom')}
-          <div className="form-row">
-            <div className="field">
-              <label htmlFor="custom-speech-speaker">音色</label>
-              <select
-                id="custom-speech-speaker"
-                value={speaker}
-                disabled={
-                  submitting ||
-                  (speechMode === 'custom' && capabilitiesLoading) ||
-                  !capabilities.custom
-                }
-                onChange={(event) => setSpeaker(event.target.value)}
-              >
-                {speaker === '' && <option value="">请选择音色</option>}
-                {capabilities.custom?.speakers.map((voice) => (
-                  <option key={voice} value={voice}>{voice}</option>
-                ))}
-              </select>
-            </div>
-            {renderLanguageField('custom')}
-          </div>
+          {renderReferenceAudioFields('custom')}
           <div className="field">
             <label htmlFor="custom-speech-instruct">情绪/语气</label>
             <input
@@ -556,7 +571,10 @@ export function SpeechForm({
               placeholder="例如：温暖、从容，语速稍慢"
             />
           </div>
-          {renderOutputField('custom')}
+          <div className="form-row">
+            {renderLanguageField('custom')}
+            {renderOutputField('custom')}
+          </div>
         </div>
 
         <div
@@ -567,63 +585,7 @@ export function SpeechForm({
           hidden={speechMode !== 'clone'}
         >
           {renderPromptField('clone')}
-          <div className="field">
-            <span className="field-caption">参考音频</span>
-            <AudioInput
-              path={referenceAudioPath}
-              disabled={submitting || busy || recordingBusy}
-              onSelected={handleReferenceAudioSelected}
-              onError={setError}
-            />
-            <AudioRecorder
-              active={active && pageActive && speechMode === 'clone'}
-              disabled={submitting || busy}
-              hasAudio={referenceAudioPath !== null}
-              onBusyChange={setRecordingBusy}
-              onRecorded={handleReferenceAudioSelected}
-              onError={setError}
-            />
-          </div>
-          {referenceAudioPath && referenceAudioSeconds !== null && (
-            <p className="audio-duration">音频时长：{referenceAudioSeconds.toFixed(2)} 秒</p>
-          )}
-          {referenceAudioUrl && (
-            <audio
-              key={`${referenceAudioPath}:${referenceAudioRevision}`}
-              ref={referenceAudioRef}
-              className="audio-preview"
-              aria-label="参考音频"
-              controls
-              preload="metadata"
-              src={referenceAudioUrl}
-              onLoadedMetadata={(event) => {
-                if (referenceAudioRevision !== referenceAudioRevisionRef.current) {
-                  return;
-                }
-                const seconds = event.currentTarget.duration;
-                if (Number.isFinite(seconds) && seconds > 0) {
-                  setReferenceAudioSeconds(seconds);
-                } else {
-                  setError('无法读取有效的音频时长。');
-                }
-              }}
-            />
-          )}
-          {referenceMediaError && <p className="form-error" role="alert">{referenceMediaError}</p>}
-          <div className="field">
-            <label htmlFor="clone-speech-reference-text">参考原文（可选）</label>
-            <textarea
-              id="clone-speech-reference-text"
-              rows={3}
-              value={referenceText}
-              aria-describedby="clone-speech-reference-hint"
-              onChange={(event) => setReferenceText(event.target.value)}
-              placeholder="参考音频中实际说出的文字"
-            />
-            <p id="clone-speech-reference-hint" className="skill-description">
-              留空质量可能降低，填写参考原文有助于准确克隆音色。
-            </p>
-          </div>
+          {renderReferenceAudioFields('clone')}
           <div className="form-row">
             {renderLanguageField('clone')}
             {renderOutputField('clone')}

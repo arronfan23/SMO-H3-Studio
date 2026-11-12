@@ -178,6 +178,7 @@ async function createHarness(
     outputFormat: 'wav',
     speaker: 'Vivian',
     instruct: '平静地说',
+    referenceAudioPath,
   };
 
   cleanups.push(async () => {
@@ -215,17 +216,18 @@ afterEach(async () => {
 });
 
 describe('speech generation validation', () => {
-  test('speech custom mode requires a speaker and clone mode requires an authorized reference', async () => {
+  test('speech custom and clone modes require an authorized reference', async () => {
     const harness = await createHarness();
 
     await expect(
-      harness.startSpeech({ ...harness.customRequest, speaker: undefined }),
-    ).rejects.toThrow(/speaker/i);
+      harness.startSpeech({ ...harness.customRequest, referenceAudioPath: undefined }),
+    ).rejects.toThrow(/referenceAudioPath/i);
     await expect(
       harness.startSpeech({
         ...harness.customRequest,
         speechMode: 'clone',
         speaker: undefined,
+        referenceAudioPath: undefined,
       }),
     ).rejects.toThrow(/referenceAudioPath/i);
     await expect(
@@ -251,7 +253,7 @@ describe('speech generation validation', () => {
     expect(harness.speech.generate).not.toHaveBeenCalled();
   });
 
-  test('speech maps custom voice fields without reference audio', async () => {
+  test('speech maps custom voice fields with reference audio', async () => {
     const harness = await createHarness();
 
     const result = await harness.startSpeech(harness.customRequest);
@@ -263,6 +265,7 @@ describe('speech generation validation', () => {
       language: 'Chinese',
       speaker: 'Vivian',
       instruct: '平静地说',
+      referenceAudioPath: harness.referenceAudioPath,
     });
   });
 
@@ -270,7 +273,7 @@ describe('speech generation validation', () => {
     { referenceText: '  ', expectedXVectorOnly: true },
     { referenceText: '参考原文', expectedXVectorOnly: false },
   ])(
-    'speech clone preserves reference text for x_vector_only_mode=$expectedXVectorOnly',
+    'speech clone preserves reference text metadata=$expectedXVectorOnly',
     async ({ referenceText }) => {
       const harness = await createHarness();
       const request: SpeechGenerationRequest = {
@@ -286,8 +289,7 @@ describe('speech generation validation', () => {
       const result = await harness.startSpeech(request);
       await waitForWork(harness.store, result.id, 'done');
 
-      // SpeechProcessManager serializes blank reference text as
-      // x_vector_only_mode=true and non-blank text as false.
+      // Legacy reference text remains available in work metadata for retries.
       expect(harness.speech.generate).toHaveBeenCalledWith({
         voiceMode: 'clone',
         text: '克隆语音',
@@ -809,7 +811,10 @@ describe('speech AppServices assembly', () => {
       language: 'Chinese',
       outputFormat: 'wav',
       speaker: 'Vivian',
+      referenceAudioPath: join(dataDirectory, 'recordings', 'reference.wav'),
     };
+    await mkdir(join(dataDirectory, 'recordings'), { recursive: true });
+    await writeFile(request.referenceAudioPath!, 'reference');
 
     const first = await services.startGeneration(request);
     const failed = await waitForWork(services.store, first.id, 'failed');
@@ -865,7 +870,10 @@ describe('speech AppServices assembly', () => {
       language: 'Chinese',
       outputFormat: 'mp3',
       speaker: 'Vivian',
+      referenceAudioPath: join(dataDirectory, 'recordings', 'reference.wav'),
     };
+    await mkdir(join(dataDirectory, 'recordings'), { recursive: true });
+    await writeFile(request.referenceAudioPath!, 'reference');
 
     const result = await services.startGeneration(request);
     const work = await waitForWork(services.store, result.id, 'done');
@@ -881,6 +889,7 @@ describe('speech AppServices assembly', () => {
       language: 'Chinese',
       speaker: 'Vivian',
       instruct: '',
+      referenceAudioPath: request.referenceAudioPath,
     });
     await expect(services.speech.getCapabilities('clone')).resolves.toEqual({
       speakers: [],

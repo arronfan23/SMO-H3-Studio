@@ -96,6 +96,7 @@ const speechGenerationRequest: SpeechGenerationRequest = {
   outputFormat: 'mp3',
   speaker: 'Vivian',
   instruct: '自然地说',
+  referenceAudioPath: 'G:\\audio\\reference.wav',
 };
 
 const imageGenerationRequest: ImageGenerationRequest = {
@@ -567,8 +568,8 @@ describe('IPC input schema', () => {
   });
 
   test.each([
-    { speaker: undefined },
-    { speaker: '' },
+    { referenceAudioPath: undefined },
+    { referenceAudioPath: '' },
     { language: '' },
     { prompt: '  ' },
     { outputFormat: 'ogg' },
