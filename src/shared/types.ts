@@ -22,6 +22,7 @@ export interface SpeechGenerationRequest {
   prompt: string;
   language: string;
   outputFormat: AudioOutputFormat;
+  speechRate?: number;
   speaker?: string;
   instruct?: string;
   referenceAudioPath?: string;

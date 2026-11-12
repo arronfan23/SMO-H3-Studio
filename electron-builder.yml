@@ -20,7 +20,6 @@ extraResources:
       - pyproject.toml
       - uv.lock
       - index_tts_service.py
-      - index_tts_models.json
 win:
   target:
     - nsis

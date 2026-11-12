@@ -233,6 +233,7 @@ describe('SpeechProcessManager', () => {
         speaker: 'Vivian',
         instruct: '温柔地说',
         referenceAudioPath: 'G:\\authorized.wav',
+        speechRate: 1.5,
       }),
     ).resolves.toEqual(WAV);
 
@@ -244,6 +245,7 @@ describe('SpeechProcessManager', () => {
       language: 'Chinese',
       ref_audio: 'G:\\authorized.wav',
       instruct: '温柔地说',
+      speech_rate: 1.5,
     });
   });
 
@@ -309,6 +311,7 @@ describe('SpeechProcessManager', () => {
         language: 'Auto',
         referenceAudioPath: 'G:\\authorized.wav',
         referenceText: '参考原文',
+        speechRate: 0.75,
       }),
     ).resolves.toEqual(expect.any(Uint8Array));
 
@@ -318,6 +321,7 @@ describe('SpeechProcessManager', () => {
       text: '测试',
       language: 'Auto',
       ref_audio: 'G:\\authorized.wav',
+      speech_rate: 0.75,
     });
   });
 
@@ -338,6 +342,7 @@ describe('SpeechProcessManager', () => {
       text: '没有参考文本',
       language: 'Auto',
       ref_audio: 'G:\\authorized.wav',
+      speech_rate: 1,
     });
   });
 

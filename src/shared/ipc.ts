@@ -181,6 +181,7 @@ const speechGenerationRequestSchema = z
     prompt: nonEmptyString,
     language: nonEmptyString,
     outputFormat: z.enum(['wav', 'mp3', 'flac', 'm4a']),
+    speechRate: z.number().finite().min(0.5).max(2).optional(),
     speaker: nonEmptyString.optional(),
     instruct: z.string().optional(),
     referenceAudioPath: nonEmptyString.optional(),

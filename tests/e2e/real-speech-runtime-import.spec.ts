@@ -20,9 +20,9 @@ test.describe('real installed speech runtime interpreter', () => {
   );
   test.setTimeout(120_000);
 
-  test('imports IndexTTS2 using python -I', async () => {
+  test('imports IndexTTS2.5 using python -I', async () => {
     await expect(
-      execFileAsync(pythonPath, ['-I', '-c', 'from indextts.infer_v2 import IndexTTS2'], {
+      execFileAsync(pythonPath, ['-I', '-c', 'from indextts.infer_v2_5 import IndexTTS2'], {
         cwd: venvDirectory,
         env: {
           ...process.env,
@@ -37,6 +37,6 @@ test.describe('real installed speech runtime interpreter', () => {
       stdout: expect.any(String),
       stderr: expect.any(String),
     });
-    console.log(`Real interpreter import passed: ${pythonPath} -I -c "IndexTTS2"`);
+    console.log(`Real interpreter import passed: ${pythonPath} -I -c "IndexTTS2.5"`);
   });
 });

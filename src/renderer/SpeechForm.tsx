@@ -21,6 +21,14 @@ const OUTPUT_FORMATS: Array<{ value: AudioOutputFormat; label: string }> = [
   { value: 'm4a', label: 'M4A' },
 ];
 
+const LANGUAGE_LABELS: Record<string, string> = {
+  Chinese: '中文',
+  English: '英语',
+  Japanese: '日语',
+  Spanish: '西班牙语',
+  Arabic: '阿拉伯语',
+};
+
 export function SpeechForm({
   active = true,
   pageActive = true,
@@ -40,6 +48,7 @@ export function SpeechForm({
     clone: '',
   });
   const [outputFormat, setOutputFormat] = useState<AudioOutputFormat>('wav');
+  const [speechRate, setSpeechRate] = useState(1);
   const [referenceAudioPath, setReferenceAudioPath] = useState<string | null>(null);
   const [referenceAudioRevision, setReferenceAudioRevision] = useState(0);
   const [referenceAudioSeconds, setReferenceAudioSeconds] = useState<number | null>(null);
@@ -336,6 +345,7 @@ export function SpeechForm({
       prompt: text,
       language: currentLanguage,
       outputFormat,
+      speechRate,
     };
     const request: SpeechGenerationRequest =
       speechMode === 'custom'
@@ -401,7 +411,9 @@ export function SpeechForm({
         >
           {language === '' && <option value="">请选择语言</option>}
           {modeCapabilities?.languages.map((option) => (
-            <option key={option} value={option}>{option}</option>
+            <option key={option} value={option}>
+              {LANGUAGE_LABELS[option] ?? option}
+            </option>
           ))}
         </select>
       </div>
@@ -421,6 +433,26 @@ export function SpeechForm({
           <option key={format.value} value={format.value}>{format.label}</option>
         ))}
       </select>
+    </div>
+  );
+
+  const renderSpeechRateField = (mode: SpeechMode) => (
+    <div className="field">
+      <div className="speech-rate-heading">
+        <label htmlFor={`${mode}-speech-rate`}>语速</label>
+        <output>{speechRate.toFixed(2)}x</output>
+      </div>
+      <input
+        id={`${mode}-speech-rate`}
+        className="speech-rate-slider"
+        type="range"
+        min={0.5}
+        max={2}
+        step={0.05}
+        value={speechRate}
+        disabled={submitting}
+        onChange={(event) => setSpeechRate(Number(event.target.value))}
+      />
     </div>
   );
 
@@ -568,11 +600,12 @@ export function SpeechForm({
               type="text"
               value={instruct}
               onChange={(event) => setInstruct(event.target.value)}
-              placeholder="例如：温暖、从容，语速稍慢"
+              placeholder="例如：温暖、从容，富有感染力"
             />
           </div>
-          <div className="form-row">
+          <div className="form-row form-row-three">
             {renderLanguageField('custom')}
+            {renderSpeechRateField('custom')}
             {renderOutputField('custom')}
           </div>
         </div>
@@ -586,8 +619,9 @@ export function SpeechForm({
         >
           {renderPromptField('clone')}
           {renderReferenceAudioFields('clone')}
-          <div className="form-row">
+          <div className="form-row form-row-three">
             {renderLanguageField('clone')}
+            {renderSpeechRateField('clone')}
             {renderOutputField('clone')}
           </div>
         </div>

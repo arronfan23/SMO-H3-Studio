@@ -256,7 +256,6 @@ describe('electron-builder.yml', () => {
     const projectFiles = [
       'pyproject.toml',
       'index_tts_service.py',
-      'index_tts_models.json',
       'uv.lock',
     ];
 

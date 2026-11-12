@@ -670,6 +670,29 @@ body[data-window-maximized='true'] .window-resize-handle {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.speech-rate-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.speech-rate-heading output {
+  min-width: 52px;
+  color: #465149;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.speech-rate-slider {
+  width: 100%;
+  min-height: 40px;
+  margin: 0;
+  accent-color: #258665;
+}
+
 .step-number-control {
   display: grid;
   grid-template-columns: 36px 64px 36px;

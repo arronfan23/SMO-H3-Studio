@@ -266,7 +266,36 @@ describe('speech generation validation', () => {
       speaker: 'Vivian',
       instruct: '平静地说',
       referenceAudioPath: harness.referenceAudioPath,
+      speechRate: 1,
     });
+  });
+
+  test.each([0.49, 2.01, Number.NaN, Number.POSITIVE_INFINITY])(
+    'speech rejects invalid speechRate=%s',
+    async (speechRate) => {
+      const harness = await createHarness();
+
+      await expect(
+        harness.startSpeech({ ...harness.customRequest, speechRate }),
+      ).rejects.toThrow(/speechRate/i);
+      expect(harness.store.listWorks()).toEqual([]);
+      expect(harness.speech.generate).not.toHaveBeenCalled();
+    },
+  );
+
+  test('speech passes and stores the selected speech rate', async () => {
+    const harness = await createHarness();
+
+    const result = await harness.startSpeech({
+      ...harness.customRequest,
+      speechRate: 1.5,
+    });
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(harness.speech.generate).toHaveBeenCalledWith(
+      expect.objectContaining({ speechRate: 1.5 }),
+    );
+    expect(work.metadata?.request).toMatchObject({ speechRate: 1.5 });
   });
 
   test.each([
@@ -296,6 +325,7 @@ describe('speech generation validation', () => {
         language: 'Auto',
         referenceAudioPath: harness.referenceAudioPath,
         referenceText,
+        speechRate: 1,
       });
     },
   );
@@ -890,6 +920,7 @@ describe('speech AppServices assembly', () => {
       speaker: 'Vivian',
       instruct: '',
       referenceAudioPath: request.referenceAudioPath,
+      speechRate: 1,
     });
     await expect(services.speech.getCapabilities('clone')).resolves.toEqual({
       speakers: [],

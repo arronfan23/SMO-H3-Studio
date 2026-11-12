@@ -33,7 +33,7 @@ function componentState(
 function capabilitiesFor(mode: SpeechMode) {
   return {
     speakers: mode === 'custom' ? ['Vivian', 'Ryan'] : [],
-    languages: ['Auto', 'Chinese', 'English'],
+    languages: ['Chinese', 'English', 'Japanese', 'Spanish', 'Arabic'],
   };
 }
 
@@ -184,7 +184,17 @@ describe('语音工作区', () => {
     expect(customPanel.getByLabelText('口播文字')).toBeInTheDocument();
     expect(customPanel.getByRole('group', { name: '音频拖放区' })).toBeVisible();
     expect(customPanel.queryByLabelText('音色')).not.toBeInTheDocument();
-    expect(customPanel.getByLabelText('语言')).toHaveValue('Auto');
+    const language = customPanel.getByLabelText('语言');
+    expect(language).toHaveValue('Chinese');
+    expect(within(language).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      '中文',
+      '英语',
+      '日语',
+      '西班牙语',
+      '阿拉伯语',
+    ]);
+    expect(customPanel.getByLabelText('语速')).toHaveValue('1');
+    expect(customPanel.getByText('1.00x')).toBeInTheDocument();
     expect(customPanel.getByLabelText('情绪/语气')).toBeInTheDocument();
     const output = customPanel.getByLabelText('输出格式');
     expect(output).toHaveValue('wav');
@@ -208,6 +218,7 @@ describe('语音工作区', () => {
     expect(clonePanel.queryByLabelText('参考原文（可选）')).not.toBeInTheDocument();
     expect(clonePanel.queryByLabelText('音色')).not.toBeInTheDocument();
     expect(clonePanel.queryByLabelText('情绪/语气')).not.toBeInTheDocument();
+    expect(clonePanel.getByLabelText('语速')).toHaveValue('1');
 
     fireEvent.keyDown(cloneTab, { key: 'ArrowRight' });
     expect(customTab).toHaveFocus();
@@ -248,6 +259,8 @@ describe('语音工作区', () => {
     });
     fireEvent.change(speechField('语言'), { target: { value: 'Chinese' } });
     fireEvent.change(speechField('输出格式'), { target: { value: 'mp3' } });
+    fireEvent.change(speechField('语速'), { target: { value: '1.5' } });
+    expect(speechField('语速')).toHaveValue('1.5');
     fireEvent.click(screen.getByRole('button', { name: '生成语音' }));
 
     await waitFor(() =>
@@ -259,6 +272,7 @@ describe('语音工作区', () => {
         instruct: '温暖而从容',
         language: 'Chinese',
         outputFormat: 'mp3',
+        speechRate: 1.5,
       }),
     );
     expect(smo.jobs.start.mock.calls[0][0]).not.toHaveProperty('avatarId');
@@ -306,6 +320,7 @@ describe('语音工作区', () => {
     });
     fireEvent.change(speechField('语言', 'clone'), { target: { value: 'English' } });
     fireEvent.change(speechField('输出格式', 'clone'), { target: { value: 'flac' } });
+    fireEvent.change(speechField('语速', 'clone'), { target: { value: '0.75' } });
     fireEvent.click(screen.getByRole('button', { name: '生成语音' }));
 
     await waitFor(() =>
@@ -316,6 +331,7 @@ describe('语音工作区', () => {
         referenceAudioPath: 'G:\\dropped\\reference.wav',
         language: 'English',
         outputFormat: 'flac',
+        speechRate: 0.75,
       }),
     );
     expect(smo.jobs.start.mock.calls[0][0]).not.toHaveProperty('speaker');
@@ -771,7 +787,7 @@ describe('语音工作区', () => {
 
     await waitForSpeechReady();
     expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(2);
-    expect(speechField('语言')).toHaveValue('Auto');
+    expect(speechField('语言')).toHaveValue('Chinese');
     expect(screen.queryByText(/语音模型仍在启动/)).not.toBeInTheDocument();
     expect(screen.queryByText(/音色与语言加载失败/)).not.toBeInTheDocument();
   });

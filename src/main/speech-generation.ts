@@ -71,6 +71,15 @@ export function validateSpeechGenerationRequest(
   if (!['wav', 'mp3', 'flac', 'm4a'].includes(request.outputFormat)) {
     throw new Error('Invalid speech output format');
   }
+  if (
+    request.speechRate !== undefined &&
+    (typeof request.speechRate !== 'number' ||
+      !Number.isFinite(request.speechRate) ||
+      request.speechRate < 0.5 ||
+      request.speechRate > 2)
+  ) {
+    throw new Error('speechRate must be a finite number between 0.5 and 2');
+  }
   for (const field of ['speaker', 'instruct', 'referenceText', 'retryOf'] as const) {
     if (request[field] !== undefined && typeof request[field] !== 'string') {
       throw new Error(`${field} must be a string`);
@@ -117,6 +126,7 @@ function sanitizeRequest(
   ] as const) {
     if (input[field] !== undefined) request[field] = input[field];
   }
+  if (input.speechRate !== undefined) request.speechRate = input.speechRate;
   return request;
 }
 
@@ -239,6 +249,7 @@ export function createSpeechGenerationHandler(
                 voiceMode: 'custom',
                 text: request.prompt,
                 language: request.language,
+                speechRate: request.speechRate ?? 1,
                 speaker: request.speaker,
                 instruct: request.instruct ?? '',
                 referenceAudioPath: request.referenceAudioPath,
@@ -247,6 +258,7 @@ export function createSpeechGenerationHandler(
                 voiceMode: 'clone',
                 text: request.prompt,
                 language: request.language,
+                speechRate: request.speechRate ?? 1,
                 referenceAudioPath: request.referenceAudioPath,
                 referenceText: request.referenceText ?? '',
               },

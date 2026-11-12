@@ -23,7 +23,7 @@
 
 ### 任务 1：迁移 Python 推理服务
 
-- [ ] **步骤 1：先修改 Python 测试，使其要求 2.5 入口和参数**
+- [x] **步骤 1：先修改 Python 测试，使其要求 2.5 入口和参数**
 
 将 fake 模块改为 `indextts.infer_v2_5`，模型目录断言改为 `IndexTTS-2.5`，并加入：
 
@@ -55,13 +55,13 @@ def test_rejects_speech_rate_outside_the_official_duration_range(self):
 
 构造断言使用 `use_bf16=True`，并增加 `use_qwen_emo=True`；fake CUDA 对象补充 `is_bf16_supported()`。删除只适用于 2.0 缓存 refs 的测试。
 
-- [ ] **步骤 2：运行测试并确认因旧入口和缺少新参数而失败**
+- [x] **步骤 2：运行测试并确认因旧入口和缺少新参数而失败**
 
 运行：`python tests/python/test_indextts_service.py -v`
 
 预期：FAIL，仍加载 `indextts.infer_v2`、模型目录为 `IndexTTS-2`，且未传 `lang/duration_factor`。
 
-- [ ] **步骤 3：实现最小 2.5 服务迁移**
+- [x] **步骤 3：实现最小 2.5 服务迁移**
 
 核心实现：
 
@@ -106,7 +106,7 @@ model.infer(
 
 同时校验语言必须属于 `LANGUAGE_CODES`，将 `speech_rate` 加入允许的公共请求字段，删除 `ensure_huggingface_references()` 及其调用。
 
-- [ ] **步骤 4：运行 Python 测试确认通过**
+- [x] **步骤 4：运行 Python 测试确认通过**
 
 运行：`python tests/python/test_indextts_service.py -v`
 
@@ -114,7 +114,7 @@ model.infer(
 
 ### 任务 2：贯通语速请求与作品元数据
 
-- [ ] **步骤 1：添加 IPC、主进程和生成失败的测试**
+- [x] **步骤 1：添加 IPC、主进程和生成失败的测试**
 
 在 `tests/unit/speech-process.test.ts` 断言自定义与克隆 payload 均包含：
 
@@ -130,13 +130,13 @@ expect(work.metadata).toMatchObject({ speechRate: 1.5 });
 
 在 `tests/unit/ipc.test.ts` 验证合法 `speechRate` 被接受，非有限值和越界值被拒绝。
 
-- [ ] **步骤 2：运行三组测试并确认新断言失败**
+- [x] **步骤 2：运行三组测试并确认新断言失败**
 
 运行：`npx vitest run tests/unit/speech-process.test.ts tests/unit/speech-generation.test.ts tests/unit/ipc.test.ts`
 
 预期：FAIL，当前请求和 payload 不支持 `speechRate`。
 
-- [ ] **步骤 3：实现请求字段与校验**
+- [x] **步骤 3：实现请求字段与校验**
 
 在共享 schema 增加：
 
@@ -152,13 +152,13 @@ speech_rate: request.speechRate ?? 1.0,
 
 `validateSpeechGenerationRequest()` 对缺省值之外的字段校验有限数值与 `[0.5, 2]` 范围，作品元数据记录 `speechRate: request.speechRate ?? 1.0`。
 
-- [ ] **步骤 4：重跑三组测试**
+- [x] **步骤 4：重跑三组测试**
 
 运行同步骤 2，预期全部 PASS。
 
 ### 任务 3：增加两个模式的语速与多语言 UI
 
-- [ ] **步骤 1：添加 SpeechForm 和跨页面失败测试**
+- [x] **步骤 1：添加 SpeechForm 和跨页面失败测试**
 
 在 `tests/unit/speech-form.test.tsx` 对两个模式分别执行：
 
@@ -171,13 +171,13 @@ expect(smo.jobs.start.mock.calls[0][0]).toMatchObject({ speechRate: 1.5 });
 
 新增语言选项断言：中文、英语、日语、西班牙语、阿拉伯语可见，Auto 不存在。`tests/unit/studio.test.tsx` 增加切页后语速仍为 `1.5` 的断言。
 
-- [ ] **步骤 2：运行测试并确认语速控件不存在**
+- [x] **步骤 2：运行测试并确认语速控件不存在**
 
 运行：`npx vitest run tests/unit/speech-form.test.tsx tests/unit/studio.test.tsx`
 
 预期：FAIL，找不到“语速”滑块。
 
-- [ ] **步骤 3：实现共享草稿状态和滑块**
+- [x] **步骤 3：实现共享草稿状态和滑块**
 
 在 `SpeechForm` 中增加：
 
@@ -210,7 +210,7 @@ const languageLabels: Record<string, string> = {
 
 两种请求都加入 `speechRate`，语言 option 的 `value` 保持服务值，显示文字使用 `languageLabels`。
 
-- [ ] **步骤 4：运行 UI 与类型测试**
+- [x] **步骤 4：运行 UI 与类型测试**
 
 运行：`npx vitest run tests/unit/speech-form.test.tsx tests/unit/studio.test.tsx && npm run typecheck`
 
@@ -218,7 +218,7 @@ const languageLabels: Record<string, string> = {
 
 ### 任务 4：更新模型清单、依赖锁与打包
 
-- [ ] **步骤 1：更新清单测试为 2.5 文件集和平铺路径**
+- [x] **步骤 1：更新清单测试为 2.5 文件集和平铺路径**
 
 在 `tests/unit/media-components.test.ts` 将主仓库改为 `IndexTeam/IndexTTS-2.5`，要求 `codec.pth` 和多语言 tiktoken 文件，并要求：
 
@@ -234,13 +234,13 @@ expect(files.map((file) => file.path)).toEqual(expect.arrayContaining([
 
 生成器夹具补充 w2v 的 `model.safetensors`，删除 MaskGCT 辅助项。打包测试要求不再包含 `index_tts_models.json`。
 
-- [ ] **步骤 2：运行测试确认旧清单和打包规则失败**
+- [x] **步骤 2：运行测试确认旧清单和打包规则失败**
 
 运行：`npx vitest run tests/unit/media-components.test.ts tests/unit/runtime-packaging.test.ts`
 
 预期：FAIL，仍指向 2.0 主模型和旧缓存路径。
 
-- [ ] **步骤 3：修改生成器与依赖**
+- [x] **步骤 3：修改生成器与依赖**
 
 主模型固定为 `IndexTeam/IndexTTS-2.5`，核心文件集合采用规格中的 2.5 文件。辅助文件输出到：
 
@@ -264,7 +264,7 @@ const paths = {
 & 'G:\SMO-H3-Data\components\speech\runtime\tools\uv-0.11.13\uv.exe' lock --project resources/speech
 ```
 
-- [ ] **步骤 4：生成真实清单并验证**
+- [x] **步骤 4：生成真实清单并验证**
 
 运行：
 
@@ -278,7 +278,7 @@ node scripts/build-media-manifest.mjs --component speech
 
 ### 任务 5：回归、真实模型验收与构建
 
-- [ ] **步骤 1：运行自动化回归**
+- [x] **步骤 1：运行自动化回归**
 
 ```powershell
 python tests/python/test_indextts_service.py -v
@@ -290,14 +290,14 @@ npx playwright test tests/e2e/studio.spec.ts
 
 预期：除明确排除的既有环境向导修改外均通过；记录实际通过数和跳过数。
 
-- [ ] **步骤 2：安装 2.5 并执行真实生成**
+- [x] **步骤 2：安装 2.5 并执行真实生成**
 
 退出正在运行的 Studio 实例，使用新构建安装语音组件。用已授权参考音生成中文 `1.00x` 与 `1.50x` 样例，保存作品并比较实际音频时长；再生成一个带情绪说明的中文样例和一个英文样例。若下载或模型验收失败，保留日志并明确报告，不宣称真实生成通过。
 
-- [ ] **步骤 3：构建 Windows 包并核对内容**
+- [x] **步骤 3：构建 Windows 包并核对内容**
 
 运行 `npm run pack`，或在不关闭正在使用旧包的情况下输出到独立目录。确认包内包含 `index_tts_service.py`、`pyproject.toml`、`uv.lock`，不包含 Qwen 服务、2.0 refs 配置或模型正文；对源文件和包内文件计算 SHA256 并确认一致。
 
-- [ ] **步骤 4：检查最终工作树**
+- [x] **步骤 4：检查最终工作树**
 
 运行 `git status --short` 和 `git diff --check`。不得纳入 `tests/e2e/environment.spec.ts`、`tests/unit/environment-wizard.test.tsx` 或 `__pycache__` 的既有改动。除非用户另行要求，不提交或推送实现代码。

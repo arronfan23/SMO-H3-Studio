@@ -20,6 +20,7 @@ export interface SpeechGenerateRequest {
   voiceMode: SpeechVoiceMode;
   text: string;
   language: string;
+  speechRate?: number;
   speaker?: string;
   instruct?: string;
   referenceAudioPath?: string;
@@ -359,6 +360,7 @@ export class SpeechProcessManager {
         text: request.text,
         language: request.language,
         ref_audio: request.referenceAudioPath,
+        speech_rate: request.speechRate ?? 1,
         instruct: request.instruct ?? '',
       };
     }
@@ -368,6 +370,7 @@ export class SpeechProcessManager {
         text: request.text,
         language: request.language,
         ref_audio: request.referenceAudioPath,
+        speech_rate: request.speechRate ?? 1,
       };
     }
     throw new Error('Unsupported speech voice mode');

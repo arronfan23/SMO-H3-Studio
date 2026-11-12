@@ -1,6 +1,7 @@
 import argparse
 import gc
 import json
+import math
 import os
 import tempfile
 import threading
@@ -10,8 +11,15 @@ from urllib.parse import parse_qs, urlsplit
 
 
 MAXIMUM_REQUEST_BYTES = 64 * 1024
-MODEL_DIRECTORY = "IndexTTS-2"
-SUPPORTED_LANGUAGES = ["Auto", "Chinese", "English"]
+MODEL_DIRECTORY = "IndexTTS-2.5"
+SUPPORTED_LANGUAGES = ["Chinese", "English", "Japanese", "Spanish", "Arabic"]
+LANGUAGE_CODES = {
+    "Chinese": "ZH",
+    "English": "EN",
+    "Japanese": "JA",
+    "Spanish": "ES",
+    "Arabic": "AR",
+}
 
 
 class RequestError(Exception):
@@ -40,6 +48,7 @@ class ModelRegistry:
         with self.lock:
             model = self.load_locked(mode)
             instruct = payload.get("instruct", "") if mode == "custom" else ""
+            speech_rate = payload.get("speech_rate", 1.0)
             descriptor, output_path = tempfile.mkstemp(suffix=".wav")
             os.close(descriptor)
             Path(output_path).unlink()
@@ -47,7 +56,9 @@ class ModelRegistry:
                 model.infer(
                     spk_audio_prompt=payload["ref_audio"],
                     text=payload["text"],
+                    lang=LANGUAGE_CODES[payload["language"].strip()],
                     output_path=output_path,
+                    duration_factor=1 / speech_rate,
                     use_emo_text=bool(instruct.strip()),
                     emo_text=instruct.strip() or None,
                     use_random=False,
@@ -77,13 +88,18 @@ class ModelRegistry:
         ModelRegistry.validate_mode(mode)
         common_fields = {"voice_mode", "text", "language", "ref_audio"}
         mode_fields = {"instruct"} if mode == "custom" else set()
+        required_fields = common_fields | mode_fields
         if payload.get("ref_audio") is None:
             raise RequestError(400, "ref_audio is required")
-        if set(payload) != common_fields | mode_fields:
+        if not required_fields.issubset(payload) or not set(payload).issubset(
+            required_fields | {"speech_rate"}
+        ):
             raise RequestError(400, "The request contains missing or unsupported fields")
         for field in ("text", "language"):
             if not isinstance(payload.get(field), str) or not payload[field].strip():
                 raise RequestError(400, f"{field} must be a non-empty string")
+        if payload["language"].strip() not in LANGUAGE_CODES:
+            raise RequestError(400, "language is not supported by IndexTTS2.5")
         reference_audio = payload.get("ref_audio")
         if not isinstance(reference_audio, str) or not Path(reference_audio).is_absolute():
             raise RequestError(400, "ref_audio must be an absolute local path")
@@ -91,6 +107,11 @@ class ModelRegistry:
             raise RequestError(400, "ref_audio must name an existing audio file")
         if mode == "custom" and not isinstance(payload.get("instruct"), str):
             raise RequestError(400, "instruct must be a string")
+        speech_rate = payload.get("speech_rate", 1.0)
+        if isinstance(speech_rate, bool) or not isinstance(speech_rate, (int, float)):
+            raise RequestError(400, "speech_rate must be a number")
+        if not math.isfinite(speech_rate) or not 0.5 <= speech_rate <= 2.0:
+            raise RequestError(400, "speech_rate must be between 0.5 and 2.0")
         return mode
 
     def load_locked(self, mode):
@@ -102,9 +123,8 @@ class ModelRegistry:
             return self.model
         self.release_locked()
         try:
-            self.ensure_huggingface_references()
             import torch
-            from indextts.infer_v2 import IndexTTS2
+            from indextts.infer_v2_5 import IndexTTS2
 
             model_path = self.model_root / MODEL_DIRECTORY
             config_path = model_path / "config.yaml"
@@ -114,9 +134,10 @@ class ModelRegistry:
             self.model = IndexTTS2(
                 cfg_path=str(config_path),
                 model_dir=str(model_path),
-                use_fp16=torch.cuda.is_available(),
+                use_bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
                 use_cuda_kernel=False,
                 use_deepspeed=False,
+                use_qwen_emo=True,
             )
             self.mode = mode
             return self.model
@@ -125,26 +146,6 @@ class ModelRegistry:
             self.mode = None
             self.collect_cuda_garbage()
             raise
-
-    def ensure_huggingface_references(self):
-        config_path = Path(__file__).with_name("index_tts_models.json")
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        repositories = config.get("repositories", {})
-        for repository, revision in repositories.items():
-            if not isinstance(revision, str) or len(revision) != 40:
-                raise ValueError("IndexTTS2 dependency revision is invalid")
-            repository_directory = repository.replace("/", "--")
-            references = (
-                self.model_root
-                / "checkpoints"
-                / "hf_cache"
-                / f"models--{repository_directory}"
-                / "refs"
-            )
-            references.mkdir(parents=True, exist_ok=True)
-            reference_path = references / "main"
-            if not reference_path.exists():
-                reference_path.write_text(f"{revision}\n", encoding="ascii")
 
     def release_locked(self):
         previous = self.model

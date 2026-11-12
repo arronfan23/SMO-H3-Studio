@@ -41,15 +41,13 @@ type DownloadFile = typeof realDownloadFile;
 type RequestHandler = (request: IncomingMessage, response: ServerResponse) => void;
 type EditableManifest = any;
 
-const INDEX_TTS_REPOSITORY = 'IndexTeam/IndexTTS-2';
+const INDEX_TTS_REPOSITORY = 'IndexTeam/IndexTTS-2.5';
 const W2V_BERT_REPOSITORY = 'facebook/w2v-bert-2.0';
-const MASKGCT_REPOSITORY = 'amphion/MaskGCT';
 const CAMPPLUS_REPOSITORY = 'funasr/campplus';
 const BIGVGAN_REPOSITORY = 'nvidia/bigvgan_v2_22khz_80band_256x';
 const SPEECH_MODEL_REPOSITORIES = [
   INDEX_TTS_REPOSITORY,
   W2V_BERT_REPOSITORY,
-  MASKGCT_REPOSITORY,
   CAMPPLUS_REPOSITORY,
   BIGVGAN_REPOSITORY,
 ] as const;
@@ -271,6 +269,13 @@ describe('media component manifest', () => {
     expect(Object.keys(revisions).sort()).toEqual(
       [...SPEECH_MODEL_REPOSITORIES, UV_REPOSITORY].sort(),
     );
+    expect(files.map((file) => file.path)).toEqual(expect.arrayContaining([
+      'IndexTTS-2.5/codec.pth',
+      'IndexTTS-2.5/multilingual_zh_ja_yue_char_del.tiktoken',
+      'IndexTTS-2.5/hf_cache/w2v-bert-2.0/model.safetensors',
+      'IndexTTS-2.5/hf_cache/campplus_cn_common.bin',
+      'IndexTTS-2.5/hf_cache/bigvgan/bigvgan_generator.pt',
+    ]));
     for (const revision of Object.values(revisions)) {
       expect(revision).toMatch(/^[a-f0-9]{40}$/);
     }
@@ -525,9 +530,9 @@ describe('MediaComponentService', () => {
   test('falls back from the Hugging Face mirror without changing verified downloads', async () => {
     const manifest = makeManifest();
     const originalUrl =
-      'https://huggingface.co/IndexTeam/IndexTTS-2/resolve/main/config.yaml?download=true';
+      'https://huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/config.yaml?download=true';
     const mirrorUrl =
-      'https://hf-mirror.com/IndexTeam/IndexTTS-2/resolve/main/config.yaml?download=true';
+      'https://hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/config.yaml?download=true';
     const nonHuggingFaceUrl = 'https://models.test/image/config.json?original=true';
     const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
     speechFile.url = originalUrl;
@@ -653,10 +658,10 @@ describe('MediaComponentService', () => {
 
   test('discards mirror partial files before falling back to the official source', async () => {
     const manifest = makeManifest();
-    const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2/resolve/main/gpt.pth';
-    const mirrorUrl = 'https://hf-mirror.com/IndexTeam/IndexTTS-2/resolve/main/gpt.pth';
-    const mirrorPath = '/hf-mirror.com/IndexTeam/IndexTTS-2/resolve/main/gpt.pth';
-    const officialPath = '/huggingface.co/IndexTeam/IndexTTS-2/resolve/main/gpt.pth';
+    const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const mirrorUrl = 'https://hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const mirrorPath = '/hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const officialPath = '/huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
     const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
     speechFile.url = originalUrl;
     manifest.components.speech.files = [speechFile];
@@ -838,8 +843,8 @@ describe('MediaComponentService', () => {
 
   test('stops before the official URL when a mirror download is cancelled', async () => {
     const manifest = makeManifest();
-    const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2/resolve/main/gpt.pth';
-    const mirrorUrl = 'https://hf-mirror.com/IndexTeam/IndexTTS-2/resolve/main/gpt.pth';
+    const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const mirrorUrl = 'https://hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
     const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
     speechFile.url = originalUrl;
     manifest.components.speech.files = [speechFile];
@@ -877,7 +882,7 @@ describe('MediaComponentService', () => {
     await expect(installing).rejects.toThrow(/cancel|abort/i);
     expect(download).toHaveBeenCalledTimes(1);
     expect(download.mock.calls[0][0].url).toBe(
-      'https://hf-mirror.com/IndexTeam/IndexTTS-2/resolve/main/gpt.pth',
+      'https://hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth',
     );
     expect(service.getState('speech')).toMatchObject({
       status: 'missing',
@@ -934,7 +939,7 @@ describe('MediaComponentService', () => {
 
   test('preserves the official source error after the mirror also fails', async () => {
     const manifest = makeManifest();
-    const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2/resolve/main/gpt.pth';
+    const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
     const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
     speechFile.url = originalUrl;
     manifest.components.speech.files = [speechFile];
@@ -957,7 +962,7 @@ describe('MediaComponentService', () => {
     }
 
     expect(download.mock.calls.map(([options]) => options.url)).toEqual([
-      'https://hf-mirror.com/IndexTeam/IndexTTS-2/resolve/main/gpt.pth',
+      'https://hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth',
       originalUrl,
     ]);
     expect(rejection).toBe(officialError);
@@ -1382,20 +1387,23 @@ describe('media component manifest generator', () => {
         : originalSmallFiles.get(repository)!;
       const pathsByRepository: Record<string, string[]> = {
         [INDEX_TTS_REPOSITORY]: [
-          'LICENSE.txt',
-          'LICENSE_ZH.txt',
-          'bpe.model',
+          'LICENSE',
+          'codec.pth',
           'config.yaml',
           'feat1.pt',
           'feat2.pt',
           'gpt.pth',
+          'multilingual_zh_ja_yue_char_del.tiktoken',
           's2mel.pth',
           'wav2vec2bert_stats.pt',
           'qwen0.6bemo4-merge/generation_config.json',
           'qwen0.6bemo4-merge/model.safetensors',
         ],
-        [W2V_BERT_REPOSITORY]: ['config.json', 'preprocessor_config.json'],
-        [MASKGCT_REPOSITORY]: ['semantic_codec/model.safetensors'],
+        [W2V_BERT_REPOSITORY]: [
+          'config.json',
+          'preprocessor_config.json',
+          'model.safetensors',
+        ],
         [CAMPPLUS_REPOSITORY]: ['campplus_cn_common.bin'],
         [BIGVGAN_REPOSITORY]: ['config.json', 'bigvgan_generator.pt'],
       };
@@ -1578,7 +1586,7 @@ describe('media component manifest generator', () => {
       url:
         `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ASSET_NAME}`,
     });
-    expect(files.some((file) => file.path === 'IndexTTS-2/LICENSE.txt')).toBe(true);
+    expect(files.some((file) => file.path === 'IndexTTS-2.5/LICENSE')).toBe(true);
     expect(files.some((file) => /README|\.png$|\.gguf$/i.test(file.path))).toBe(false);
     for (const repository of repositories) {
       const revision = harness.revisions[repository];
@@ -1596,7 +1604,7 @@ describe('media component manifest generator', () => {
     for (const [repository, path] of [
       [INDEX_TTS_REPOSITORY, 'gpt.pth'],
       [INDEX_TTS_REPOSITORY, 'qwen0.6bemo4-merge/model.safetensors'],
-      [MASKGCT_REPOSITORY, 'semantic_codec/model.safetensors'],
+      [W2V_BERT_REPOSITORY, 'model.safetensors'],
       [CAMPPLUS_REPOSITORY, 'campplus_cn_common.bin'],
       [BIGVGAN_REPOSITORY, 'bigvgan_generator.pt'],
     ] as const) {

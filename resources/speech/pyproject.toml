@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Loopback-only IndexTTS2 service for SMO H3 Studio"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "indextts @ https://github.com/index-tts/index-tts/archive/830f6f8f94a51fea23ab1d639027a86200075a4e.zip",
+    "indextts @ https://github.com/index-tts/index-tts/archive/39207d91c30899cad1e7c1b9eb678c241f678e55.zip",
     "soundfile==0.14.0",
     "torch==2.8.*",
     "torchaudio==2.8.*",

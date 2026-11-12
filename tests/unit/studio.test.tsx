@@ -1679,6 +1679,7 @@ describe('text-to-video studio', () => {
       target: { value: '亲切自然' },
     });
     fireEvent.change(studioSpeechField('输出格式'), { target: { value: 'mp3' } });
+    fireEvent.change(studioSpeechField('语速'), { target: { value: '1.5' } });
 
     fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
     await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledWith('clone'));
@@ -1696,6 +1697,7 @@ describe('text-to-video studio', () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('tab', { name: '参考音合成' }));
     expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
+    expect(studioSpeechField('语速')).toHaveValue('1.5');
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
@@ -1703,6 +1705,7 @@ describe('text-to-video studio', () => {
       expect(studioSpeechField('口播文字')).toHaveValue('主模式切换后保留的口播草稿');
       expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
       expect(studioSpeechField('输出格式')).toHaveValue('mp3');
+      expect(studioSpeechField('语速')).toHaveValue('1.5');
     }
 
     fireEvent.click(studioModeButton('视频'));

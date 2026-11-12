@@ -496,6 +496,27 @@ describe('IPC input schema', () => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
 
+  test('speech accepts a native speech rate', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: { ...speechGenerationRequest, speechRate: 1.5 },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([0.49, 2.01, Number.NaN, Number.POSITIVE_INFINITY])(
+    'speech rejects invalid speechRate=%s',
+    (speechRate) => {
+      expect(() =>
+        createIpcSchema().parse({
+          channel: 'jobs:start',
+          payload: { ...speechGenerationRequest, speechRate },
+        }),
+      ).toThrow();
+    },
+  );
+
   test('image accepts a strict generation request', () => {
     const request = {
       channel: 'jobs:start',

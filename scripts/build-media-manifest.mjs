@@ -5,15 +5,15 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-const INDEX_TTS_REPOSITORY = 'IndexTeam/IndexTTS-2';
+const INDEX_TTS_REPOSITORY = 'IndexTeam/IndexTTS-2.5';
 const INDEX_TTS_CORE_PATHS = new Set([
-  'LICENSE.txt',
-  'LICENSE_ZH.txt',
-  'bpe.model',
+  'LICENSE',
+  'codec.pth',
   'config.yaml',
   'feat1.pt',
   'feat2.pt',
   'gpt.pth',
+  'multilingual_zh_ja_yue_char_del.tiktoken',
   's2mel.pth',
   'wav2vec2bert_stats.pt',
 ]);
@@ -21,11 +21,7 @@ const INDEX_TTS_QWEN_DIRECTORY = 'qwen0.6bemo4-merge/';
 const INDEX_TTS_AUXILIARIES = [
   {
     repository: 'facebook/w2v-bert-2.0',
-    paths: ['config.json', 'preprocessor_config.json'],
-  },
-  {
-    repository: 'amphion/MaskGCT',
-    paths: ['semantic_codec/model.safetensors'],
+    paths: ['config.json', 'preprocessor_config.json', 'model.safetensors'],
   },
   {
     repository: 'funasr/campplus',
@@ -412,12 +408,17 @@ async function buildFile(
   };
 }
 
-function indexTtsCachePath(repository, revision, path) {
-  const repositoryDirectory = repository.replaceAll('/', '--');
-  return (
-    `checkpoints/hf_cache/models--${repositoryDirectory}/` +
-    `snapshots/${revision}/${path}`
-  );
+function indexTtsAuxiliaryPath(repository, path) {
+  if (repository === 'facebook/w2v-bert-2.0') {
+    return `IndexTTS-2.5/hf_cache/w2v-bert-2.0/${path}`;
+  }
+  if (repository === 'funasr/campplus') {
+    return 'IndexTTS-2.5/hf_cache/campplus_cn_common.bin';
+  }
+  if (repository === 'nvidia/bigvgan_v2_22khz_80band_256x') {
+    return `IndexTTS-2.5/hf_cache/bigvgan/${path}`;
+  }
+  throw new Error(`Unsupported IndexTTS2.5 auxiliary repository: ${repository}`);
 }
 
 function isIndexTtsCoreFile(path) {
@@ -570,7 +571,7 @@ export async function buildMediaComponentManifest({
       const entry = entries.get(path);
       if (!entry) throw new Error(`IndexTTS2 auxiliary model is missing ${repository}/${path}`);
       files.push(await buildFile(repository, revision, entry, fetchImpl, {
-        outputPath: indexTtsCachePath(repository, revision, path),
+        outputPath: indexTtsAuxiliaryPath(repository, path),
       }));
     }
   }
