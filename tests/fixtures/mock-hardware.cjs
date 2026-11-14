@@ -12,7 +12,8 @@ function isHardwarePowerShell(args) {
   const commandLine = args.join(' ');
   return (
     commandLine.includes('Win32_OperatingSystem') &&
-    commandLine.includes('TotalPhysicalMemory') &&
+    commandLine.includes('Win32_PhysicalMemory') &&
+    commandLine.includes('InstalledMemoryBytes') &&
     commandLine.includes('FreeDiskBytes')
   );
 }
@@ -30,7 +31,7 @@ childProcess.execFile = function mockHardwareExecFile(command, args, options, ca
   ) {
     stdout = JSON.stringify({
       WindowsVersion: 'Mock Windows 11',
-      TotalMemoryBytes: 64 * GIB,
+      InstalledMemoryBytes: 64 * GIB,
       FreeDiskBytes: 512 * GIB,
     });
   } else {

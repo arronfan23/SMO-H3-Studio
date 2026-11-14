@@ -77,8 +77,7 @@ async function renderDetectedHardware() {
 
 async function renderRecommendedHardware() {
   const view = await renderDetectedHardware();
-  fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
-  await screen.findByText(hardwareProfile.preset);
+  await screen.findByText("均衡模式");
   return view;
 }
 
@@ -176,7 +175,6 @@ describe('async effects on unmounted components', () => {
     const request = deferred<HardwareProfile>();
     useHardwareApi({ recommend: () => request.promise });
     const view = await renderDetectedHardware();
-    fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
 
     view.unmount();
     const updateCount = stateUpdates.mock.calls.length;

@@ -3,14 +3,36 @@ import { DatabaseSync } from 'node:sqlite';
 import type {
   Avatar,
   NewWork,
-  VideoMode,
   Work,
+  WorkMode,
   WorkStatus,
   WorkUpdate,
 } from '../shared/types';
 
-const WORK_COLUMNS = 'id, avatarId, mode, outputPath, status, createdAt, promptId, metadata, error';
-const WORK_UPDATE_FIELDS = new Set(['status', 'outputPath', 'promptId', 'error', 'metadata']);
+const WORK_COLUMN_NAMES = [
+  'id',
+  'avatarId',
+  'mode',
+  'outputPath',
+  'status',
+  'createdAt',
+  'title',
+  'completedAt',
+  'promptId',
+  'metadata',
+  'error',
+] as const;
+const WORK_COLUMNS = WORK_COLUMN_NAMES.join(', ');
+const WORK_MODES = new Set<WorkMode>(['text', 'audio', 'speech', 'image']);
+const WORK_UPDATE_FIELDS = new Set([
+  'status',
+  'outputPath',
+  'title',
+  'completedAt',
+  'promptId',
+  'error',
+  'metadata',
+]);
 
 function serializeMetadata(metadata: Work['metadata']): string | null {
   if (metadata === null) {
@@ -26,11 +48,13 @@ function serializeMetadata(metadata: Work['metadata']): string | null {
 function toWork(row: Record<string, unknown>): Work {
   return {
     id: row.id as string,
-    avatarId: row.avatarId as string,
-    mode: row.mode as VideoMode,
+    avatarId: row.avatarId as string | null,
+    mode: row.mode as WorkMode,
     outputPath: row.outputPath as string | null,
     status: row.status as WorkStatus,
     createdAt: row.createdAt as string,
+    title: row.title as string | null,
+    completedAt: row.completedAt as string | null,
     promptId: row.promptId as string | null,
     metadata:
       row.metadata === null
@@ -38,6 +62,71 @@ function toWork(row: Record<string, unknown>): Work {
         : (JSON.parse(row.metadata as string) as Work['metadata']),
     error: row.error as string | null,
   };
+}
+
+function createWorksTable(db: DatabaseSync, tableName: 'works' | 'works_media'): void {
+  db.exec(`
+    CREATE TABLE ${tableName} (
+      id TEXT PRIMARY KEY NOT NULL,
+      avatarId TEXT,
+      mode TEXT NOT NULL CHECK (mode IN ('text', 'audio', 'speech', 'image')),
+      outputPath TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
+      createdAt TEXT NOT NULL,
+      title TEXT,
+      completedAt TEXT,
+      promptId TEXT,
+      metadata TEXT,
+      error TEXT,
+      FOREIGN KEY (avatarId) REFERENCES avatars(id) ON DELETE RESTRICT
+    );
+  `);
+}
+
+function assertForeignKeysValid(db: DatabaseSync): void {
+  if (db.prepare('PRAGMA foreign_key_check').all().length > 0) {
+    throw new Error('Work migration failed the foreign key check');
+  }
+}
+
+function migrateWorks(db: DatabaseSync, workColumns: Set<string>): void {
+  assertForeignKeysValid(db);
+
+  const sourceColumns = WORK_COLUMN_NAMES.map((column) =>
+    workColumns.has(column) ? column : `NULL AS ${column}`,
+  ).join(', ');
+
+  // SQLite ignores foreign_keys changes inside a transaction, so both switches
+  // deliberately remain outside BEGIN/COMMIT.
+  db.exec('PRAGMA foreign_keys = OFF');
+  let transactionOpen = false;
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    transactionOpen = true;
+    createWorksTable(db, 'works_media');
+    db.exec(`
+      INSERT INTO works_media (${WORK_COLUMNS})
+      SELECT ${sourceColumns} FROM works;
+      DROP TABLE works;
+      ALTER TABLE works_media RENAME TO works;
+    `);
+    assertForeignKeysValid(db);
+    db.exec('COMMIT');
+    transactionOpen = false;
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        db.exec('ROLLBACK');
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'Work migration and rollback failed');
+      }
+    }
+    throw error;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+
+  assertForeignKeysValid(db);
 }
 
 export class Store {
@@ -56,30 +145,24 @@ export class Store {
           photoPath TEXT NOT NULL,
           createdAt TEXT NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS works (
-          id TEXT PRIMARY KEY NOT NULL,
-          avatarId TEXT NOT NULL,
-          mode TEXT NOT NULL CHECK (mode IN ('text', 'audio')),
-          outputPath TEXT,
-          status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
-          createdAt TEXT NOT NULL,
-          promptId TEXT,
-          metadata TEXT,
-          error TEXT,
-          FOREIGN KEY (avatarId) REFERENCES avatars(id) ON DELETE RESTRICT
-        );
       `);
 
-      const workColumns = new Set(
-        db
-          .prepare('PRAGMA table_info(works)')
-          .all()
-          .map((row) => row.name as string),
-      );
-      for (const column of ['promptId', 'metadata', 'error']) {
-        if (!workColumns.has(column)) {
-          db.exec(`ALTER TABLE works ADD COLUMN ${column} TEXT`);
+      const worksTable = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'works'")
+        .get();
+      if (worksTable === undefined) {
+        createWorksTable(db, 'works');
+      } else {
+        const workColumnRows = db.prepare('PRAGMA table_info(works)').all();
+        const workColumns = new Set(workColumnRows.map((row) => row.name as string));
+        const avatarId = workColumnRows.find((row) => row.name === 'avatarId');
+        const worksSchema = worksTable.sql as string;
+        if (
+          avatarId?.notnull !== 0 ||
+          !worksSchema.includes("'speech'") ||
+          !worksSchema.includes("'image'")
+        ) {
+          migrateWorks(db, workColumns);
         }
       }
     } catch (error) {
@@ -161,12 +244,14 @@ export class Store {
     if (input.id.trim().length === 0) {
       throw new Error('Work id must not be empty');
     }
-    if (input.mode !== 'text' && input.mode !== 'audio') {
+    if (!WORK_MODES.has(input.mode)) {
       throw new Error(`Invalid video mode: ${String(input.mode)}`);
     }
 
     const work: Work = {
       ...input,
+      title: input.title ?? null,
+      completedAt: input.completedAt ?? null,
       promptId: input.promptId ?? null,
       metadata: input.metadata ?? null,
       error: input.error ?? null,
@@ -174,8 +259,8 @@ export class Store {
     };
     this.db
       .prepare(
-        `INSERT INTO works (id, avatarId, mode, outputPath, status, createdAt, promptId, metadata, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO works (id, avatarId, mode, outputPath, status, createdAt, title, completedAt, promptId, metadata, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         work.id,
@@ -184,6 +269,8 @@ export class Store {
         work.outputPath,
         work.status,
         work.createdAt,
+        work.title,
+        work.completedAt,
         work.promptId,
         serializeMetadata(work.metadata),
         work.error,
@@ -241,6 +328,18 @@ export class Store {
       .run(...values, id);
 
     return this.getWork(id)!;
+  }
+
+  /** Renames a work in the database only; the output file is never touched. */
+  renameWork(id: string, title: string): Work {
+    const trimmed = title.trim();
+    if (trimmed.length === 0) {
+      throw new Error('Work title must not be empty');
+    }
+    if (trimmed.length > 120) {
+      throw new Error('Work title must not exceed 120 characters');
+    }
+    return this.updateWork(id, { title: trimmed });
   }
 
   deleteWork(id: string): Work {

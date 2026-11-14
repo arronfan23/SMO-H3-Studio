@@ -2,6 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
+import { AudioDigitalHumanForm } from '../../src/renderer/AudioDigitalHumanForm';
+import { AudioRecorder } from '../../src/renderer/AudioRecorder';
+import { StudioPage } from '../../src/renderer/StudioPage';
 import { SKILL_NAMES } from '../../src/shared/skills';
 import {
   AUTO_SKILL_OPTION,
@@ -10,7 +13,8 @@ import {
 import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 import type { PolishResult, SmoApi } from '../../src/shared/ipc';
 import type { EnvironmentState } from '../../src/shared/environment';
-import type { Avatar, Work } from '../../src/shared/types';
+import type { Avatar, SpeechCapabilities, Work } from '../../src/shared/types';
+import type { SanmaoStreamEvent } from '../../src/shared/sanmao';
 
 const avatar: Avatar = {
   id: 'avatar-1',
@@ -27,6 +31,8 @@ function createWork(overrides: Partial<Work>): Work {
     outputPath: null,
     status: 'pending',
     createdAt: '2026-10-26T08:01:00.000Z',
+    title: null,
+    completedAt: null,
     promptId: null,
     metadata: null,
     error: null,
@@ -34,15 +40,31 @@ function createWork(overrides: Partial<Work>): Work {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function createSmoMock() {
   return {
+    app: { getVersion: vi.fn() },
     avatars: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
-    jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn() },
+    jobs: { start: vi.fn(), retry: vi.fn(), cancel: vi.fn(), getState: vi.fn() },
+    speech: { getCapabilities: vi.fn() },
+    components: { getState: vi.fn(), install: vi.fn(), cancel: vi.fn() },
+    recordings: { save: vi.fn(), discard: vi.fn() },
     files: {
       selectImage: vi.fn(),
       selectAudio: vi.fn(),
       mediaUrl: vi.fn(),
       openFolder: vi.fn(),
+      authorizeDroppedImage: vi.fn(),
+      authorizeDroppedAudio: vi.fn(),
     },
     llm: {
       saveProfile: vi.fn(),
@@ -50,6 +72,15 @@ function createSmoMock() {
       listModels: vi.fn(),
       testModel: vi.fn(),
       polish: vi.fn(),
+    },
+    sanmao: {
+      getProfile: vi.fn(),
+      saveProfile: vi.fn(),
+      testConnection: vi.fn(),
+      listModels: vi.fn(),
+      send: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn(),
     },
     comfy: { health: vi.fn(), open: vi.fn(), start: vi.fn() },
     environment: {
@@ -61,7 +92,7 @@ function createSmoMock() {
       validate: vi.fn(),
     },
     hardware: { detect: vi.fn(), recommend: vi.fn(), apply: vi.fn() },
-    works: { list: vi.fn(), delete: vi.fn() },
+    works: { list: vi.fn(), delete: vi.fn(), rename: vi.fn() },
   };
 }
 
@@ -72,9 +103,46 @@ async function renderStudio() {
   await screen.findByRole('heading', { name: avatar.name });
 }
 
+function studioSpeechField(label: string, mode: 'custom' | 'clone' = 'custom') {
+  const panel = screen.getByRole('tabpanel', {
+    name: mode === 'custom' ? '参考音合成' : '声音克隆',
+  });
+  return within(panel).getByLabelText(label);
+}
+
+function studioModeButton(label: '语音' | '图像' | '视频') {
+  return within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', {
+    name: label,
+    exact: true,
+  });
+}
+
+function studioModePanel(label: '语音' | '图像' | '视频') {
+  const mode = { 语音: 'speech', 图像: 'image', 视频: 'video' }[label];
+  const panel = document.getElementById(`${mode}-main-panel`);
+  if (panel === null) {
+    throw new Error(`Missing ${label} studio panel`);
+  }
+  return panel;
+}
+
+function textVideoField(label: string): HTMLElement {
+  const panel = document.getElementById('text-mode-panel');
+  if (panel === null) {
+    throw new Error('Missing text video panel');
+  }
+  return within(panel).getByLabelText(label);
+}
+
+async function openEmptyAvatarCreation(): Promise<void> {
+  fireEvent.click(await screen.findByRole('tab', { name: '音频数字人' }));
+  fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   window.smo = smo as unknown as SmoApi;
+  smo.app.getVersion.mockResolvedValue('0.3.15-test');
   smo.avatars.list.mockResolvedValue([avatar]);
   smo.avatars.create.mockRejectedValue(new Error('Unexpected avatar creation'));
   smo.avatars.update.mockRejectedValue(new Error('Unexpected avatar rename'));
@@ -84,13 +152,53 @@ beforeEach(() => {
   smo.files.mediaUrl.mockImplementation(async (path: string) =>
     `smo-media://media/${encodeURIComponent(path)}`,
   );
+  smo.files.authorizeDroppedImage.mockImplementation(
+    async (file: { name: string }) => `G:\\dropped\\${file.name}`,
+  );
+  smo.files.authorizeDroppedAudio.mockImplementation(
+    async (file: { name: string }) => `G:\\dropped\\${file.name}`,
+  );
+  smo.recordings.save.mockResolvedValue('G:\\data\\recordings\\recorded.wav');
+  smo.recordings.discard.mockResolvedValue(undefined);
   smo.works.list.mockResolvedValue([]);
+  smo.works.rename.mockRejectedValue(new Error('Unexpected work rename'));
   smo.jobs.start.mockResolvedValue({ id: 'job-1' });
   smo.jobs.retry.mockRejectedValue(new Error('Unexpected retry'));
   smo.jobs.cancel.mockResolvedValue(undefined);
+  smo.jobs.getState.mockResolvedValue({ activeId: null });
+  smo.speech.getCapabilities.mockImplementation(async (mode: 'custom' | 'clone') => ({
+    speakers: mode === 'custom' ? ['Vivian', 'Ryan'] : [],
+    languages: ['Auto', 'Chinese', 'English'],
+  }));
+  smo.components.getState.mockImplementation(async (id: 'speech' | 'image') => ({
+    id,
+    status: 'ready',
+    downloadedBytes: 1024,
+    totalBytes: 1024,
+    currentFile: null,
+    error: null,
+    active: false,
+  }));
+  smo.components.install.mockImplementation(async (id: 'speech' | 'image') => ({
+    id,
+    status: 'ready',
+    downloadedBytes: 1024,
+    totalBytes: 1024,
+    currentFile: null,
+    error: null,
+    active: false,
+  }));
+  smo.components.cancel.mockResolvedValue(undefined);
   smo.llm.getProfile.mockResolvedValue(null);
   smo.llm.saveProfile.mockResolvedValue(undefined);
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
+  smo.sanmao.getProfile.mockResolvedValue(null);
+  smo.sanmao.saveProfile.mockResolvedValue(undefined);
+  smo.sanmao.testConnection.mockResolvedValue({ ok: true, latencyMs: 1 });
+  smo.sanmao.listModels.mockResolvedValue(['claude-a', 'claude-b']);
+  smo.sanmao.send.mockResolvedValue({ ok: true });
+  smo.sanmao.cancel.mockResolvedValue(undefined);
+  smo.sanmao.subscribe.mockReturnValue(() => undefined);
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
   smo.comfy.start.mockResolvedValue({ system: {}, devices: [] });
   const environment: EnvironmentState = {
@@ -174,16 +282,16 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
   });
 
-  test('keeps the unsubmitted text draft when switching modules', async () => {
+  test('切换导航页面时保留未提交文字草稿', async () => {
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '切换模块后保留这段草稿' },
     });
 
     for (const moduleName of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name: moduleName }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
-      expect(screen.getByLabelText('原始文字')).toHaveValue('切换模块后保留这段草稿');
+      fireEvent.click(studioModeButton('视频'));
+      expect(textVideoField('原始文字')).toHaveValue('切换模块后保留这段草稿');
     }
   });
 
@@ -191,7 +299,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     render(<App />);
 
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     expect(screen.getByRole('heading', { name: '数字模特' })).toBeInTheDocument();
     expect(screen.getByLabelText('模特名称')).toBeInTheDocument();
@@ -208,7 +316,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.files.selectImage.mockResolvedValue('G:\\photos\\new-photo.png');
     smo.avatars.create.mockResolvedValue(created);
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '新模特' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -221,7 +329,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     });
     await screen.findByRole('heading', { name: '新模特' });
     expect(smo.avatars.list).toHaveBeenCalledTimes(2);
-    fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+    fireEvent.click(studioModeButton('视频'));
     expect(await screen.findByRole('heading', { name: '新模特' })).toBeInTheDocument();
   });
 
@@ -229,7 +337,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\preview-photo.png');
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
     expect(screen.queryByRole('img', { name: '待保存模特照片预览' })).not.toBeInTheDocument();
@@ -250,12 +358,353 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     expect(smo.avatars.delete).not.toHaveBeenCalled();
   });
 
+  test('authorizes a dropped photo through IPC, previews it, and saves with the dropped path', async () => {
+    const created: Avatar = {
+      ...avatar,
+      id: 'avatar-drop',
+      name: '拖放模特',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\drop.png',
+    };
+    smo.avatars.list.mockResolvedValueOnce([]).mockResolvedValueOnce([created]);
+    smo.avatars.create.mockResolvedValue(created);
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+    fireEvent.dragLeave(dropzone);
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+
+    const file = new File(['image'], 'dropped.png', { type: 'image/png' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [file] } });
+
+    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith(file);
+    expect(smo.files.selectImage).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole('img', { name: '待保存模特照片预览' }),
+    ).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.png')}`,
+    );
+    expect(screen.getByText('dropped.png')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '拖放模特' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+
+    await screen.findByRole('heading', { name: '拖放模特' });
+    expect(smo.avatars.create).toHaveBeenCalledWith({
+      name: '拖放模特',
+      photoPath: 'G:\\dropped\\dropped.png',
+    });
+  });
+
+  test('keeps the drop highlight when moving into a child element', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    const child = screen.getByText('尚未选择照片');
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+
+    // jsdom's DragEvent does not reliably populate relatedTarget, so set it
+    // explicitly on a bubbling mouse event.
+    const enterChild = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(enterChild, 'relatedTarget', { value: child });
+    fireEvent(dropzone, enterChild);
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+
+    const leaveZone = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(leaveZone, 'relatedTarget', { value: document.body });
+    fireEvent(dropzone, leaveZone);
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'reset.png')] },
+    });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+  });
+
+  test('discards a stale dialog selection that resolves after a newer drop', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    let resolveSelect!: (path: string | null) => void;
+    smo.files.selectImage.mockImplementationOnce(
+      () => new Promise<string | null>((resolve) => { resolveSelect = resolve; }),
+    );
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], 'dropped.png')] } });
+
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.png')}`,
+    );
+
+    await act(async () => {
+      resolveSelect('G:\\photos\\stale-dialog.png');
+    });
+
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.png')}`,
+    );
+    expect(screen.getByText('dropped.png')).toBeInTheDocument();
+    expect(screen.queryByText('stale-dialog.png')).not.toBeInTheDocument();
+  });
+
+  test('rejects dropping multiple files with a clear error', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, {
+      dataTransfer: {
+        files: [new File(['a'], 'a.png'), new File(['b'], 'b.png')],
+      },
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('一次只能拖入一张照片');
+    expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+  });
+
+  test.each(['notes.txt', 'clip.gif', 'voice.mp3'])(
+    'rejects a dropped %s with a clear error',
+    async (name) => {
+      smo.avatars.list.mockResolvedValue([]);
+      render(<App />);
+      await openEmptyAvatarCreation();
+
+      const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+      fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], name)] } });
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        '仅支持 PNG、JPG、JPEG 或 WebP 图片',
+      );
+      expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+      expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+    },
+  );
+
+  test('surfaces a main-process authorization failure for a dropped photo', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.authorizeDroppedImage.mockRejectedValue(new Error('文件不存在'));
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'missing.png')] },
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('文件不存在');
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+  });
+
+  test('discards a stale drop authorization that resolves after a newer drop', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    let resolveFirst!: (path: string) => void;
+    smo.files.authorizeDroppedImage
+      .mockImplementationOnce(
+        () => new Promise<string>((resolve) => { resolveFirst = resolve; }),
+      )
+      .mockImplementationOnce(
+        async (file: { name: string }) => `G:\\dropped\\${file.name}`,
+      );
+    render(<App />);
+    await openEmptyAvatarCreation();
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['a'], 'first.png')] } });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['b'], 'second.png')] } });
+
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\second.png')}`,
+    );
+
+    await act(async () => {
+      resolveFirst('G:\\dropped\\first.png');
+    });
+
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\second.png')}`,
+    );
+    expect(screen.getByText('second.png')).toBeInTheDocument();
+    expect(screen.queryByText('first.png')).not.toBeInTheDocument();
+  });
+
+  test('ignores a drop authorization that resolves after the photo is removed', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\original.png');
+    let resolveAuth!: (path: string) => void;
+    smo.files.authorizeDroppedImage.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
+    );
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'replacement.png')] },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '移除照片' }));
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveAuth('G:\\dropped\\replacement.png');
+    });
+
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('img', { name: '待保存模特照片预览' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('replacement.png')).not.toBeInTheDocument();
+  });
+
+  test('a newer selection invalidates a pending drop authorization', async () => {
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\reselected.png');
+    let resolveAuth!: (path: string) => void;
+    smo.files.authorizeDroppedImage.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
+    );
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], 'dropped.png')] } });
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\photos\\reselected.png')}`,
+    );
+
+    await act(async () => {
+      resolveAuth('G:\\dropped\\dropped.png');
+    });
+
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\photos\\reselected.png')}`,
+    );
+    expect(screen.getByText('reselected.png')).toBeInTheDocument();
+    expect(screen.queryByText('dropped.png')).not.toBeInTheDocument();
+  });
+
+  test('blocks saving while a drop authorization is pending', async () => {
+    const created: Avatar = {
+      ...avatar,
+      id: 'avatar-pending',
+      name: '待定模特',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\pending.png',
+    };
+    smo.avatars.list.mockResolvedValue([]);
+    smo.avatars.create.mockResolvedValue(created);
+    let resolveAuth!: (path: string) => void;
+    smo.files.authorizeDroppedImage.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveAuth = resolve; }),
+    );
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '待定模特' } });
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.drop(dropzone, { dataTransfer: { files: [new File(['x'], 'pending.png')] } });
+
+    const saveButton = screen.getByRole('button', { name: '保存模特' });
+    expect(saveButton).toBeDisabled();
+    fireEvent.submit(saveButton.closest('form') as HTMLFormElement);
+    expect(smo.avatars.create).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveAuth('G:\\dropped\\pending.png');
+    });
+    await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+    expect(smo.avatars.create).toHaveBeenCalledWith({
+      name: '待定模特',
+      photoPath: 'G:\\dropped\\pending.png',
+    });
+  });
+
+  test('ignores a drop while saving and only clears the form for an unchanged selection', async () => {
+    const created: Avatar = {
+      ...avatar,
+      id: 'avatar-saved',
+      name: '模特甲',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\saved.png',
+    };
+    smo.avatars.list.mockResolvedValue([]);
+    smo.files.selectImage.mockResolvedValue('G:\\photos\\original.png');
+    let resolveCreate!: (value: Avatar) => void;
+    smo.avatars.create.mockImplementationOnce(
+      () => new Promise<Avatar>((resolve) => { resolveCreate = resolve; }),
+    );
+    render(<App />);
+    await openEmptyAvatarCreation();
+
+    fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '模特甲' } });
+    fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
+    const preview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+
+    fireEvent.click(screen.getByRole('button', { name: '保存模特' }));
+
+    const dropzone = screen.getByRole('group', { name: '模特照片拖放区' });
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['b'], 'during-save.png')] },
+    });
+
+    expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+    expect(preview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\photos\\original.png')}`,
+    );
+
+    await act(async () => {
+      resolveCreate(created);
+    });
+    await screen.findByText(/已保存并选择/);
+    expect(screen.getByText('尚未选择照片')).toBeInTheDocument();
+
+    const afterFile = new File(['c'], 'after-save.png');
+    fireEvent.drop(dropzone, { dataTransfer: { files: [afterFile] } });
+    expect(smo.files.authorizeDroppedImage).toHaveBeenCalledWith(afterFile);
+    const nextPreview = await screen.findByRole('img', { name: '待保存模特照片预览' });
+    expect(nextPreview).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\after-save.png')}`,
+    );
+    expect(screen.getByText('after-save.png')).toBeInTheDocument();
+  });
+
   test('clears the form error when removing the selected photo', async () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\clear-error.png');
     smo.avatars.create.mockRejectedValue(new Error('保存失败：磁盘已满'));
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '清错' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -276,7 +725,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.files.selectImage.mockResolvedValue('G:\\photos\\keep-photo.png');
     smo.avatars.create.mockRejectedValue(new Error('保存失败：磁盘已满'));
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '保留预览' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -292,7 +741,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValueOnce('G:\\photos\\first.png');
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
     await screen.findByRole('img', { name: '待保存模特照片预览' });
@@ -333,7 +782,7 @@ describe('SMO.H3 Studio navigation and avatars', () => {
     smo.avatars.list.mockResolvedValue([]);
     smo.files.selectImage.mockResolvedValue('G:\\photos\\saving.png');
     render(<App />);
-    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    await openEmptyAvatarCreation();
 
     fireEvent.change(screen.getByLabelText('模特名称'), { target: { value: '保存中' } });
     fireEvent.click(screen.getByRole('button', { name: '选择照片' }));
@@ -417,7 +866,983 @@ describe('SMO.H3 Studio navigation and avatars', () => {
 });
 
 describe('text-to-video studio', () => {
-  test('polishes without media payloads, edits the result, and starts the confirmed text', async () => {
+  function videoSubpanel(mode: 'text' | 'reference' | 'audio'): HTMLElement {
+    const panel = document.getElementById(`${mode}-mode-panel`);
+    if (panel === null) {
+      throw new Error(`Missing ${mode} video panel`);
+    }
+    return panel;
+  }
+
+  async function openReferenceStudio() {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    return within(videoSubpanel('reference'));
+  }
+
+  function dropReferences(panel: ReturnType<typeof within>, count: number): string[] {
+    const files = Array.from(
+      { length: count },
+      (_, index) => new File(['image'], `ref-${index + 1}.png`, { type: 'image/png' }),
+    );
+    fireEvent.drop(panel.getByRole('group', { name: '参考图拖放区' }), {
+      dataTransfer: { files },
+    });
+    return files.map((file) => `G:\\dropped\\${file.name}`);
+  }
+
+  test('无模特也显示文生视频而非全页空状态', () => {
+    render(
+      <StudioPage
+        avatar={null}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('tab', { name: '文生视频' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByRole('tabpanel', { name: '文生视频' })).toBeVisible();
+    expect(within(videoSubpanel('text')).getByLabelText('原始文字')).toBeInTheDocument();
+    expect(
+      document.querySelector('#video-main-panel > .empty-state'),
+    ).not.toBeInTheDocument();
+  });
+
+  test('无模特文生视频提交 null avatar 和空参考数组', async () => {
+    render(
+      <StudioPage
+        avatar={null}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={vi.fn()}
+      />,
+    );
+    fireEvent.change(within(videoSubpanel('text')).getByLabelText('原始文字'), {
+      target: { value: '无模特文生视频' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'text',
+      avatarId: null,
+      prompt: '无模特文生视频',
+      duration: 8,
+      seed: 42,
+      steps: 8,
+      referenceImagePaths: [],
+    });
+  });
+
+  test('无模特图片生视频可用且只有音频数字人显示新建模特空状态', async () => {
+    const onCreateAvatar = vi.fn();
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\no-avatar.png');
+    render(
+      <StudioPage
+        avatar={null}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={onCreateAvatar}
+      />,
+    );
+    expect(document.querySelector('.person-preview')).not.toBeInTheDocument();
+    expect(document.querySelector('.studio-layout')).toHaveClass(
+      'studio-layout-without-avatar',
+    );
+    expect(videoSubpanel('text')).not.toHaveTextContent('还没有数字模特');
+    expect(videoSubpanel('reference')).not.toHaveTextContent('还没有数字模特');
+    expect(videoSubpanel('audio')).toHaveTextContent('还没有数字模特');
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    const handoff = deferred<{ activeId: string | null }>();
+    smo.jobs.getState.mockReset();
+    smo.jobs.getState
+      .mockImplementationOnce(() => handoff.promise)
+      .mockResolvedValue({ activeId: null });
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const panel = within(videoSubpanel('reference'));
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('no-avatar.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '无模特参考视频' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        avatarId: null,
+        referenceImagePaths: ['G:\\refs\\no-avatar.png'],
+      }),
+    );
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('tab', { name: '音频数字人' })).toBeDisabled();
+
+    await act(async () => {
+      handoff.resolve({ activeId: null });
+      await handoff.promise;
+    });
+    const audioTab = screen.getByRole('tab', { name: '音频数字人' });
+    await waitFor(() => expect(audioTab).toBeEnabled());
+    fireEvent.click(audioTab);
+    fireEvent.click(await screen.findByRole('button', { name: '新建数字模特' }));
+    expect(onCreateAvatar).toHaveBeenCalledTimes(1);
+  });
+
+  test('文生视频与图片生视频保持独立草稿并使用唯一 IDs', async () => {
+    await renderStudio();
+    const textPanel = within(videoSubpanel('text'));
+    const textDraft = textPanel.getByLabelText('原始文字');
+    fireEvent.change(textDraft, { target: { value: '文生独立草稿' } });
+    fireEvent.change(textPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '13' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(videoSubpanel('reference'));
+    const referenceDraft = referencePanel.getByLabelText('原始文字');
+    fireEvent.change(referenceDraft, { target: { value: '参考独立草稿' } });
+    fireEvent.change(referencePanel.getByLabelText('视频时长（秒）'), {
+      target: { value: '9' },
+    });
+    fireEvent.change(referencePanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '21' },
+    });
+
+    expect(textDraft).toHaveAttribute('id', 'original-text');
+    expect(referenceDraft).toHaveAttribute('id', 'reference-original-text');
+    for (const id of [
+      'reference-skill',
+      'reference-model',
+      'reference-aspect',
+      'reference-resolution',
+      'reference-duration',
+      'reference-seed',
+      'reference-steps',
+      'reference-original-tab',
+      'reference-original-panel',
+      'reference-polished-tab',
+    ]) {
+      expect(document.getElementById(id)).toBeInTheDocument();
+    }
+    const ids = Array.from(document.querySelectorAll('[id]')).map((element) => element.id);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    expect(textPanel.getByLabelText('原始文字')).toBe(textDraft);
+    expect(textDraft).toHaveValue('文生独立草稿');
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(13);
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    expect(referencePanel.getByLabelText('原始文字')).toBe(referenceDraft);
+    expect(referenceDraft).toHaveValue('参考独立草稿');
+    expect(referencePanel.getByLabelText('视频时长（秒）')).toHaveValue(9);
+    expect(referencePanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(21);
+  });
+
+  test('图片生视频 0 张参考图时润色和生成都先提示且不发请求', async () => {
+    const panel = await openReferenceStudio();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '零参考图不能直接处理' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByRole('alert')).toHaveTextContent('请至少添加 1 张参考图后再润色');
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() =>
+      expect(panel.getByRole('alert')).toHaveTextContent('请至少添加 1 张参考图后再生成'),
+    );
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test('图片生视频 1 张参考图按顺序提交', async () => {
+    const referencePath = 'G:\\refs\\single.png';
+    smo.files.selectImage.mockResolvedValue(referencePath);
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('single.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '单图参考生成' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'text',
+      avatarId: avatar.id,
+      prompt: '单图参考生成',
+      duration: 8,
+      seed: 42,
+      steps: 8,
+      referenceImagePaths: [referencePath],
+    });
+  });
+
+  test('图片生视频 9 张参考图保持顺序并拒绝加入第 10 张当前模特', async () => {
+    const panel = await openReferenceStudio();
+    const referencePaths = dropReferences(panel, 9);
+    expect(await panel.findByText('ref-9.png')).toBeInTheDocument();
+    expect(panel.getByText('9 / 9')).toBeInTheDocument();
+    expect(panel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+    expect(await panel.findByRole('alert')).toHaveTextContent('最多 9 张参考图');
+    expect(panel.getByText('9 / 9')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '九图参考生成' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ referenceImagePaths: referencePaths }),
+    );
+  });
+
+  test('图片生视频润色发送 N 个图片标签且不泄露本地路径', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '三图参考润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    const panel = await openReferenceStudio();
+    const referencePaths = dropReferences(panel, 3);
+    expect(await panel.findByText('ref-3.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '根据三张参考图设计镜头' },
+    });
+    fireEvent.change(panel.getByLabelText('视频时长（秒）'), {
+      target: { value: '11' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '三图参考润色结果',
+    );
+    expect(smo.llm.polish).toHaveBeenCalledWith({
+      text: '根据三张参考图设计镜头',
+      duration: 11,
+      imageCount: 3,
+      mode: 'ref2va',
+      referenceLabels: ['<Picture 1>', '<Picture 2>', '<Picture 3>'],
+      skill: 'h3-prompt-writing',
+    });
+    const payload = smo.llm.polish.mock.calls[0][0];
+    for (const path of referencePaths) {
+      expect(JSON.stringify(payload)).not.toContain(path);
+    }
+    expect(document.getElementById('reference-polished-panel')).toBeInTheDocument();
+    expect(document.getElementById('reference-polished-text')).toHaveValue(
+      '三图参考润色结果',
+    );
+  });
+
+  test('图片生视频 polishing 禁用参考 picker 和使用当前模特', async () => {
+    const pending = deferred<PolishResult>();
+    smo.llm.polish.mockImplementationOnce(() => pending.promise);
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\polishing.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('polishing.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '润色期间不能修改参考图' },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(panel.getByRole('button', { name: '正在润色…' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '删除参考图 1' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '使用当前模特' })).toBeDisabled();
+    fireEvent.drop(panel.getByRole('group', { name: '参考图拖放区' }), {
+      dataTransfer: {
+        files: [new File(['image'], 'blocked-during-polish.png', { type: 'image/png' })],
+      },
+    });
+    expect(smo.files.authorizeDroppedImage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pending.resolve({
+        text: '润色完成',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+      await pending.promise;
+    });
+  });
+
+  test('图片生视频选择授权后改变参考数组会使旧润色结果失效', async () => {
+    const polishPending = deferred<PolishResult>();
+    const authorization = deferred<string>();
+    smo.llm.polish.mockImplementationOnce(() => polishPending.promise);
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\before-polish.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('before-polish.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '参考图变化前的润色' },
+    });
+    smo.files.authorizeDroppedImage.mockImplementationOnce(() => authorization.promise);
+    fireEvent.drop(panel.getByRole('group', { name: '参考图拖放区' }), {
+      dataTransfer: {
+        files: [new File(['image'], 'after-polish.png', { type: 'image/png' })],
+      },
+    });
+
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    await act(async () => {
+      authorization.resolve('G:\\dropped\\after-polish.png');
+      await authorization.promise;
+    });
+    expect(await panel.findByText('after-polish.png')).toBeInTheDocument();
+
+    await act(async () => {
+      polishPending.resolve({
+        text: '不应生效的旧参考图润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+      await polishPending.promise;
+    });
+
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByDisplayValue('不应生效的旧参考图润色结果')).not.toBeInTheDocument();
+  });
+
+  test('图片生视频添加当前模特会清空已有润色并返回原文', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '加入模特前的润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\before-avatar.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('before-avatar.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '加入模特前的原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByDisplayValue('加入模特前的润色结果')).toBeInTheDocument();
+
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByDisplayValue('加入模特前的润色结果')).not.toBeInTheDocument();
+    expect(panel.getByLabelText('原始文字')).toHaveValue('加入模特前的原文');
+  });
+
+  test('人物 Picture 1 标签只在音频数字人模式显示', async () => {
+    await renderStudio();
+    expect(screen.queryByText('参考人物：<Picture 1>')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    expect(screen.queryByText('参考人物：<Picture 1>')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    expect(screen.getByText('参考人物：<Picture 1>')).toBeInTheDocument();
+  });
+
+  test('跨表单 text pending 同步阻止 reference 生成并在结束后恢复', async () => {
+    const pending = deferred<{ id: string }>();
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\shared-pending.png');
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(videoSubpanel('reference'));
+    fireEvent.click(referencePanel.getByRole('button', { name: '选择参考图' }));
+    expect(await referencePanel.findByText('shared-pending.png')).toBeInTheDocument();
+    fireEvent.change(referencePanel.getByLabelText('原始文字'), {
+      target: { value: '等待 text 完成的 reference 任务' },
+    });
+    const referenceForm = referencePanel.getByRole('button', { name: '生成视频' })
+      .closest('form') as HTMLFormElement;
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '先执行的 text 任务' },
+    });
+    smo.jobs.start.mockImplementationOnce(() => pending.promise);
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    fireEvent.submit(referenceForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    for (const name of ['文生视频', '图片生视频', '音频数字人']) {
+      expect(screen.getByRole('tab', { name })).toBeDisabled();
+    }
+
+    await act(async () => {
+      pending.resolve({ id: 'shared-text-job' });
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '图片生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(referenceForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
+  });
+
+  test('handoff jobs.getState 未决时保持共享 pending，revision 前进后恢复', async () => {
+    const handoff = deferred<{ activeId: string | null }>();
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\handoff-pending.png');
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(videoSubpanel('reference'));
+    fireEvent.click(referencePanel.getByRole('button', { name: '选择参考图' }));
+    expect(await referencePanel.findByText('handoff-pending.png')).toBeInTheDocument();
+    fireEvent.change(referencePanel.getByLabelText('原始文字'), {
+      target: { value: '等待 handoff 的 reference 任务' },
+    });
+    const referenceForm = referencePanel.getByRole('button', { name: '生成视频' })
+      .closest('form') as HTMLFormElement;
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: 'jobs.start 已完成但状态未同步' },
+    });
+    smo.jobs.getState.mockReset();
+    smo.jobs.getState
+      .mockImplementationOnce(() => handoff.promise)
+      .mockResolvedValue({ activeId: null });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    fireEvent.submit(referenceForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('tab', { name: '图片生视频' })).toBeDisabled();
+
+    await act(async () => {
+      handoff.resolve({ activeId: null });
+      await handoff.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '图片生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(referenceForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
+  });
+
+  test('图片生视频仅在点击后显式加入当前模特并处理重复', async () => {
+    const panel = await openReferenceStudio();
+    expect(panel.getByText('尚未选择参考图')).toBeInTheDocument();
+    expect(panel.queryByText('avatar-1.png')).not.toBeInTheDocument();
+
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+    expect(await panel.findByText('avatar-1.png')).toBeInTheDocument();
+    expect(panel.getByText('1 / 9')).toBeInTheDocument();
+    fireEvent.click(panel.getByRole('button', { name: '使用当前模特' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('当前模特已在参考图中');
+    expect(panel.getByText('1 / 9')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '显式人物参考' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          avatarId: avatar.id,
+          referenceImagePaths: [avatar.photoPath],
+        }),
+      ),
+    );
+  });
+
+  test('图片生视频提交锁阻止重复任务并互斥润色', async () => {
+    let resolveStart: ((value: { id: string }) => void) | undefined;
+    smo.jobs.start.mockImplementation(
+      () => new Promise<{ id: string }>((resolve) => { resolveStart = resolve; }),
+    );
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\locked.png');
+    const panel = await openReferenceStudio();
+    fireEvent.click(panel.getByRole('button', { name: '选择参考图' }));
+    expect(await panel.findByText('locked.png')).toBeInTheDocument();
+    fireEvent.change(panel.getByLabelText('原始文字'), {
+      target: { value: '提交期间保持参考图' },
+    });
+    const generateButton = panel.getByRole('button', { name: '生成视频' });
+
+    fireEvent.click(generateButton);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '使用当前模特' })).toBeDisabled();
+
+    await act(async () => {
+      resolveStart?.({ id: 'reference-lock-job' });
+    });
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
+  });
+
+  test('二级制作目录提供文生视频、图片生视频、音频数字人及完整面板 ARIA', async () => {
+    await renderStudio();
+
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    expect(parent).toHaveAttribute('aria-expanded', 'true');
+    expect(parent).toHaveAttribute('aria-controls', 'studio-mode-navigation');
+    expect(parent).toHaveAttribute('aria-current', 'page');
+
+    const directory = screen.getByRole('group', { name: '制作模式' });
+    expect(directory).toHaveAttribute('id', 'studio-mode-navigation');
+    expect(within(directory).getAllByRole('button').map((button) => button.textContent))
+      .toEqual(['语音', '图像', '视频']);
+    expect(studioModeButton('视频')).toHaveAttribute('aria-current', 'page');
+    expect(studioModeButton('语音')).not.toHaveAttribute('aria-current');
+    expect(studioModeButton('图像')).toHaveAttribute('aria-controls', 'image-main-panel');
+
+    expect(document.getElementById('speech-main-panel')).not.toBeVisible();
+    expect(document.getElementById('image-main-panel')).not.toBeVisible();
+    expect(document.getElementById('video-main-panel')).toBeVisible();
+    expect(screen.getByRole('region', { name: '视频制作', exact: true })).toBe(
+      studioModePanel('视频'),
+    );
+    expect(document.getElementById('image-main-panel')).toHaveAttribute(
+      'aria-label',
+      '图像制作',
+    );
+    expect(document.getElementById('image-main-panel')).not.toHaveAttribute('aria-labelledby');
+    expect(screen.queryByRole('tablist', { name: '主制作模式' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: '视频', exact: true })).not.toBeInTheDocument();
+
+    const preview = screen.getByRole('region', { name: '当前人物预览' });
+    const controls = screen.getByRole('region', { name: '制作控制区' });
+    const modeTabs = within(controls).getByRole('tablist', { name: '制作模式' });
+    expect(within(modeTabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      '文生视频',
+      '图片生视频',
+      '音频数字人',
+    ]);
+    const textTab = within(modeTabs).getByRole('tab', { name: '文生视频' });
+    const referenceTab = within(modeTabs).getByRole('tab', { name: '图片生视频' });
+    const audioTab = within(modeTabs).getByRole('tab', { name: '音频数字人' });
+    const textPanel = document.getElementById('text-mode-panel');
+    const referencePanel = document.getElementById('reference-mode-panel');
+    const audioPanel = document.getElementById('audio-mode-panel');
+    expect(textTab).toHaveAttribute('aria-controls', 'text-mode-panel');
+    expect(referenceTab).toHaveAttribute('aria-controls', 'reference-mode-panel');
+    expect(audioTab).toHaveAttribute('aria-controls', 'audio-mode-panel');
+    expect(textPanel).toHaveAttribute('role', 'tabpanel');
+    expect(textPanel).toHaveAttribute('aria-labelledby', 'text-mode-tab');
+    expect(referencePanel).toHaveAttribute('role', 'tabpanel');
+    expect(referencePanel).toHaveAttribute('aria-labelledby', 'reference-mode-tab');
+    expect(audioPanel).toHaveAttribute('role', 'tabpanel');
+    expect(audioPanel).toHaveAttribute('aria-labelledby', 'audio-mode-tab');
+    expect(textPanel).toBeVisible();
+    expect(referencePanel).not.toBeVisible();
+    expect(audioPanel).not.toBeVisible();
+    expect(preview).not.toBeNull();
+    expect(controls).not.toContainElement(preview);
+
+    fireEvent.click(referenceTab);
+    expect(textPanel).not.toBeVisible();
+    expect(referencePanel).toBeVisible();
+    expect(audioPanel).not.toBeVisible();
+    expect(referenceTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.click(audioTab);
+    expect(textPanel).not.toBeVisible();
+    expect(referencePanel).not.toBeVisible();
+    expect(audioPanel).toBeVisible();
+    expect(referenceTab).toHaveAttribute('aria-selected', 'false');
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('独立受控 StudioPage 使用自包含的面板可访问名称', () => {
+    const onModeChange = vi.fn();
+    const props = {
+      avatar,
+      loading: false,
+      error: null,
+      modelDirectory: DEFAULT_MODEL_DIRECTORY,
+      onCreateAvatar: vi.fn(),
+      onModeChange,
+    };
+    const view = render(<StudioPage {...props} mode="speech" />);
+
+    for (const { mode, label } of [
+      { mode: 'speech', label: '语音制作' },
+      { mode: 'image', label: '图像制作' },
+      { mode: 'video', label: '视频制作' },
+    ] as const) {
+      view.rerender(<StudioPage {...props} mode={mode} />);
+      const panel = document.getElementById(`${mode}-main-panel`);
+      expect(panel).not.toBeNull();
+      expect(panel).toHaveAttribute('aria-label', label);
+      expect(panel).not.toHaveAttribute('aria-labelledby');
+      expect(panel).toHaveAccessibleName(label);
+      expect(panel).toBeVisible();
+    }
+    expect(screen.queryByRole('tablist', { name: '主制作模式' })).not.toBeInTheDocument();
+    expect(document.getElementById('studio-speech-button')).not.toBeInTheDocument();
+  });
+
+  test('非受控主 tab 支持方向键、Home/End 和 roving tabindex', () => {
+    render(
+      <StudioPage
+        avatar={avatar}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={vi.fn()}
+      />,
+    );
+
+    const mainTabs = screen.getByRole('tablist', { name: '主制作模式' });
+    const speechTab = within(mainTabs).getByRole('tab', { name: '语音' });
+    const imageTab = within(mainTabs).getByRole('tab', { name: '图像' });
+    const videoTab = within(mainTabs).getByRole('tab', { name: '视频' });
+    expect(videoTab).toHaveAttribute('aria-selected', 'true');
+    expect(videoTab).toHaveAttribute('tabindex', '0');
+
+    videoTab.focus();
+    fireEvent.keyDown(videoTab, { key: 'ArrowRight' });
+    expect(speechTab).toHaveFocus();
+    expect(speechTab).toHaveAttribute('aria-selected', 'true');
+    expect(speechTab).toHaveAttribute('tabindex', '0');
+    expect(imageTab).toHaveAttribute('tabindex', '-1');
+    expect(videoTab).toHaveAttribute('tabindex', '-1');
+
+    fireEvent.keyDown(speechTab, { key: 'ArrowRight' });
+    expect(imageTab).toHaveFocus();
+    expect(imageTab).toHaveAttribute('aria-selected', 'true');
+    expect(imageTab).toHaveAttribute('tabindex', '0');
+    expect(speechTab).toHaveAttribute('tabindex', '-1');
+
+    fireEvent.keyDown(imageTab, { key: 'ArrowRight' });
+    expect(videoTab).toHaveFocus();
+    expect(videoTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(videoTab, { key: 'ArrowLeft' });
+    expect(imageTab).toHaveFocus();
+    expect(imageTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(imageTab, { key: 'Home' });
+    expect(speechTab).toHaveFocus();
+    expect(speechTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(speechTab, { key: 'End' });
+    expect(videoTab).toHaveFocus();
+    expect(videoTab).toHaveAttribute('aria-selected', 'true');
+    expect(videoTab).toHaveAttribute('tabindex', '0');
+  });
+
+  test('二级目录子项同时切换应用页面和制作模式，父目录只切换展开状态', async () => {
+    await renderStudio();
+
+    fireEvent.click(studioModeButton('图像'));
+    expect(studioModePanel('图像')).toBeVisible();
+    expect(studioModePanel('视频')).not.toBeVisible();
+    expect(studioModeButton('图像')).toHaveAttribute('aria-current', 'page');
+
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    fireEvent.click(parent);
+    expect(parent).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('heading', { name: '设置' })).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: '制作模式' })).not.toBeInTheDocument();
+
+    fireEvent.click(parent);
+    fireEvent.click(studioModeButton('语音'));
+    expect(studioModePanel('语音')).toBeVisible();
+    expect(screen.queryByRole('heading', { name: '设置' })).not.toBeInTheDocument();
+    expect(studioModeButton('语音')).toHaveAttribute('aria-current', 'page');
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    fireEvent.click(studioModeButton('视频'));
+    expect(studioModePanel('视频')).toBeVisible();
+    expect(studioModeButton('视频')).toHaveAttribute('aria-current', 'page');
+  });
+
+  test('三脚猫顶级导航与切页后的会话保留', async () => {
+    smo.sanmao.getProfile.mockResolvedValue({
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-test',
+      keyStatus: 'valid',
+    });
+    let receive!: (event: SanmaoStreamEvent) => void;
+    smo.sanmao.subscribe.mockImplementation((listener) => {
+      receive = listener;
+      return () => undefined;
+    });
+    smo.sanmao.send.mockImplementation(async (input) => {
+      receive({
+        conversationId: input.conversationId,
+        replyId: input.replyId,
+        kind: 'done',
+        text: '这是三脚猫的回复',
+      });
+      return { ok: true };
+    });
+    await renderStudio();
+
+    fireEvent.click(screen.getByRole('button', { name: '三脚猫' }));
+    const input = await screen.findByLabelText('发送给三脚猫的消息');
+    fireEvent.change(input, { target: { value: '帮我检查文案' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(await screen.findByText('这是三脚猫的回复')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    fireEvent.click(screen.getByRole('button', { name: '三脚猫' }));
+    expect(screen.getByText('这是三脚猫的回复')).toBeInTheDocument();
+  });
+
+  test('收起二级目录不卸载语音、图像和视频草稿', async () => {
+    await renderStudio();
+    const videoDraft = textVideoField('原始文字');
+    fireEvent.change(videoDraft, { target: { value: '收起目录后保留视频草稿' } });
+
+    fireEvent.click(studioModeButton('图像'));
+    const imageDraft = screen.getByLabelText('图像提示词');
+    fireEvent.change(imageDraft, { target: { value: '收起目录后保留图像草稿' } });
+
+    fireEvent.click(studioModeButton('语音'));
+    const speechDraft = studioSpeechField('口播文字');
+    fireEvent.change(speechDraft, { target: { value: '收起目录后保留语音草稿' } });
+
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    fireEvent.click(parent);
+    expect(parent).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById('studio-mode-navigation')).not.toBeVisible();
+    expect(studioModePanel('语音')).toBeVisible();
+    expect(speechDraft).toHaveValue('收起目录后保留语音草稿');
+
+    fireEvent.click(parent);
+    fireEvent.click(studioModeButton('图像'));
+    expect(screen.getByLabelText('图像提示词')).toBe(imageDraft);
+    expect(imageDraft).toHaveValue('收起目录后保留图像草稿');
+    fireEvent.click(studioModeButton('视频'));
+    expect(textVideoField('原始文字')).toBe(videoDraft);
+    expect(videoDraft).toHaveValue('收起目录后保留视频草稿');
+    fireEvent.click(studioModeButton('语音'));
+    expect(studioSpeechField('口播文字')).toBe(speechDraft);
+  });
+
+  test('二级目录导航保留父项与激活子项的键盘焦点', async () => {
+    await renderStudio();
+
+    const parent = screen.getByRole('button', { name: '制作台', exact: true });
+    parent.focus();
+    fireEvent.click(parent);
+    expect(parent).toHaveFocus();
+    expect(parent).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(parent);
+    expect(parent).toHaveFocus();
+    const imageButton = studioModeButton('图像');
+    imageButton.focus();
+    fireEvent.click(imageButton);
+    expect(imageButton).toHaveFocus();
+    expect(studioModePanel('图像')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    const videoButton = studioModeButton('视频');
+    videoButton.focus();
+    fireEvent.click(videoButton);
+    expect(videoButton).toHaveFocus();
+    expect(studioModePanel('视频')).toBeVisible();
+  });
+
+  test('图像草稿在二级语音、视频目录和应用页面切换后保留', async () => {
+    await renderStudio();
+    fireEvent.click(studioModeButton('图像'));
+    const panel = within(studioModePanel('图像'));
+
+    fireEvent.change(panel.getByLabelText('图像提示词'), {
+      target: { value: '切换后保留的图像草稿' },
+    });
+    fireEvent.change(panel.getByLabelText('图像比例'), {
+      target: { value: '16:9 (Widescreen)' },
+    });
+    fireEvent.change(panel.getByLabelText('分辨率'), { target: { value: '0.7' } });
+    fireEvent.change(panel.getByLabelText('随机种子'), { target: { value: '9876' } });
+    fireEvent.change(panel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '31' },
+    });
+
+    fireEvent.click(studioModeButton('语音'));
+    expect(document.getElementById('image-main-panel')).not.toBeVisible();
+    fireEvent.click(studioModeButton('视频'));
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '图像切换后仍保留的视频草稿' },
+    });
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(studioModeButton('图像'));
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(studioModeButton('图像'));
+      const currentPanel = within(studioModePanel('图像'));
+      expect(currentPanel.getByLabelText('图像提示词')).toHaveValue('切换后保留的图像草稿');
+      expect(currentPanel.getByLabelText('图像比例')).toHaveValue('16:9 (Widescreen)');
+      expect(currentPanel.getByLabelText('分辨率')).toHaveValue('0.7');
+      expect(currentPanel.getByLabelText('随机种子')).toHaveValue(9876);
+      expect(currentPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(31);
+    }
+
+    fireEvent.click(studioModeButton('视频'));
+    expect(textVideoField('原始文字')).toHaveValue('图像切换后仍保留的视频草稿');
+    fireEvent.click(studioModeButton('图像'));
+    expect(screen.getByLabelText('图像提示词')).toHaveValue('切换后保留的图像草稿');
+  });
+
+  test('语音与视频草稿在切换二级目录和应用页面后保留', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\speech-clone.wav');
+    await renderStudio();
+
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '主模式切换后保留的视频草稿' },
+    });
+    fireEvent.click(studioModeButton('语音'));
+    fireEvent.change(studioSpeechField('口播文字'), {
+      target: { value: '主模式切换后保留的口播草稿' },
+    });
+    fireEvent.change(studioSpeechField('情绪/语气'), {
+      target: { value: '亲切自然' },
+    });
+    fireEvent.change(studioSpeechField('输出格式'), { target: { value: 'mp3' } });
+    fireEvent.change(studioSpeechField('语速'), { target: { value: '1.5' } });
+
+    fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
+    await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledWith('clone'));
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const clonePanel = screen.getByRole('tabpanel', { name: '声音克隆' });
+    expect(await within(clonePanel).findByText('speech-clone.wav')).toBeInTheDocument();
+
+    fireEvent.click(studioModeButton('视频'));
+    expect(textVideoField('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
+    fireEvent.click(studioModeButton('语音'));
+    expect(studioSpeechField('口播文字', 'clone')).toHaveValue('主模式切换后保留的口播草稿');
+    expect(studioSpeechField('输出格式', 'clone')).toHaveValue('mp3');
+    expect(
+      within(screen.getByRole('tabpanel', { name: '声音克隆' })).getByText('speech-clone.wav'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: '参考音合成' }));
+    expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
+    expect(studioSpeechField('语速')).toHaveValue('1.5');
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(studioModeButton('语音'));
+      expect(studioSpeechField('口播文字')).toHaveValue('主模式切换后保留的口播草稿');
+      expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
+      expect(studioSpeechField('输出格式')).toHaveValue('mp3');
+      expect(studioSpeechField('语速')).toHaveValue('1.5');
+    }
+
+    fireEvent.click(studioModeButton('视频'));
+    expect(textVideoField('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
+  });
+
+  test('语音 capabilities 默认视频和切应用页面不调用，返回后只应用新结果', async () => {
+    const first = deferred<SpeechCapabilities>();
+    const second = deferred<SpeechCapabilities>();
+    smo.speech.getCapabilities
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    await renderStudio();
+    await waitFor(() => expect(smo.components.getState).toHaveBeenCalledWith('speech'));
+
+    expect(smo.speech.getCapabilities).not.toHaveBeenCalled();
+    fireEvent.click(studioModeButton('语音'));
+    await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    expect(await screen.findByRole('heading', { name: '设置' })).toBeInTheDocument();
+    await act(async () => {
+      first.resolve({ speakers: ['StaleHiddenVoice'], languages: ['StaleHiddenLanguage'] });
+      await first.promise;
+    });
+    expect(document.getElementById('custom-speech-language')).toHaveValue('');
+
+    fireEvent.click(studioModeButton('语音'));
+    await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      second.resolve({ speakers: ['ReturnVoice'], languages: ['Chinese'] });
+      await second.promise;
+    });
+    expect(studioSpeechField('语言')).toHaveValue('Chinese');
+    smo.files.selectAudio.mockResolvedValueOnce('G:\\recordings\\capabilities.wav');
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const customPanel = screen.getByRole('tabpanel', { name: '参考音合成' });
+    expect(await within(customPanel).findByText('capabilities.wav')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled();
+  });
+
+  test('文生视频与图片生视频子 tab 支持 roving tabindex 和键盘循环导航', async () => {
+    await renderStudio();
+
+    const controls = screen.getByRole('region', { name: '制作控制区' });
+    const modeTabs = within(controls).getByRole('tablist', { name: '制作模式' });
+    const textTab = within(modeTabs).getByRole('tab', { name: '文生视频' });
+    const referenceTab = within(modeTabs).getByRole('tab', { name: '图片生视频' });
+    const audioTab = within(modeTabs).getByRole('tab', { name: '音频数字人' });
+
+    textTab.focus();
+    fireEvent.keyDown(textTab, { key: 'ArrowRight' });
+    expect(referenceTab).toHaveFocus();
+    expect(referenceTab).toHaveAttribute('aria-selected', 'true');
+    expect(textTab).toHaveAttribute('tabindex', '-1');
+    expect(referenceTab).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(referenceTab, { key: 'ArrowRight' });
+    expect(audioTab).toHaveFocus();
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+    expect(referenceTab).toHaveAttribute('tabindex', '-1');
+    expect(audioTab).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(audioTab, { key: 'ArrowRight' });
+    expect(textTab).toHaveFocus();
+    expect(textTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(textTab, { key: 'ArrowLeft' });
+    expect(audioTab).toHaveFocus();
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(audioTab, { key: 'ArrowLeft' });
+    expect(referenceTab).toHaveFocus();
+    expect(referenceTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(audioTab, { key: 'Home' });
+    expect(textTab).toHaveFocus();
+    expect(textTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(textTab, { key: 'End' });
+    expect(audioTab).toHaveFocus();
+    expect(audioTab).toHaveAttribute('aria-selected', 'true');
+    expect(textTab).toHaveAttribute('tabindex', '-1');
+    expect(audioTab).toHaveAttribute('tabindex', '0');
+  });
+
+  test('文生视频润色使用 t2va，编辑结果后无参考提交', async () => {
     smo.llm.polish.mockResolvedValue({
       text: '润色后的镜头',
       skill: 'h3-prompt-writing',
@@ -425,14 +1850,16 @@ describe('text-to-video studio', () => {
       attempts: 1,
     });
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    const panel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
+    fireEvent.change(panel.getByLabelText('原始文字'), {
       target: { value: '主播转身并挥手' },
     });
-    fireEvent.change(screen.getByLabelText('视频风格（Skill）'), {
-      target: { value: 'h3-prompt-writing' },
-    });
-    fireEvent.change(screen.getByLabelText('视频时长（秒）'), { target: { value: '9' } });
-    fireEvent.change(screen.getByRole('spinbutton', { name: '随机种子' }), { target: { value: '42' } });
+    fireEvent.change(
+      panel.getByLabelText('视频风格（Skill）'),
+      { target: { value: 'h3-prompt-writing' } },
+    );
+    fireEvent.change(panel.getByLabelText('视频时长（秒）'), { target: { value: '9' } });
+    fireEvent.change(panel.getByRole('spinbutton', { name: '随机种子' }), { target: { value: '42' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
 
@@ -440,9 +1867,9 @@ describe('text-to-video studio', () => {
     expect(smo.llm.polish).toHaveBeenCalledWith({
       text: '主播转身并挥手',
       duration: 9,
-      imageCount: 1,
-      mode: 'ref2va',
-      referenceLabels: ['<Picture 1>'],
+      imageCount: 0,
+      mode: 't2va',
+      referenceLabels: [],
       skill: 'h3-prompt-writing',
     });
     expect(smo.llm.polish.mock.calls[0][0]).not.toHaveProperty('audioPath');
@@ -460,15 +1887,69 @@ describe('text-to-video studio', () => {
     await waitFor(() =>
       expect(smo.jobs.start).toHaveBeenCalledWith({
         mode: 'text',
-        avatarId: avatar.id,
+        avatarId: null,
         prompt: '用户最终确认的镜头文本',
         duration: 9,
         seed: 42,
-        subtitles: false,
+        steps: 8,
+        referenceImagePaths: [],
       }),
     );
     expect(await screen.findByText('job-1')).toBeInTheDocument();
     expect(screen.getByText('等待中（pending）')).toBeInTheDocument();
+  });
+
+  test('rejects an explicit 4.5 second text duration without submitting', async () => {
+    await renderStudio();
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '显式时长必须保持整数约束' },
+    });
+    fireEvent.change(textVideoField('视频时长（秒）'), {
+      target: { value: '4.5' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    });
+
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('视频时长必须在 4–15 秒之间');
+  });
+
+  test('rejects an explicit 4.5 second text duration without polishing', async () => {
+    await renderStudio();
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '润色也保持显式整数时长约束' },
+    });
+    fireEvent.change(textVideoField('视频时长（秒）'), {
+      target: { value: '4.5' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
+    });
+
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('视频时长必须在 4–15 秒之间');
+  });
+
+  test('allows a fractional estimated duration when the text duration is blank', async () => {
+    await renderStudio();
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '汉'.repeat(10) },
+    });
+    fireEvent.change(textVideoField('视频时长（秒）'), {
+      target: { value: '' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ duration: 4.5 }),
+      ),
+    );
   });
 
   test('estimates a blank duration from the original text and reuses it after polishing', async () => {
@@ -485,10 +1966,10 @@ describe('text-to-video studio', () => {
         }),
     );
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: originalText },
     });
-    const durationInput = screen.getByLabelText('视频时长（秒）');
+    const durationInput = textVideoField('视频时长（秒）');
     fireEvent.change(durationInput, { target: { value: '' } });
 
     expect(durationInput).toHaveAttribute('aria-describedby', 'text-duration-hint');
@@ -502,7 +1983,7 @@ describe('text-to-video studio', () => {
     await waitFor(() =>
       expect(smo.llm.polish).toHaveBeenCalledWith(expect.objectContaining({ duration: 6 })),
     );
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: changedOriginalText },
     });
     expect(screen.getByText('留空自动：约 15 秒（含 2 秒收尾）')).toBeInTheDocument();
@@ -535,13 +2016,13 @@ describe('text-to-video studio', () => {
   test('keeps the original text after a polish failure and can generate it', async () => {
     smo.llm.polish.mockRejectedValue(new Error('LLM 暂时不可用'));
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '保留这段原文' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('LLM 暂时不可用');
-    expect(screen.getByLabelText('原始文字')).toHaveValue('保留这段原文');
+    expect(textVideoField('原始文字')).toHaveValue('保留这段原文');
     expect(screen.getByRole('tab', { name: '原文' })).toHaveAttribute(
       'aria-selected',
       'true',
@@ -555,17 +2036,160 @@ describe('text-to-video studio', () => {
     );
   });
 
+  test('blocks text generation entry while a polish request is pending', async () => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderStudio();
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '润色期间不能生成' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
+
+    const generateButton = screen.getByRole('button', { name: '生成视频' });
+    expect(generateButton).toBeDisabled();
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '互斥测试润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(await screen.findByRole('textbox', { name: '润色结果' })).toBeInTheDocument();
+  });
+
+  test('blocks text polish entry while generation is pending', async () => {
+    let resolveStart: ((value: { id: string }) => void) | undefined;
+    smo.jobs.start.mockImplementation(
+      () =>
+        new Promise<{ id: string }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    await renderStudio();
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '生成期间不能润色' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    const polishButton = screen.getByRole('button', { name: 'AI 润色' });
+    expect(polishButton).toBeDisabled();
+    fireEvent.click(polishButton);
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveStart?.({ id: 'text-exclusive-job' });
+    });
+    expect(screen.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
+  });
+
   test('keeps an unsubmitted text draft when switching production modes', async () => {
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '尚未提交的草稿' },
     });
 
     fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
-    fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
 
-    expect(screen.getByLabelText('原始文字')).toHaveValue('尚未提交的草稿');
+    expect(textVideoField('原始文字')).toHaveValue('尚未提交的草稿');
     expect(screen.getByRole('heading', { name: avatar.name })).toBeInTheDocument();
+  });
+
+  test('视频子模式切换和应用页面往返保留原文、润色文本、音频与步数', async () => {
+    smo.llm.polish.mockImplementation(async ({ text }: { text: string }) => ({
+      text: `润色：${text}`,
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    }));
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\video-submode.mp3');
+    await renderStudio();
+
+    let textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
+    fireEvent.change(textPanel.getByLabelText('原始文字'), {
+      target: { value: '视频子模式原文' },
+    });
+    fireEvent.change(textPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '11' },
+    });
+    fireEvent.click(textPanel.getByRole('button', { name: 'AI 润色' }));
+    expect(await textPanel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '润色：视频子模式原文',
+    );
+    fireEvent.change(textPanel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '编辑后的视频子模式润色文本' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    let audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+    fireEvent.click(audioPanel.getByRole('button', { name: '选择音频' }));
+    const selectedAudio = await audioPanel.findByLabelText('所选音频');
+    Object.defineProperty(selectedAudio, 'duration', { configurable: true, value: 9 });
+    fireEvent.loadedMetadata(selectedAudio);
+    fireEvent.change(audioPanel.getByLabelText('动作/画面提示词'), {
+      target: { value: '音频子模式原文' },
+    });
+    fireEvent.change(audioPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '9' },
+    });
+    fireEvent.click(audioPanel.getByRole('button', { name: 'AI 润色' }));
+    expect(await audioPanel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '润色：音频子模式原文',
+    );
+    fireEvent.change(audioPanel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '编辑后的音频子模式润色文本' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
+    expect(textPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '编辑后的视频子模式润色文本',
+    );
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(11);
+    fireEvent.click(textPanel.getByRole('tab', { name: '原文' }));
+    expect(textPanel.getByLabelText('原始文字')).toHaveValue('视频子模式原文');
+    fireEvent.click(textPanel.getByRole('tab', { name: '润色结果' }));
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+    expect(audioPanel.getByLabelText('所选音频')).toBe(selectedAudio);
+    expect(audioPanel.getByText('video-submode.mp3')).toBeInTheDocument();
+    expect(audioPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '编辑后的音频子模式润色文本',
+    );
+    expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(9);
+    fireEvent.click(audioPanel.getByRole('tab', { name: '原文' }));
+    expect(audioPanel.getByLabelText('动作/画面提示词')).toHaveValue('音频子模式原文');
+    fireEvent.click(audioPanel.getByRole('tab', { name: '润色结果' }));
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(studioModeButton('视频'));
+      audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+      expect(audioPanel.getByLabelText('所选音频')).toBe(selectedAudio);
+      expect(audioPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+        '编辑后的音频子模式润色文本',
+      );
+      expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(9);
+    }
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
+    expect(textPanel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '编辑后的视频子模式润色文本',
+    );
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(11);
   });
 
   test('uses works:list for real running and done states instead of inventing completion', async () => {
@@ -574,7 +2198,7 @@ describe('text-to-video studio', () => {
     ]);
     smo.jobs.start.mockResolvedValue({ id: 'job-real' });
     await renderStudio();
-    fireEvent.change(screen.getByLabelText('原始文字'), {
+    fireEvent.change(textVideoField('原始文字'), {
       target: { value: '真实任务状态' },
     });
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
@@ -587,7 +2211,762 @@ describe('text-to-video studio', () => {
   });
 });
 
+describe('用于音频数字人', () => {
+  function doneSpeechWork(id: string, outputPath: string): Work {
+    return createWork({
+      id,
+      avatarId: null,
+      mode: 'speech',
+      status: 'done',
+      outputPath,
+      title: id,
+    });
+  }
+
+  async function openWorksWith(works: Work[]): Promise<void> {
+    smo.works.list.mockResolvedValue(works);
+    await renderStudio();
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByRole('heading', { name: '我的作品' });
+  }
+
+  async function useSpeechWork(id: string) {
+    fireEvent.click(
+      await screen.findByRole('button', { name: `用于音频数字人 ${id}` }),
+    );
+    const panel = await screen.findByRole('tabpanel', { name: '音频数字人' });
+    await waitFor(() => expect(panel).toBeVisible());
+    return within(panel);
+  }
+
+  function loadDuration(audio: HTMLElement, seconds: number): void {
+    Object.defineProperty(audio, 'duration', { configurable: true, value: seconds });
+    fireEvent.loadedMetadata(audio);
+  }
+
+  test('仅为已完成且有输出路径的语音作品显示操作', async () => {
+    await openWorksWith([
+      doneSpeechWork('speech-ready', 'G:\\output\\SMO-Speech\\ready.wav'),
+      createWork({
+        id: 'speech-running',
+        avatarId: null,
+        mode: 'speech',
+        status: 'running',
+        outputPath: 'G:\\output\\SMO-Speech\\running.wav',
+      }),
+      createWork({
+        id: 'speech-failed',
+        avatarId: null,
+        mode: 'speech',
+        status: 'failed',
+        outputPath: 'G:\\output\\SMO-Speech\\failed.wav',
+      }),
+      createWork({
+        id: 'speech-no-output',
+        avatarId: null,
+        mode: 'speech',
+        status: 'done',
+        outputPath: null,
+      }),
+      createWork({
+        id: 'video-ready',
+        mode: 'text',
+        status: 'done',
+        outputPath: 'G:\\output\\SMO-H3\\video.mp4',
+      }),
+    ]);
+
+    expect(
+      await screen.findByRole('button', { name: '用于音频数字人 speech-ready' }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^用于音频数字人 / })).toHaveLength(1);
+  });
+
+  test.each(['wav', 'mp3', 'flac', 'm4a'])(
+    '选择 %s 语音作品后进入视频音频数字人并直接读取预览和时长',
+    async (extension) => {
+      const id = `speech-${extension}`;
+      const audioPath = `G:\\output\\SMO-Speech\\voice.${extension}`;
+      await openWorksWith([doneSpeechWork(id, audioPath)]);
+
+      const panel = await useSpeechWork(id);
+
+      expect(studioModeButton('视频')).toHaveAttribute('aria-current', 'page');
+      expect(studioModeButton('视频')).toHaveAttribute('aria-controls', 'video-main-panel');
+      expect(studioModeButton('语音')).not.toHaveAttribute('aria-current');
+      expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveAttribute(
+        'tabindex',
+        '0',
+      );
+      expect(screen.getByRole('tab', { name: '音频数字人', exact: true })).toHaveFocus();
+      expect(screen.getByRole('tab', { name: '文生视频' })).toHaveAttribute(
+        'aria-selected',
+        'false',
+      );
+      expect(panel.getByText(`voice.${extension}`)).toBeInTheDocument();
+      const audio = await panel.findByLabelText('所选音频');
+      expect(audio).toHaveAttribute(
+        'src',
+        `smo-media://media/${encodeURIComponent(audioPath)}`,
+      );
+      expect(smo.files.mediaUrl).toHaveBeenCalledWith(audioPath);
+      expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+      expect(smo.files.selectAudio).not.toHaveBeenCalled();
+
+      loadDuration(audio, 4.25 + ['wav', 'mp3', 'flac', 'm4a'].indexOf(extension));
+      expect(panel.getByText(/音频时长：/)).toHaveTextContent(
+        `音频时长：${(4.25 + ['wav', 'mp3', 'flac', 'm4a'].indexOf(extension)).toFixed(2)} 秒`,
+      );
+      expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(
+        4.25 + ['wav', 'mp3', 'flac', 'm4a'].indexOf(extension),
+      );
+    },
+  );
+
+  test('选择语音作品后保留现有语音、文字视频和音频视频草稿及步数', async () => {
+    const audioPath = 'G:\\output\\SMO-Speech\\drafts.wav';
+    smo.works.list.mockResolvedValue([doneSpeechWork('speech-drafts', audioPath)]);
+    await renderStudio();
+
+    const textPanel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
+    fireEvent.change(textPanel.getByLabelText('原始文字'), {
+      target: { value: '保留文字视频草稿' },
+    });
+    fireEvent.change(textPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '13' },
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    let audioPanel = within(screen.getByRole('tabpanel', { name: '音频数字人' }));
+    fireEvent.change(audioPanel.getByLabelText('动作/画面提示词'), {
+      target: { value: '保留音频视频草稿' },
+    });
+    fireEvent.change(audioPanel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '17' },
+    });
+    fireEvent.change(audioPanel.getByLabelText('起始截取（秒）'), {
+      target: { value: '2' },
+    });
+    fireEvent.change(audioPanel.getByLabelText('截取时长（秒）'), {
+      target: { value: '3' },
+    });
+
+    fireEvent.click(studioModeButton('语音'));
+    fireEvent.change(studioSpeechField('口播文字'), {
+      target: { value: '保留语音作品草稿' },
+    });
+    fireEvent.change(studioSpeechField('情绪/语气'), {
+      target: { value: '温和坚定' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    audioPanel = await useSpeechWork('speech-drafts');
+
+    expect(audioPanel.getByLabelText('动作/画面提示词')).toHaveValue('保留音频视频草稿');
+    expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toHaveValue(17);
+    expect(audioPanel.getByLabelText('起始截取（秒）')).toHaveValue(0);
+    expect(audioPanel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    loadDuration(await audioPanel.findByLabelText('所选音频'), 8.5);
+    expect(audioPanel.getByLabelText('截取时长（秒）')).toHaveValue(8.5);
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    expect(textVideoField('原始文字')).toHaveValue('保留文字视频草稿');
+    expect(
+      within(screen.getByRole('tabpanel', { name: '文生视频' })).getByRole('spinbutton', {
+        name: '采样步数',
+      }),
+    ).toHaveValue(13);
+
+    fireEvent.click(studioModeButton('语音'));
+    expect(studioSpeechField('口播文字')).toHaveValue('保留语音作品草稿');
+    expect(studioSpeechField('情绪/语气')).toHaveValue('温和坚定');
+  });
+
+  test('返回作品页换选和重选同一路径时忽略旧 metadata 并重新读取', async () => {
+    const firstPath = 'G:\\output\\SMO-Speech\\first.mp3';
+    const secondPath = 'G:\\output\\SMO-Speech\\second.flac';
+    await openWorksWith([
+      doneSpeechWork('speech-first', firstPath),
+      doneSpeechWork('speech-second', secondPath),
+    ]);
+
+    let panel = await useSpeechWork('speech-first');
+    const firstAudio = await panel.findByLabelText('所选音频');
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+
+    panel = await useSpeechWork('speech-second');
+    const secondAudio = await panel.findByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+    expect(panel.getByText('second.flac')).toBeInTheDocument();
+    expect(panel.queryByText('first.mp3')).not.toBeInTheDocument();
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+
+    loadDuration(secondAudio, 6.5);
+    loadDuration(firstAudio, 99);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6.5);
+    expect(panel.getByText('音频时长：6.50 秒')).toBeInTheDocument();
+    expect(panel.queryByText('音频时长：99.00 秒')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    panel = await useSpeechWork('speech-second');
+    const repeatedAudio = await panel.findByLabelText('所选音频');
+    expect(repeatedAudio).not.toBe(secondAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：6.50 秒')).not.toBeInTheDocument();
+
+    loadDuration(secondAudio, 88);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    loadDuration(repeatedAudio, 7.25);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(7.25);
+    expect(panel.getByText('音频时长：7.25 秒')).toBeInTheDocument();
+  });
+
+  test('首次 mediaUrl 失败后同路径新 revision 会重新 IPC 并恢复预览', async () => {
+    const audioPath = 'G:\\output\\SMO-Speech\\retry-media.wav';
+    await openWorksWith([doneSpeechWork('speech-retry-media', audioPath)]);
+    expect(
+      await screen.findByLabelText('作品语音 speech-retry-media'),
+    ).toBeInTheDocument();
+    smo.files.mediaUrl.mockRejectedValueOnce(new Error('首次媒体读取失败'));
+
+    let panel = await useSpeechWork('speech-retry-media');
+    expect(await panel.findByRole('alert')).toHaveTextContent('首次媒体读取失败');
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+    const callsBeforeRetry = smo.files.mediaUrl.mock.calls.filter(
+      ([path]) => path === audioPath,
+    ).length;
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    panel = await useSpeechWork('speech-retry-media');
+
+    const audio = await panel.findByLabelText('所选音频');
+    expect(audio).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(audioPath)}`,
+    );
+    const callsAfterRetry = smo.files.mediaUrl.mock.calls.filter(
+      ([path]) => path === audioPath,
+    ).length;
+    expect(callsAfterRetry).toBeGreaterThan(callsBeforeRetry);
+    expect(panel.queryByRole('alert')).not.toBeInTheDocument();
+    loadDuration(audio, 5.75);
+    expect(panel.getByText('音频时长：5.75 秒')).toBeInTheDocument();
+  });
+
+  test('新语音作品使进行中的旧润色失效', async () => {
+    const pending = deferred<PolishResult>();
+    smo.llm.polish.mockImplementationOnce(() => pending.promise);
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\polish-original.wav');
+    smo.works.list.mockResolvedValue([
+      doneSpeechWork('speech-polish', 'G:\\output\\SMO-Speech\\polish-new.wav'),
+    ]);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const originalAudio = await screen.findByLabelText('所选音频');
+    loadDuration(originalAudio, 8);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '旧音频润色草稿' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'AI 润色' }));
+    await waitFor(() => expect(smo.llm.polish).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    const panel = await useSpeechWork('speech-polish');
+    expect(panel.getByText('polish-new.wav')).toBeInTheDocument();
+
+    await act(async () => {
+      pending.resolve({
+        text: '过期润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+      await pending.promise;
+    });
+
+    expect(panel.getByText('polish-new.wav')).toBeInTheDocument();
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByDisplayValue('过期润色结果')).not.toBeInTheDocument();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test('生成提交中拒绝替换并提示，主进程不收到额外任务', async () => {
+    const pending = deferred<{ id: string }>();
+    smo.jobs.start.mockImplementationOnce(() => pending.promise);
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\busy-original.wav');
+    smo.works.list.mockResolvedValue([
+      doneSpeechWork('speech-busy', 'G:\\output\\SMO-Speech\\busy-new.mp3'),
+    ]);
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const originalAudio = await screen.findByLabelText('所选音频');
+    loadDuration(originalAudio, 8);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '正在提交的生成草稿' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    const panel = await useSpeechWork('speech-busy');
+
+    expect(await panel.findByRole('alert')).toHaveTextContent(
+      '生成任务进行中，完成后才能更换语音作品。',
+    );
+    expect(panel.getByText('busy-original.wav')).toBeInTheDocument();
+    expect(panel.queryByText('busy-new.mp3')).not.toBeInTheDocument();
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({ id: 'existing-generation' });
+      await pending.promise;
+    });
+    expect(panel.getByText('busy-original.wav')).toBeInTheDocument();
+    expect(panel.queryByText('busy-new.mp3')).not.toBeInTheDocument();
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('录音', () => {
+  class MockMediaRecorder {
+    static instances: MockMediaRecorder[] = [];
+    readonly stream: MediaStream;
+    readonly mimeType = 'audio/webm';
+    emitStopEvents = true;
+    state: RecordingState = 'inactive';
+    ondataavailable: ((event: BlobEvent) => void) | null = null;
+    onstop: ((event: Event) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+
+    constructor(stream: MediaStream) {
+      this.stream = stream;
+      MockMediaRecorder.instances.push(this);
+    }
+
+    start(): void {
+      this.state = 'recording';
+    }
+
+    stop(): void {
+      if (this.state === 'inactive') {
+        return;
+      }
+      this.state = 'inactive';
+      if (!this.emitStopEvents) {
+        return;
+      }
+      this.ondataavailable?.({
+        data: new Blob(['recorded audio'], { type: this.mimeType }),
+      } as BlobEvent);
+      this.onstop?.(new Event('stop'));
+    }
+  }
+
+  const originalMediaDevices = Object.getOwnPropertyDescriptor(
+    navigator,
+    'mediaDevices',
+  );
+  let getUserMedia: ReturnType<typeof vi.fn>;
+  let tracks: Array<{ stop: ReturnType<typeof vi.fn> }>;
+
+  beforeEach(() => {
+    tracks = [];
+    MockMediaRecorder.instances = [];
+    getUserMedia = vi.fn(async () => {
+      const track = { stop: vi.fn() };
+      tracks.push(track);
+      return { getTracks: () => [track] } as unknown as MediaStream;
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    vi.stubGlobal('MediaRecorder', MockMediaRecorder);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalMediaDevices === undefined) {
+      Reflect.deleteProperty(navigator, 'mediaDevices');
+    } else {
+      Object.defineProperty(navigator, 'mediaDevices', originalMediaDevices);
+    }
+  });
+
+  function renderRecorder() {
+    const onRecorded = vi.fn();
+    const onError = vi.fn();
+    const view = render(
+      <AudioRecorder onRecorded={onRecorded} onError={onError} />,
+    );
+    return { onError, onRecorded, view };
+  }
+
+  test('录音只在点击后申请麦克风，停止后保存字节并回调输出路径', async () => {
+    const { onRecorded } = renderRecorder();
+
+    expect(getUserMedia).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    const stop = await screen.findByRole('button', { name: '停止录音' });
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
+    expect(MockMediaRecorder.instances[0]?.state).toBe('recording');
+
+    fireEvent.click(stop);
+
+    await waitFor(() =>
+      expect(onRecorded).toHaveBeenCalledWith('G:\\data\\recordings\\recorded.wav'),
+    );
+    expect(tracks[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(smo.recordings.save).toHaveBeenCalledTimes(1);
+    const blob = smo.recordings.save.mock.calls[0]?.[0] as Blob;
+    expect(blob).toBeInstanceOf(Blob);
+    expect(blob.type).toBe('audio/webm');
+    expect(await blob.text()).toBe('recorded audio');
+  });
+
+  test('录音计时使用固定的分秒显示', async () => {
+    vi.useFakeTimers();
+    const { view } = renderRecorder();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    });
+
+    expect(screen.getByRole('timer', { name: '录音计时' })).toHaveTextContent(
+      '00:00',
+    );
+    act(() => {
+      vi.advanceTimersByTime(2_100);
+    });
+    expect(screen.getByRole('timer', { name: '录音计时' })).toHaveTextContent(
+      '00:02',
+    );
+    expect(screen.getByRole('timer', { name: '录音计时' })).toHaveClass(
+      'audio-recorder-time',
+    );
+    view.unmount();
+  });
+
+  test('录音保存后可试听并通过重录更新同一音频状态', async () => {
+    smo.recordings.save
+      .mockResolvedValueOnce('G:\\data\\recordings\\one.wav')
+      .mockResolvedValueOnce('G:\\data\\recordings\\two.wav');
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    const firstAudio = await screen.findByLabelText('所选音频');
+    expect(screen.getByText('one.wav')).toBeInTheDocument();
+    Object.defineProperty(firstAudio, 'duration', { configurable: true, value: 4.5 });
+    fireEvent.loadedMetadata(firstAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(4.5);
+
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await screen.findByText('two.wav');
+    const secondAudio = await screen.findByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 2.75 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(2.75);
+    expect(smo.recordings.save).toHaveBeenCalledTimes(2);
+  });
+
+  test('视频子模式隐藏时录音保存中仍接受迟到路径并在返回面板后保留录音', async () => {
+    let resolveSave!: (path: string) => void;
+    smo.recordings.save.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await waitFor(() => expect(smo.recordings.save).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    await act(async () => {
+      resolveSave('G:\\data\\recordings\\hidden-save.wav');
+    });
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+
+    expect(await screen.findByText('hidden-save.wav')).toBeInTheDocument();
+    expect(await screen.findByLabelText('所选音频')).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\data\\recordings\\hidden-save.wav')}`,
+    );
+    expect(smo.recordings.discard).not.toHaveBeenCalled();
+  });
+
+  test('录音保存中 busy 仍更新同一音频状态', async () => {
+    let resolveSave!: (path: string) => void;
+    smo.recordings.save.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const form = (
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />
+    );
+    const view = render(form);
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await waitFor(() => expect(smo.recordings.save).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        busy
+      />,
+    );
+    await act(async () => {
+      resolveSave('G:\\data\\recordings\\busy-save.wav');
+    });
+
+    expect(await screen.findByText('busy-save.wav')).toBeInTheDocument();
+    expect(await screen.findByLabelText('所选音频')).toBeInTheDocument();
+    expect(smo.recordings.discard).not.toHaveBeenCalled();
+  });
+
+  test('录音保存中卸载会 discard 迟到路径且不回调', async () => {
+    let resolveSave!: (path: string) => void;
+    smo.recordings.save.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const { onRecorded, view } = renderRecorder();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+    await waitFor(() => expect(smo.recordings.save).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    await act(async () => {
+      resolveSave('G:\\data\\recordings\\unmounted-save.wav');
+    });
+
+    await waitFor(() =>
+      expect(smo.recordings.discard).toHaveBeenCalledWith(
+        'G:\\data\\recordings\\unmounted-save.wav',
+      ),
+    );
+    expect(onRecorded).not.toHaveBeenCalled();
+  });
+
+  test('录音 onerror 后到达的 dataavailable/stop 不保存也不替换已有音频', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original.mp3');
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const originalAudio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(originalAudio, 'duration', {
+      configurable: true,
+      value: 8,
+    });
+    fireEvent.loadedMetadata(originalAudio);
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+    const stopButton = await screen.findByRole('button', { name: '停止录音' });
+    const recorder = MockMediaRecorder.instances[0]!;
+    recorder.emitStopEvents = false;
+    const queuedDataAvailable = recorder.ondataavailable;
+    const queuedStop = recorder.onstop;
+    fireEvent.click(stopButton);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+
+    await act(async () => {
+      recorder.onerror?.(new Event('error'));
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent('录音失败');
+
+    await act(async () => {
+      queuedDataAvailable?.({
+        data: new Blob(['late audio'], { type: 'audio/webm' }),
+      } as BlobEvent);
+      queuedStop?.(new Event('stop'));
+      await Promise.resolve();
+    });
+
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+    expect(screen.getByText('original.mp3')).toBeInTheDocument();
+    expect(screen.getByLabelText('所选音频')).toBe(originalAudio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(8);
+    expect(screen.queryByText('recorded.wav')).not.toBeInTheDocument();
+  });
+
+  test('录音权限拒绝时保留已有音频', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original.mp3');
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(audio);
+    getUserMedia.mockRejectedValue(new DOMException('Denied', 'NotAllowedError'));
+
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('麦克风权限被拒绝');
+    expect(screen.getByText('original.mp3')).toBeInTheDocument();
+    expect(screen.getByLabelText('所选音频')).toBe(audio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(8);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+  });
+
+  test('录音转换失败时保留已有音频并显示中文错误', async () => {
+    smo.files.selectAudio.mockResolvedValue('G:\\recordings\\original.mp3');
+    smo.recordings.save.mockRejectedValue(new Error('FFmpeg failed'));
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(audio);
+
+    fireEvent.click(screen.getByRole('button', { name: '重录' }));
+    fireEvent.click(await screen.findByRole('button', { name: '停止录音' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('录音保存失败');
+    expect(screen.getByText('original.mp3')).toBeInTheDocument();
+    expect(screen.getByLabelText('所选音频')).toBe(audio);
+    expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(8);
+  });
+
+  test('录音找不到麦克风时显示中文错误且不保存', async () => {
+    const { onError, onRecorded } = renderRecorder();
+    getUserMedia.mockRejectedValue(new DOMException('Missing', 'NotFoundError'));
+
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.stringContaining('未检测到可用的麦克风'),
+      ),
+    );
+    expect(onRecorded).not.toHaveBeenCalled();
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '开始录音' })).toBeEnabled();
+  });
+
+  test('录音没有媒体设备 API 时也报告无麦克风', async () => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: undefined,
+    });
+    const { onError } = renderRecorder();
+
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.stringContaining('未检测到可用的麦克风'),
+      ),
+    );
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+  });
+
+  test('录音在隐藏和卸载时停止所有 track 且不保存', async () => {
+    const { view } = renderRecorder();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    await screen.findByRole('button', { name: '停止录音' });
+
+    view.rerender(
+      <AudioRecorder active={false} onRecorded={vi.fn()} onError={vi.fn()} />,
+    );
+    expect(tracks[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+
+    view.rerender(<AudioRecorder active onRecorded={vi.fn()} onError={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    await screen.findByRole('button', { name: '停止录音' });
+    view.unmount();
+    expect(tracks[1]?.stop).toHaveBeenCalledTimes(1);
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+  });
+
+  test('录音 busy 时禁止开始录音或替换音频', () => {
+    render(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        busy
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: '开始录音' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '选择音频' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  test('录音等待权限时进入 busy 会取消启动并关闭返回的 track', async () => {
+    let resolveStream!: (stream: MediaStream) => void;
+    const track = { stop: vi.fn() };
+    tracks.push(track);
+    getUserMedia.mockImplementation(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveStream = resolve;
+        }),
+    );
+    const onRecorded = vi.fn();
+    const onError = vi.fn();
+    const view = render(
+      <AudioRecorder onRecorded={onRecorded} onError={onError} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '开始录音' }));
+
+    view.rerender(
+      <AudioRecorder disabled onRecorded={onRecorded} onError={onError} />,
+    );
+    await act(async () => {
+      resolveStream({ getTracks: () => [track] } as unknown as MediaStream);
+    });
+
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(MockMediaRecorder.instances).toHaveLength(0);
+    expect(onRecorded).not.toHaveBeenCalled();
+    expect(smo.recordings.save).not.toHaveBeenCalled();
+  });
+});
+
 describe('audio digital human studio', () => {
+  function audioPanel(): HTMLElement {
+    return screen.getByRole('tabpanel', { name: '音频数字人' });
+  }
+
   async function renderLoadedAudio(audioPath: string, seconds: number): Promise<void> {
     smo.files.selectAudio.mockResolvedValue(audioPath);
     await renderStudio();
@@ -598,6 +2977,808 @@ describe('audio digital human studio', () => {
     fireEvent.loadedMetadata(audio);
     expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(seconds);
   }
+
+  test('audio drop authorizes one file, previews it, and keeps it after switching panels', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+    const file = new File(['audio'], 'dropped.mp3', { type: 'audio/mpeg' });
+
+    fireEvent.drop(dropzone, { dataTransfer: { files: [file] } });
+
+    expect(smo.files.authorizeDroppedAudio).toHaveBeenCalledWith(file);
+    expect(smo.files.selectAudio).not.toHaveBeenCalled();
+    const audio = await panel.findByLabelText('所选音频');
+    expect(audio).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent('G:\\dropped\\dropped.mp3')}`,
+    );
+    expect(panel.getByText('dropped.mp3')).toBeInTheDocument();
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 7.25 });
+    fireEvent.loadedMetadata(audio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(7.25);
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    expect(panel.getByText('dropped.mp3')).toBeInTheDocument();
+    expect(panel.getByLabelText('所选音频')).toBe(audio);
+  });
+
+  test('audio drop 拖入多个文件时拒绝授权并显示错误', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+
+    fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+      dataTransfer: {
+        files: [new File(['a'], 'a.mp3'), new File(['b'], 'b.wav')],
+      },
+    });
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('一次只能拖入一个音频文件');
+    expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+  });
+
+  test.each(['notes.txt', 'photo.png'])(
+    'audio drop 拖入非音频 %s 时拒绝授权',
+    async (name) => {
+      await renderStudio();
+      fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+      const panel = within(audioPanel());
+
+      fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+        dataTransfer: { files: [new File(['x'], name)] },
+      });
+
+      expect(await panel.findByRole('alert')).toHaveTextContent(
+        '仅支持 WAV、MP3、FLAC、OGG 或 M4A 音频',
+      );
+      expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    },
+  );
+
+  test('audio drop 拖入子元素触发 dragleave 时保留高亮', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+    const child = panel.getByText('尚未选择音频');
+
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+    const enterChild = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(enterChild, 'relatedTarget', { value: child });
+    fireEvent(dropzone, enterChild);
+    expect(dropzone).toHaveAttribute('data-drop-active', 'true');
+
+    const leaveZone = new MouseEvent('dragleave', { bubbles: true });
+    Object.defineProperty(leaveZone, 'relatedTarget', { value: document.body });
+    fireEvent(dropzone, leaveZone);
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['x'], 'reset.mp3')] },
+    });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+  });
+
+  test('audio drop 过期对话框授权不能覆盖较新的拖入选择', async () => {
+    let resolveSelect!: (path: string | null) => void;
+    smo.files.selectAudio.mockImplementationOnce(
+      () => new Promise<string | null>((resolve) => { resolveSelect = resolve; }),
+    );
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = within(audioPanel());
+
+    fireEvent.click(panel.getByRole('button', { name: '选择音频' }));
+    fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+      dataTransfer: { files: [new File(['audio'], 'new-drop.wav')] },
+    });
+    expect(await panel.findByText('new-drop.wav')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSelect('G:\\recordings\\stale-dialog.mp3');
+    });
+    expect(panel.getByText('new-drop.wav')).toBeInTheDocument();
+    expect(panel.queryByText('stale-dialog.mp3')).not.toBeInTheDocument();
+  });
+
+  test('audio drop 慢授权不能覆盖移除，并正确释放 selecting 状态', async () => {
+    let resolveDrop!: (path: string) => void;
+    smo.files.authorizeDroppedAudio.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveDrop = resolve; }),
+    );
+    await renderLoadedAudio('G:\\recordings\\original.mp3', 8);
+    const panel = within(audioPanel());
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['audio'], 'slow.mp3')] },
+    });
+    expect(dropzone).toHaveAttribute('aria-busy', 'true');
+    expect(panel.getByRole('button', { name: '正在选择…' })).toBeDisabled();
+    fireEvent.click(panel.getByRole('button', { name: '移除音频' }));
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveDrop('G:\\dropped\\slow.mp3');
+    });
+    expect(panel.queryByText('slow.mp3')).not.toBeInTheDocument();
+    expect(panel.queryByLabelText('所选音频')).not.toBeInTheDocument();
+    expect(dropzone).toHaveAttribute('aria-busy', 'false');
+    expect(panel.getByRole('button', { name: '选择音频' })).toBeEnabled();
+  });
+
+  test('audio drop 生成中禁止替换当前音频', async () => {
+    let resolveStart!: (value: { id: string }) => void;
+    smo.jobs.start.mockImplementationOnce(
+      () => new Promise<{ id: string }>((resolve) => { resolveStart = resolve; }),
+    );
+    await renderLoadedAudio('G:\\recordings\\generating.mp3', 8);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '生成期间保持当前音频' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    const dropzone = panel.getByRole('group', { name: '音频拖放区' });
+    expect(dropzone).toHaveAttribute('aria-disabled', 'true');
+    expect(panel.getByRole('button', { name: '选择音频' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '移除音频' })).toBeDisabled();
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['audio'], 'replacement.mp3')] },
+    });
+    expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    expect(panel.getByText('generating.mp3')).toBeInTheDocument();
+    expect(panel.queryByText('replacement.mp3')).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveStart({ id: 'audio-drop-generation' });
+    });
+  });
+
+  test('audio drop 全局 busy 禁止替换当前音频', async () => {
+    const audioPath = 'G:\\recordings\\busy-original.mp3';
+    smo.files.selectAudio.mockResolvedValue(audioPath);
+    const form = (
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+      />
+    );
+    const view = render(form);
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    const audio = await screen.findByLabelText('所选音频');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(audio);
+
+    view.rerender(
+      <AudioDigitalHumanForm
+        avatarId={avatar.id}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        busy
+      />,
+    );
+    const dropzone = screen.getByRole('group', { name: '音频拖放区' });
+    expect(dropzone).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.dragOver(dropzone, { dataTransfer: { files: [] } });
+    expect(dropzone).not.toHaveAttribute('data-drop-active');
+    fireEvent.drop(dropzone, {
+      dataTransfer: { files: [new File(['audio'], 'busy-replacement.mp3')] },
+    });
+
+    expect(smo.files.authorizeDroppedAudio).not.toHaveBeenCalled();
+    expect(screen.getByText('busy-original.mp3')).toBeInTheDocument();
+    expect(screen.queryByText('busy-replacement.mp3')).not.toBeInTheDocument();
+  });
+
+  test('重复选择同一音频会重新读取时长、忽略旧 metadata 并可润色', async () => {
+    const audioPath = 'G:\\recordings\\repeat-select.mp3';
+    smo.llm.polish.mockResolvedValue({
+      text: '重复选择后的润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+    const firstAudio = panel.getByLabelText('所选音频');
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '重复选择后仍能润色' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '5' } });
+
+    fireEvent.click(panel.getByRole('button', { name: '选择音频' }));
+    await waitFor(() => expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0));
+    expect(panel.getByLabelText('起始截取（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：12.50 秒')).not.toBeInTheDocument();
+    const secondAudio = await panel.findByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+
+    Object.defineProperty(firstAudio, 'duration', { configurable: true, value: 99 });
+    fireEvent.loadedMetadata(firstAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：99.00 秒')).not.toBeInTheDocument();
+
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 6.25 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6.25);
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '重复选择后的润色结果',
+    );
+    expect(smo.llm.polish).toHaveBeenCalledWith(
+      expect.objectContaining({ text: '重复选择后仍能润色', duration: 6.25 }),
+    );
+  });
+
+  test('重复拖入同一音频会重新读取时长、忽略旧 metadata 并可生成', async () => {
+    const audioPath = 'G:\\recordings\\repeat-drop.mp3';
+    await renderLoadedAudio(audioPath, 9);
+    const panel = within(audioPanel());
+    const firstAudio = panel.getByLabelText('所选音频');
+    smo.files.authorizeDroppedAudio.mockResolvedValue(audioPath);
+
+    fireEvent.drop(panel.getByRole('group', { name: '音频拖放区' }), {
+      dataTransfer: {
+        files: [new File(['audio'], 'repeat-drop.mp3', { type: 'audio/mpeg' })],
+      },
+    });
+    await waitFor(() => expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0));
+    const secondAudio = await panel.findByLabelText('所选音频');
+    expect(secondAudio).not.toBe(firstAudio);
+
+    Object.defineProperty(firstAudio, 'duration', { configurable: true, value: 88 });
+    fireEvent.loadedMetadata(firstAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(0);
+    expect(panel.queryByText('音频时长：88.00 秒')).not.toBeInTheDocument();
+
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 5.5 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(5.5);
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '重复拖入后仍能生成' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'audio',
+        audioPath,
+        prompt: '重复拖入后仍能生成',
+        trimStart: 0,
+        duration: 5.5,
+      }),
+    );
+  });
+
+  test('polishes the actual clip without media payloads and generates the edited result once', async () => {
+    const audioPath = 'G:\\recordings\\polish.mp3';
+    smo.llm.polish.mockResolvedValue({
+      text: '润色后的音频数字人镜头',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('h3-prompt-writing');
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '自然说话，轻微点头' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1.25' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '润色后的音频数字人镜头',
+    );
+    expect(smo.llm.polish).toHaveBeenCalledWith({
+      text: '自然说话，轻微点头',
+      duration: 6,
+      imageCount: 1,
+      mode: 'ref2va',
+      referenceLabels: ['<Picture 1>', '<Audio 1>'],
+      skill: 'h3-prompt-writing',
+    });
+    const polishRequest = smo.llm.polish.mock.calls[0][0];
+    expect(polishRequest).not.toHaveProperty('audioPath');
+    expect(JSON.stringify(polishRequest)).not.toContain(audioPath);
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+
+    fireEvent.change(panel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '用户确认的音频数字人镜头' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'audio',
+      avatarId: avatar.id,
+      prompt: '用户确认的音频数字人镜头',
+      audioPath,
+      trimStart: 1.25,
+      duration: 6,
+      seed: 42,
+      steps: 6,
+    });
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps the original audio draft and options after a polish failure', async () => {
+    const audioPath = 'G:\\recordings\\polish-failure.mp3';
+    smo.llm.polish.mockRejectedValue(new Error('LLM 暂时不可用'));
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '失败后保留的原文' },
+    });
+    fireEvent.change(panel.getByLabelText('视频风格（Skill）'), {
+      target: { value: 'auto' },
+    });
+    fireEvent.change(panel.getByLabelText('H3 模型'), { target: { value: 'bf16' } });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1.25' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.change(panel.getByRole('spinbutton', { name: '随机种子' }), {
+      target: { value: '7' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('LLM 暂时不可用');
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('失败后保留的原文');
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByText('polish-failure.mp3')).toBeInTheDocument();
+    expect(panel.getByLabelText('所选音频')).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(audioPath)}`,
+    );
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('auto');
+    expect(panel.getByLabelText('H3 模型')).toHaveValue('bf16');
+    expect(panel.getByLabelText('起始截取（秒）')).toHaveValue(1.25);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6);
+    expect(panel.getByRole('spinbutton', { name: '随机种子' })).toHaveValue(7);
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt: '失败后保留的原文', mode: 'audio' }),
+      ),
+    );
+  });
+
+  test('keeps audio prompt drafts and the selected clip when switching modules', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '跨模块保留的润色草稿',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio('G:\\recordings\\draft.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '跨模块保留的原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '跨模块保留的润色草稿',
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    expect(panel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '跨模块保留的润色草稿',
+    );
+
+    for (const moduleName of ['数字模特', '我的作品', '设置']) {
+      fireEvent.click(screen.getByRole('button', { name: moduleName }));
+      fireEvent.click(studioModeButton('视频'));
+      expect(panel.getByRole('textbox', { name: '润色结果' })).toHaveValue(
+        '跨模块保留的润色草稿',
+      );
+      expect(panel.getByText('draft.mp3')).toBeInTheDocument();
+    }
+
+    fireEvent.click(panel.getByRole('tab', { name: '原文' }));
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('跨模块保留的原文');
+  });
+
+  test('rejects an invalid actual audio trim before polishing', async () => {
+    await renderLoadedAudio('G:\\recordings\\invalid-polish-trim.mp3', 5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '不能绕过时长校验' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '4' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '2' } });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent(
+      '截取范围不能超出实际音频时长',
+    );
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { label: '动作/画面提示词', value: 'pending 后修改的原文' },
+    { label: '起始截取（秒）', value: '2' },
+    { label: '截取时长（秒）', value: '5' },
+  ])('discards a stale polish response after changing $label', async ({ label, value }) => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\stale-context.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '发起润色时的原文' },
+    });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    fireEvent.change(panel.getByLabelText(label), { target: { value } });
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '不应覆盖新草稿的旧润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByRole('textbox', { name: '润色结果' })).not.toBeInTheDocument();
+    expect(panel.getByLabelText(label)).toHaveValue(
+      label === '动作/画面提示词' ? value : Number(value),
+    );
+  });
+
+  test('discards a stale polish response after changing Skill', async () => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\stale-skill.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: 'Skill 竞态原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(smo.llm.polish).toHaveBeenCalledWith(
+      expect.objectContaining({ skill: 'h3-prompt-writing' }),
+    );
+    fireEvent.change(panel.getByLabelText('视频风格（Skill）'), {
+      target: { value: 'auto' },
+    });
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '不应被接受的旧 Skill 结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('auto');
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.queryByRole('textbox', { name: '润色结果' })).not.toBeInTheDocument();
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('Skill 竞态原文');
+  });
+
+  test('invalidates an old request when audio changes and only applies the newest polish', async () => {
+    const resolvers: Array<(value: PolishResult) => void> = [];
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\first-pending.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '连续润色的原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(smo.llm.polish).toHaveBeenCalledTimes(1);
+
+    smo.files.selectAudio.mockResolvedValueOnce('G:\\recordings\\second-pending.mp3');
+    fireEvent.click(panel.getByRole('button', { name: '选择音频' }));
+    expect(await panel.findByText('second-pending.mp3')).toBeInTheDocument();
+    const secondAudio = await panel.findByLabelText('所选音频');
+    Object.defineProperty(secondAudio, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(secondAudio);
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(smo.llm.polish).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolvers[0]({
+        text: '第一个音频的过期结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(panel.getByRole('tab', { name: '原文' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(panel.getByRole('tab', { name: '润色结果' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '正在润色…' })).toBeDisabled();
+
+    await act(async () => {
+      resolvers[1]({
+        text: '第二个音频的最新结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toHaveValue(
+      '第二个音频的最新结果',
+    );
+  });
+
+  test('blocks generation entry while a polish request is pending', async () => {
+    let resolvePolish: ((value: PolishResult) => void) | undefined;
+    smo.llm.polish.mockImplementation(
+      () =>
+        new Promise<PolishResult>((resolve) => {
+          resolvePolish = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\polish-exclusive.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '润色期间不能生成' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+
+    const generateButton = panel.getByRole('button', { name: '生成视频' });
+    expect(generateButton).toBeDisabled();
+    fireEvent.submit(generateButton.closest('form') as HTMLFormElement);
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePolish?.({
+        text: '互斥测试润色结果',
+        skill: 'h3-prompt-writing',
+        mode: 'ref2va',
+        attempts: 1,
+      });
+    });
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toBeInTheDocument();
+  });
+
+  test('blocks polish entry while generation is pending', async () => {
+    let resolveStart: ((value: { id: string }) => void) | undefined;
+    smo.jobs.start.mockImplementation(
+      () =>
+        new Promise<{ id: string }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    await renderLoadedAudio('G:\\recordings\\generation-exclusive.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '生成期间不能润色' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+    const polishButton = panel.getByRole('button', { name: 'AI 润色' });
+    expect(polishButton).toBeDisabled();
+    fireEvent.click(polishButton);
+    expect(smo.llm.polish).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveStart?.({ id: 'exclusive-job' });
+    });
+    expect(panel.getByRole('button', { name: 'AI 润色' })).toBeEnabled();
+  });
+
+  test('supports keyboard tabs and returns to original when polished text is cleared', async () => {
+    smo.llm.polish.mockResolvedValue({
+      text: '可键盘切换的润色结果',
+      skill: 'h3-prompt-writing',
+      mode: 'ref2va',
+      attempts: 1,
+    });
+    await renderLoadedAudio('G:\\recordings\\keyboard-tabs.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '键盘 tabs 原文' },
+    });
+    fireEvent.click(panel.getByRole('button', { name: 'AI 润色' }));
+    expect(await panel.findByRole('textbox', { name: '润色结果' })).toBeInTheDocument();
+    const originalTab = panel.getByRole('tab', { name: '原文' });
+    const polishedTab = panel.getByRole('tab', { name: '润色结果' });
+
+    fireEvent.click(originalTab);
+    expect(originalTab).toHaveAttribute('tabindex', '0');
+    expect(polishedTab).toHaveAttribute('tabindex', '-1');
+    fireEvent.keyDown(originalTab, { key: 'ArrowRight' });
+    expect(polishedTab).toHaveFocus();
+    expect(polishedTab).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(polishedTab, { key: 'ArrowRight' });
+    expect(originalTab).toHaveFocus();
+    fireEvent.keyDown(originalTab, { key: 'ArrowLeft' });
+    expect(polishedTab).toHaveFocus();
+    fireEvent.keyDown(polishedTab, { key: 'Home' });
+    expect(originalTab).toHaveFocus();
+    fireEvent.keyDown(originalTab, { key: 'End' });
+    expect(polishedTab).toHaveFocus();
+    expect(polishedTab).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.change(panel.getByRole('textbox', { name: '润色结果' }), {
+      target: { value: '' },
+    });
+    expect(originalTab).toHaveAttribute('aria-selected', 'true');
+    expect(originalTab).toHaveAttribute('tabindex', '0');
+    expect(originalTab).toHaveFocus();
+    expect(polishedTab).toBeDisabled();
+    expect(polishedTab).toHaveAttribute('tabindex', '-1');
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('键盘 tabs 原文');
+  });
+
+  test('跨表单 audio pending 同步阻止 text 生成并在结束后恢复', async () => {
+    const pending = deferred<{ id: string }>();
+    await renderLoadedAudio('G:\\recordings\\shared-audio-pending.mp3', 8);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '先执行的 audio 任务' },
+    });
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '等待 audio 完成的 text 任务' },
+    });
+    const textForm = textVideoField('原始文字').closest('form') as HTMLFormElement;
+    smo.jobs.start.mockImplementationOnce(() => pending.promise);
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    fireEvent.submit(textForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    for (const name of ['文生视频', '图片生视频', '音频数字人']) {
+      expect(screen.getByRole('tab', { name })).toBeDisabled();
+    }
+
+    await act(async () => {
+      pending.resolve({ id: 'shared-audio-job' });
+      await pending.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '文生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(textForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
+  });
+
+  test('handoff 同步失败后保持 pending，后续 revision 成功才释放', async () => {
+    const retry = deferred<{ activeId: string | null }>();
+    await renderLoadedAudio('G:\\recordings\\handoff-retry.mp3', 8);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '首次状态同步失败的 audio 任务' },
+    });
+    fireEvent.change(textVideoField('原始文字'), {
+      target: { value: '等待后续 revision 的 text 任务' },
+    });
+    const textForm = textVideoField('原始文字').closest('form') as HTMLFormElement;
+    smo.jobs.getState.mockReset();
+    smo.jobs.getState
+      .mockRejectedValueOnce(new Error('首次状态同步失败'))
+      .mockImplementationOnce(() => retry.promise)
+      .mockResolvedValue({ activeId: null });
+
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+    fireEvent.submit(textForm);
+
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('tab', { name: '文生视频' })).toBeDisabled();
+
+    await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(2), {
+      timeout: 3_000,
+    });
+    fireEvent.submit(textForm);
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+    expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      retry.resolve({ activeId: null });
+      await retry.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: '文生视频' })).toBeEnabled(),
+    );
+    fireEvent.submit(textForm);
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(2));
+  });
+
+  test('starts only one job for repeated generation clicks', async () => {
+    await renderLoadedAudio('G:\\recordings\\duplicate-generation.mp3', 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '重复点击只生成一次' },
+    });
+    const generateButton = panel.getByRole('button', { name: '生成视频' });
+
+    act(() => {
+      fireEvent.click(generateButton);
+      fireEvent.click(generateButton);
+    });
+
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+    expect(smo.hardware.apply).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps audio, original text, and options when generation fails', async () => {
+    const audioPath = 'G:\\recordings\\generation-failure.mp3';
+    smo.jobs.start.mockRejectedValue(new Error('生成服务不可用'));
+    await renderLoadedAudio(audioPath, 12.5);
+    const panel = within(audioPanel());
+    fireEvent.change(panel.getByLabelText('动作/画面提示词'), {
+      target: { value: '生成失败后保留原文' },
+    });
+    fireEvent.change(panel.getByLabelText('视频风格（Skill）'), {
+      target: { value: 'auto' },
+    });
+    fireEvent.change(panel.getByLabelText('H3 模型'), { target: { value: 'bf16' } });
+    fireEvent.change(panel.getByLabelText('起始截取（秒）'), { target: { value: '1.25' } });
+    fireEvent.change(panel.getByLabelText('截取时长（秒）'), { target: { value: '6' } });
+    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('生成服务不可用');
+    expect(panel.getByLabelText('动作/画面提示词')).toHaveValue('生成失败后保留原文');
+    expect(panel.getByText('generation-failure.mp3')).toBeInTheDocument();
+    expect(panel.getByLabelText('所选音频')).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(audioPath)}`,
+    );
+    expect(panel.getByLabelText('视频风格（Skill）')).toHaveValue('auto');
+    expect(panel.getByLabelText('H3 模型')).toHaveValue('bf16');
+    expect(panel.getByLabelText('起始截取（秒）')).toHaveValue(1.25);
+    expect(panel.getByLabelText('截取时长（秒）')).toHaveValue(6);
+    expect(panel.getByRole('button', { name: '生成视频' })).toBeEnabled();
+  });
 
   test.each([
     { scenario: 'blank', trimStart: '' },
@@ -654,6 +3835,52 @@ describe('audio digital human studio', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('截取范围不能超出实际音频时长');
     expect(smo.jobs.start).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { scenario: 'duration 0.001', trimStart: '0', clipDuration: '0.001' },
+    { scenario: 'duration 0.011 off step', trimStart: '0', clipDuration: '0.011' },
+    { scenario: 'trimStart 0.001', trimStart: '0.001', clipDuration: '6' },
+  ])('rejects $scenario without submitting', async ({ trimStart, clipDuration }) => {
+    await renderLoadedAudio('G:\\recordings\\step-precision.mp3', 12.5);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '保留音频百分秒步进约束' },
+    });
+    fireEvent.change(screen.getByLabelText('起始截取（秒）'), {
+      target: { value: trimStart },
+    });
+    fireEvent.change(screen.getByLabelText('截取时长（秒）'), {
+      target: { value: clipDuration },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+    });
+
+    expect(smo.jobs.start).not.toHaveBeenCalled();
+    expect(smo.hardware.apply).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/截取|时长/);
+  });
+
+  test('accepts hundredth-aligned audio values with floating-point epsilon', async () => {
+    await renderLoadedAudio('G:\\recordings\\floating-step.mp3', 12.5);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '合法百分秒浮点值' },
+    });
+    fireEvent.change(screen.getByLabelText('起始截取（秒）'), {
+      target: { value: '0.07' },
+    });
+    fireEvent.change(screen.getByLabelText('截取时长（秒）'), {
+      target: { value: '0.29' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    await waitFor(() =>
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ trimStart: 0.07, duration: 0.29 }),
+      ),
+    );
   });
 
   test('uses the remaining audio seconds when the clip duration is blank', async () => {
@@ -761,7 +3988,7 @@ describe('audio digital human studio', () => {
         trimStart: 1.25,
         duration: 6,
         seed: 7,
-        subtitles: false,
+        steps: 6,
       }),
     );
     await waitFor(() =>
@@ -825,7 +4052,7 @@ describe('audio digital human studio', () => {
     try {
       expect(pauseSpy).not.toHaveBeenCalled();
 
-      fireEvent.click(screen.getByRole('tab', { name: '文字生视频' }));
+      fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
 
       expect(pauseSpy).toHaveBeenCalled();
     } finally {
@@ -834,12 +4061,204 @@ describe('audio digital human studio', () => {
   });
 });
 
-describe('generation options and hardware apply', () => {
-  function textPanel(): HTMLElement {
-    return screen.getByRole('tabpanel', { name: '文字生视频' });
+describe('采样步数与 busy', () => {
+  type Mode = 'text' | 'audio';
+
+  function panelFor(mode: Mode): HTMLElement {
+    return screen.getByRole('tabpanel', {
+      name: mode === 'text' ? '文生视频' : '音频数字人',
+    });
   }
 
-  test('shows Chinese skill titles without raw English ids and explains the selection', async () => {
+  async function prepareGeneration(mode: Mode) {
+    if (mode === 'audio') {
+      smo.files.selectAudio.mockResolvedValue('G:\\recordings\\steps.mp3');
+      await renderStudio();
+      fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+      fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+      const audio = await screen.findByLabelText('所选音频');
+      Object.defineProperty(audio, 'duration', { configurable: true, value: 12 });
+      fireEvent.loadedMetadata(audio);
+      fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+        target: { value: '自然说话并轻微点头' },
+      });
+    } else {
+      await renderStudio();
+      fireEvent.change(textVideoField('原始文字'), {
+        target: { value: '主播转身并挥手' },
+      });
+    }
+    return within(panelFor(mode));
+  }
+
+  test.each([
+    { mode: 'text' as const, defaultSteps: 8 },
+    { mode: 'audio' as const, defaultSteps: 6 },
+  ])('$mode 表单步数支持从默认值逐次增加和减少', async ({ mode, defaultSteps }) => {
+    const panel = await prepareGeneration(mode);
+    const input = panel.getByRole('spinbutton', { name: '采样步数' });
+
+    expect(input).toHaveValue(defaultSteps);
+    fireEvent.click(panel.getByRole('button', { name: '增加步数' }));
+    expect(input).toHaveValue(defaultSteps + 1);
+    expect(panel.getByText('高于推荐值会增加耗时')).toBeInTheDocument();
+
+    fireEvent.click(panel.getByRole('button', { name: '减少步数' }));
+    expect(input).toHaveValue(defaultSteps);
+    expect(panel.queryByText('高于推荐值会增加耗时')).not.toBeInTheDocument();
+    fireEvent.click(panel.getByRole('button', { name: '减少步数' }));
+    expect(input).toHaveValue(defaultSteps - 1);
+  });
+
+  test('步数清空为 NaN 时禁用加减按钮', async () => {
+    const panel = await prepareGeneration('text');
+    fireEvent.change(panel.getByRole('spinbutton', { name: '采样步数' }), {
+      target: { value: '' },
+    });
+
+    expect(panel.getByRole('button', { name: '减少步数' })).toBeDisabled();
+    expect(panel.getByRole('button', { name: '增加步数' })).toBeDisabled();
+  });
+
+  test('步数推荐和耗时提示使用 aria-live polite', async () => {
+    const panel = await prepareGeneration('text');
+    const hint = document.getElementById('text-steps-hint');
+    expect(hint).toHaveAttribute('aria-live', 'polite');
+
+    fireEvent.click(panel.getByRole('button', { name: '增加步数' }));
+    expect(hint).toHaveTextContent('高于推荐值会增加耗时');
+  });
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单提交直接输入的 12 步',
+    async (mode) => {
+      const panel = await prepareGeneration(mode);
+      fireEvent.change(panel.getByRole('spinbutton', { name: '采样步数' }), {
+        target: { value: '12' },
+      });
+      fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+      await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+      expect(smo.jobs.start).toHaveBeenCalledWith(
+        expect.objectContaining({ mode, steps: 12 }),
+      );
+    },
+  );
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单步数为 0、101 或小数时显示中文错误且不提交',
+    async (mode) => {
+      const panel = await prepareGeneration(mode);
+      const input = panel.getByRole('spinbutton', { name: '采样步数' });
+
+      for (const value of [0, 101, 1.5]) {
+        fireEvent.change(input, { target: { value: String(value) } });
+        fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+
+        expect(await panel.findByRole('alert')).toHaveTextContent(
+          /采样步数.*1.*100.*整数/,
+        );
+        expect(smo.hardware.apply).not.toHaveBeenCalled();
+        expect(smo.jobs.start).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单生成中不能修改步数',
+    async (mode) => {
+      let resolveStart: ((value: { id: string }) => void) | undefined;
+      smo.jobs.start.mockImplementation(
+        () =>
+          new Promise<{ id: string }>((resolve) => {
+            resolveStart = resolve;
+          }),
+      );
+      const panel = await prepareGeneration(mode);
+      fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
+      await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledTimes(1));
+
+      expect(panel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+      expect(panel.getByRole('button', { name: '减少步数' })).toBeDisabled();
+      expect(panel.getByRole('button', { name: '增加步数' })).toBeDisabled();
+
+      await act(async () => {
+        resolveStart?.({ id: `${mode}-steps-job` });
+      });
+    },
+  );
+
+  test.each(['text', 'audio'] as const)(
+    '%s 表单在 jobs:start 成功后立即刷新 busy',
+    async (mode) => {
+      smo.jobs.getState
+        .mockResolvedValueOnce({ activeId: null })
+        .mockResolvedValue({ activeId: 'job-1' });
+      const panel = await prepareGeneration(mode);
+      await waitFor(() => expect(smo.jobs.getState).toHaveBeenCalledTimes(1));
+      vi.useFakeTimers();
+      const generateButton = panel.getByRole('button', { name: '生成视频' });
+
+      await act(async () => {
+        fireEvent.click(generateButton);
+      });
+
+      expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+      expect(smo.jobs.getState).toHaveBeenCalledTimes(2);
+      expect(generateButton).toBeDisabled();
+    },
+  );
+
+  test('图片生视频与现有表单全局 busy 禁用操作但保留纯文本草稿', async () => {
+    smo.jobs.getState.mockResolvedValue({ activeId: 'existing-job' });
+    await renderStudio();
+    const textPanel = within(panelFor('text'));
+
+    await waitFor(() =>
+      expect(textPanel.getByRole('button', { name: '生成视频' })).toBeDisabled(),
+    );
+    expect(textPanel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(textPanel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+    fireEvent.change(textPanel.getByLabelText('原始文字'), {
+      target: { value: 'busy 时仍能编辑文字草稿' },
+    });
+    expect(textPanel.getByLabelText('原始文字')).toHaveValue('busy 时仍能编辑文字草稿');
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const referencePanel = within(screen.getByRole('tabpanel', { name: '图片生视频' }));
+    expect(referencePanel.getByRole('button', { name: '生成视频' })).toBeDisabled();
+    expect(referencePanel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(referencePanel.getByRole('button', { name: '选择参考图' })).toBeDisabled();
+    expect(referencePanel.getByRole('button', { name: '使用当前模特' })).toBeDisabled();
+    expect(referencePanel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+    fireEvent.change(referencePanel.getByLabelText('原始文字'), {
+      target: { value: 'busy 时仍能编辑参考草稿' },
+    });
+    expect(referencePanel.getByLabelText('原始文字')).toHaveValue(
+      'busy 时仍能编辑参考草稿',
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const audioPanel = within(panelFor('audio'));
+    expect(audioPanel.getByRole('button', { name: '生成视频' })).toBeDisabled();
+    expect(audioPanel.getByRole('button', { name: 'AI 润色' })).toBeDisabled();
+    expect(audioPanel.getByRole('button', { name: '选择音频' })).toBeDisabled();
+    expect(audioPanel.getByRole('spinbutton', { name: '采样步数' })).toBeDisabled();
+    fireEvent.change(audioPanel.getByLabelText('动作/画面提示词'), {
+      target: { value: 'busy 时仍能编辑音频草稿' },
+    });
+    expect(audioPanel.getByLabelText('动作/画面提示词')).toHaveValue(
+      'busy 时仍能编辑音频草稿',
+    );
+  });
+});
+
+describe('generation options and hardware apply', () => {
+  function textPanel(): HTMLElement {
+    return screen.getByRole('tabpanel', { name: '文生视频' });
+  }
+
+  test('defaults to general video writing while keeping auto selection available', async () => {
     await renderStudio();
     const panel = within(textPanel());
     const select = panel.getByLabelText('视频风格（Skill）');
@@ -852,15 +4271,17 @@ describe('generation options and hardware apply', () => {
     }
     expect(options).toHaveLength(SKILL_NAMES.length + 1);
 
-    expect(panel.getByText(AUTO_SKILL_OPTION.description)).toBeInTheDocument();
-
-    fireEvent.change(select, { target: { value: 'h3-prompt-writing' } });
+    expect(select).toHaveValue('h3-prompt-writing');
     expect(
       panel.getByText(SKILL_OPTIONS['h3-prompt-writing'].description),
     ).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: 'auto' } });
+    expect(select).toHaveValue('auto');
+    expect(panel.getByText(AUTO_SKILL_OPTION.description)).toBeInTheDocument();
   });
 
-  test('renders H3 model, aspect ratio, resolution, and subtitle controls with INT8 defaults', async () => {
+  test('renders H3 model, aspect ratio, and resolution controls without subtitles', async () => {
     await renderStudio();
     const panel = within(textPanel());
 
@@ -873,7 +4294,8 @@ describe('generation options and hardware apply', () => {
       within(resolution).getByRole('option', { name: '1152 × 640 px' }),
     ).toBeInTheDocument();
     expect(panel.queryByText(/0\.\dMP/)).not.toBeInTheDocument();
-    expect(panel.getByLabelText('生成画面内字幕')).not.toBeChecked();
+    expect(panel.queryByLabelText('生成画面内字幕')).not.toBeInTheDocument();
+    expect(panel.queryByText('在画面安全区内显示字幕')).not.toBeInTheDocument();
   });
 
   test('updates the resolution pixel labels when the aspect ratio changes', async () => {
@@ -925,9 +4347,15 @@ describe('generation options and hardware apply', () => {
     const [applyOrder] = smo.hardware.apply.mock.invocationCallOrder;
     const [startOrder] = smo.jobs.start.mock.invocationCallOrder;
     expect(applyOrder).toBeLessThan(startOrder);
-    expect(smo.jobs.start).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: '默认选项直接生成', subtitles: false }),
-    );
+    expect(smo.jobs.start).toHaveBeenCalledWith({
+      mode: 'text',
+      avatarId: null,
+      prompt: '默认选项直接生成',
+      duration: 8,
+      seed: 42,
+      steps: 8,
+      referenceImagePaths: [],
+    });
   });
 
   test('maps BF16, aspect ratio, and resolution choices onto the hardware profile', async () => {
@@ -961,23 +4389,6 @@ describe('generation options and hardware apply', () => {
     });
   });
 
-  test('sends subtitles: true when the subtitle option is enabled', async () => {
-    await renderStudio();
-    const panel = within(textPanel());
-    fireEvent.change(panel.getByLabelText('原始文字'), {
-      target: { value: '需要同步字幕' },
-    });
-    fireEvent.click(panel.getByLabelText('生成画面内字幕'));
-    expect(panel.getByLabelText('生成画面内字幕')).toBeChecked();
-
-    fireEvent.click(panel.getByRole('button', { name: '生成视频' }));
-
-    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalled());
-    expect(smo.jobs.start).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: '需要同步字幕', subtitles: true }),
-    );
-  });
-
   test('shows the apply error and skips jobs.start when hardware apply fails', async () => {
     smo.hardware.apply.mockRejectedValue(new Error('模型目录不存在'));
     await renderStudio();
@@ -997,12 +4408,12 @@ describe('generation options and hardware apply', () => {
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(await screen.findByRole('button', { name: '检测硬件' }));
     expect(await screen.findByText('NVIDIA GeForce RTX 5080')).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole('button', { name: '获取推荐' }));
+    expect(await screen.findByText('均衡模式')).toBeInTheDocument();
     const directoryInput = await screen.findByLabelText('模型目录');
     fireEvent.change(directoryInput, { target: { value: 'D:\\自定义模型目录' } });
 
-    fireEvent.click(screen.getByRole('button', { name: '制作台' }));
-    const panel = within(screen.getByRole('tabpanel', { name: '文字生视频' }));
+    fireEvent.click(studioModeButton('视频'));
+    const panel = within(screen.getByRole('tabpanel', { name: '文生视频' }));
     fireEvent.change(panel.getByLabelText('原始文字'), {
       target: { value: '共享目录后的生成' },
     });
@@ -1016,6 +4427,62 @@ describe('generation options and hardware apply', () => {
 });
 
 describe('works and settings', () => {
+  test('renders speech, image, and video 作品 with accessible media elements', async () => {
+    const speechPath = 'G:\\output\\speech.wav';
+    const imagePath = 'G:\\output\\image.webp';
+    const videoPath = 'G:\\output\\video.mp4';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'speech-work',
+        avatarId: null,
+        mode: 'speech',
+        status: 'done',
+        outputPath: speechPath,
+      }),
+      createWork({
+        id: 'image-work',
+        avatarId: null,
+        mode: 'image',
+        status: 'done',
+        outputPath: imagePath,
+      }),
+      createWork({ id: 'video-work', status: 'done', outputPath: videoPath }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    const audio = await screen.findByLabelText('作品语音 speech-work');
+    const image = await screen.findByRole('img', { name: '作品图像 image-work' });
+    const video = await screen.findByLabelText('作品视频 video-work');
+    expect(audio.tagName).toBe('AUDIO');
+    expect(audio).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(speechPath)}`,
+    );
+    expect(image).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(imagePath)}`,
+    );
+    expect(video.tagName).toBe('VIDEO');
+    expect(video).toHaveAttribute(
+      'src',
+      `smo-media://media/${encodeURIComponent(videoPath)}`,
+    );
+  });
+
+  test('uses speech and image 作品 fallback titles without an unknown avatar', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'speech-work', avatarId: null, mode: 'speech' }),
+      createWork({ id: 'image-work', avatarId: null, mode: 'image' }),
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    expect(await screen.findByRole('heading', { name: '语音作品' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '图像作品' })).toBeInTheDocument();
+    expect(screen.queryByText('未知模特')).not.toBeInTheDocument();
+  });
+
   test('lists real works, plays completed output through controlled media, and shows errors', async () => {
     const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
     smo.works.list.mockResolvedValue([
@@ -1176,6 +4643,28 @@ describe('works and settings', () => {
   });
 });
 
+describe('settings page app version', () => {
+  test('shows the Electron package version in the settings footer', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(
+      await screen.findByText('SMO.H3 Studio · 版本 0.3.15-test'),
+    ).toBeInTheDocument();
+  });
+
+  test('shows an unknown version without disabling the rest of settings', async () => {
+    smo.app.getVersion.mockRejectedValue(new Error('version unavailable'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+
+    expect(
+      await screen.findByText('SMO.H3 Studio · 版本未知'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重新检测' })).toBeEnabled();
+  });
+});
+
 describe('settings page ComfyUI startup', () => {
   async function renderOfflineSettings() {
     smo.comfy.health.mockRejectedValueOnce(new Error('连接被拒绝'));
@@ -1245,6 +4734,39 @@ describe('settings page ComfyUI startup', () => {
 });
 
 describe('settings page LLM configuration', () => {
+  test('三脚猫在设置页获取并保存模型，不覆盖文字润色配置', async () => {
+    smo.sanmao.getProfile.mockResolvedValueOnce(null).mockResolvedValue({
+      baseUrl: 'https://claude.test',
+      model: 'claude-a',
+      keyStatus: 'valid',
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByText('未配置 LLM');
+
+    fireEvent.click(screen.getByRole('tab', { name: '三脚猫' }));
+    fireEvent.change(screen.getByLabelText('三脚猫服务地址'), {
+      target: { value: 'https://claude.test' },
+    });
+    fireEvent.change(screen.getByLabelText('三脚猫 API 密钥'), {
+      target: { value: 'sanmao-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '获取模型' }));
+
+    expect(await screen.findByRole('option', { name: 'claude-a' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('三脚猫模型'), {
+      target: { value: 'claude-a' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存三脚猫设置' }));
+
+    await waitFor(() => expect(smo.sanmao.saveProfile).toHaveBeenCalledWith({
+      baseUrl: 'https://claude.test',
+      model: 'claude-a',
+      apiKey: 'sanmao-key',
+    }));
+    expect(smo.llm.saveProfile).not.toHaveBeenCalled();
+  });
+
   test('saves the LLM profile and refreshes displayed values', async () => {
     smo.llm.getProfile.mockResolvedValue(null);
     smo.llm.saveProfile.mockResolvedValue(undefined);
@@ -1420,25 +4942,172 @@ describe('settings page LLM configuration', () => {
 });
 
 describe('works page actions', () => {
-  test('filters works by mode and status', async () => {
+  test('导入数字模特只出现在已完成的图像作品，并使用作品标题创建和选中', async () => {
+    const outputPath = 'G:\\SMO-H3-Data\\output\\SMO-Image\\poster.png';
+    const imported: Avatar = {
+      ...avatar,
+      id: 'avatar-imported',
+      name: '产品海报',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\imported.png',
+    };
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'image-done',
+        avatarId: null,
+        mode: 'image',
+        status: 'done',
+        outputPath,
+        title: '产品海报',
+      }),
+      createWork({ id: 'image-running', avatarId: null, mode: 'image', status: 'running' }),
+      createWork({
+        id: 'image-failed',
+        avatarId: null,
+        mode: 'image',
+        status: 'failed',
+        outputPath,
+      }),
+      createWork({ id: 'text-done', mode: 'text', status: 'done', outputPath: 'G:\\video.mp4' }),
+    ]);
+    smo.avatars.list.mockResolvedValueOnce([avatar]).mockResolvedValueOnce([avatar, imported]);
+    smo.avatars.create.mockResolvedValue(imported);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+
+    const doneCard = (await screen.findByText('image-done')).closest('article') as HTMLElement;
+    expect(within(doneCard).getByRole('button', { name: '导入数字模特' })).toBeInTheDocument();
+    for (const id of ['image-running', 'image-failed', 'text-done']) {
+      const card = screen.getByText(id).closest('article') as HTMLElement;
+      expect(within(card).queryByRole('button', { name: '导入数字模特' })).not.toBeInTheDocument();
+    }
+
+    fireEvent.click(within(doneCard).getByRole('button', { name: '导入数字模特' }));
+
+    expect(smo.avatars.create).toHaveBeenCalledWith({ name: '产品海报', photoPath: outputPath });
+    expect(await screen.findByRole('heading', { name: '数字模特' })).toBeInTheDocument();
+    const avatarList = screen.getByRole('region', { name: '模特列表' });
+    const importedCard = within(avatarList).getByRole('heading', { name: '产品海报' }).closest('article') as HTMLElement;
+    expect(within(importedCard).getByRole('button', { name: '当前模特' })).toBeDisabled();
+  });
+
+  test('导入无标题图像作品时使用短 ID 命名', async () => {
+    const id = '12345678-abcd-4000-8000-123456789abc';
+    const outputPath = 'G:\\SMO-H3-Data\\output\\SMO-Image\\untitled.png';
+    const imported: Avatar = {
+      ...avatar,
+      id: 'avatar-untitled',
+      name: '12345678',
+      photoPath: 'G:\\SMO-H3-Data\\avatars\\untitled.png',
+    };
+    smo.works.list.mockResolvedValue([
+      createWork({ id, avatarId: null, mode: 'image', status: 'done', outputPath, title: null }),
+    ]);
+    smo.avatars.list.mockResolvedValueOnce([avatar]).mockResolvedValueOnce([avatar, imported]);
+    smo.avatars.create.mockResolvedValue(imported);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    const card = (await screen.findByText(id)).closest('article') as HTMLElement;
+
+    fireEvent.click(within(card).getByRole('button', { name: '导入数字模特' }));
+
+    expect(smo.avatars.create).toHaveBeenCalledWith({ name: '12345678', photoPath: outputPath });
+    expect(await screen.findByRole('heading', { name: '12345678' })).toBeInTheDocument();
+  });
+
+  test('筛选按作品类型、视频子类型和状态组合，并同步 aria-pressed', async () => {
     smo.works.list.mockResolvedValue([
       createWork({ id: 'text-done', mode: 'text', status: 'done' }),
       createWork({ id: 'audio-failed', mode: 'audio', status: 'failed' }),
+      createWork({ id: 'speech-running', avatarId: null, mode: 'speech', status: 'running' }),
+      createWork({ id: 'image-done', avatarId: null, mode: 'image', status: 'done' }),
+      createWork({ id: 'text-pending', mode: 'text', status: 'pending' }),
     ]);
     render(<App />);
     fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
-    await screen.findByText('已完成（done）');
+    await screen.findByText('text-done');
 
-    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
-    expect(screen.getByText('失败（failed）')).toBeInTheDocument();
+    const workTypeFilters = screen.getByRole('group', { name: '作品类型' });
+    const statusFilters = screen.getByRole('group', { name: '作品状态' });
+    expect(within(workTypeFilters).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '全部',
+      '语音',
+      '图像',
+      '视频',
+    ]);
+    expect(within(statusFilters).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '全部状态',
+      '运行中',
+      '已完成',
+      '失败',
+    ]);
+    expect(screen.queryByRole('group', { name: '视频类型' })).not.toBeInTheDocument();
+    expect(within(statusFilters).queryByRole('button', { name: '等待中' })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '文字生视频' }));
-    expect(screen.queryByText('失败（failed）')).not.toBeInTheDocument();
-    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+    const expectPressedFilter = (group: HTMLElement, label: string) => {
+      for (const button of within(group).getAllByRole('button')) {
+        expect(button).toHaveAttribute(
+          'aria-pressed',
+          button.textContent === label ? 'true' : 'false',
+        );
+      }
+    };
+    expectPressedFilter(workTypeFilters, '全部');
+    expectPressedFilter(statusFilters, '全部状态');
 
-    fireEvent.click(screen.getByRole('button', { name: '失败' }));
-    expect(screen.queryByText('已完成（done）')).not.toBeInTheDocument();
-    expect(screen.getByText('失败（failed）')).toBeInTheDocument();
+    const expectWorkIds = (ids: string[]) => {
+      const actual = screen.queryAllByRole('article').map(
+        (card) => card.querySelector('.work-id')?.textContent,
+      );
+      expect(actual.sort()).toEqual([...ids].sort());
+    };
+    expectWorkIds(['text-done', 'audio-failed', 'speech-running', 'image-done', 'text-pending']);
+
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '视频' }));
+    const videoTypeFilters = screen.getByRole('group', { name: '视频类型' });
+    expect(within(videoTypeFilters).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '全部视频',
+      '文字生视频',
+      '音频数字人',
+    ]);
+    expectPressedFilter(workTypeFilters, '视频');
+    expectPressedFilter(videoTypeFilters, '全部视频');
+    expectWorkIds(['text-done', 'audio-failed', 'text-pending']);
+
+    fireEvent.click(within(videoTypeFilters).getByRole('button', { name: '文字生视频' }));
+    expectPressedFilter(videoTypeFilters, '文字生视频');
+    expectWorkIds(['text-done', 'text-pending']);
+
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '已完成' }));
+    expectPressedFilter(statusFilters, '已完成');
+    expectWorkIds(['text-done']);
+
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '失败' }));
+    expectWorkIds([]);
+
+    fireEvent.click(within(videoTypeFilters).getByRole('button', { name: '音频数字人' }));
+    expectPressedFilter(videoTypeFilters, '音频数字人');
+    expectWorkIds(['audio-failed']);
+
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '语音' }));
+    expectPressedFilter(workTypeFilters, '语音');
+    expect(screen.queryByRole('group', { name: '视频类型' })).not.toBeInTheDocument();
+    expectWorkIds([]);
+
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '运行中' }));
+    expectPressedFilter(statusFilters, '运行中');
+    expectWorkIds(['speech-running']);
+
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '图像' }));
+    expectWorkIds([]);
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '已完成' }));
+    expectWorkIds(['image-done']);
+
+    fireEvent.click(within(workTypeFilters).getByRole('button', { name: '全部' }));
+    expectWorkIds(['text-done', 'image-done']);
+    fireEvent.click(within(statusFilters).getByRole('button', { name: '全部状态' }));
+    expectPressedFilter(workTypeFilters, '全部');
+    expectPressedFilter(statusFilters, '全部状态');
+    expectWorkIds(['text-done', 'audio-failed', 'speech-running', 'image-done', 'text-pending']);
   });
 
   test('retries a failed work and refreshes the list', async () => {
@@ -1536,6 +5205,27 @@ describe('works deletion', () => {
     expect(smo.works.delete).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+  });
+
+  test('describes a no-avatar video naturally in the deletion dialog', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'no-avatar-work',
+        avatarId: null,
+        status: 'done',
+        outputPath,
+      }),
+    ]);
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除作品 no-avatar-work' }));
+
+    const dialog = screen.getByRole('dialog', { name: '删除作品' });
+    expect(dialog).toHaveTextContent(
+      '确定要删除无数字模特的作品“finished.mp4”吗？作品记录和视频文件将一起删除，此操作不可撤销。',
+    );
+    expect(dialog).not.toHaveTextContent('未知模特');
   });
 
   test('deletes a completed work after confirmation, closes the dialog, and refreshes', async () => {
@@ -1742,5 +5432,339 @@ describe('works deletion', () => {
     });
 
     expect(smo.works.list.mock.calls.length).toBe(listCallsBeforeDelete);
+  });
+});
+
+describe('works title and completion time', () => {
+  const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
+
+  async function openWorksPage() {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByRole('heading', { name: '我的作品' });
+  }
+
+  test('shows the custom title and falls back to the avatar name without one', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'titled-work', status: 'done', outputPath, title: '新品发布会' }),
+      createWork({ id: 'untitled-work', status: 'done', outputPath, title: null }),
+    ]);
+
+    await openWorksPage();
+
+    expect(await screen.findByRole('heading', { name: '新品发布会' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '薄荷主播' })).toBeInTheDocument();
+  });
+
+  test('distinguishes no avatar from a missing legacy avatar in video titles', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'no-avatar-work', avatarId: null }),
+      createWork({ id: 'legacy-work', avatarId: 'deleted-avatar' }),
+    ]);
+
+    await openWorksPage();
+
+    expect(await screen.findByRole('heading', { name: '无数字模特' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '未知模特' })).toBeInTheDocument();
+  });
+
+  test('shows the completion time and elapsed duration for a done work', async () => {
+    const completedAt = '2026-10-26T08:03:05.000Z';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'done-work',
+        status: 'done',
+        outputPath,
+        createdAt: '2026-10-26T08:00:00.000Z',
+        completedAt,
+      }),
+    ]);
+
+    await openWorksPage();
+
+    const header = await screen.findByText(/耗时/);
+    expect(header).toHaveTextContent(
+      `完成于 ${new Date(completedAt).toLocaleString('zh-CN')}`,
+    );
+    expect(header).toHaveTextContent('耗时 3 分 5 秒');
+  });
+
+  test('shows a seconds-only duration for quick generations', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'done-work',
+        status: 'done',
+        outputPath,
+        createdAt: '2026-10-26T08:00:00.000Z',
+        completedAt: '2026-10-26T08:00:30.000Z',
+      }),
+    ]);
+
+    await openWorksPage();
+
+    expect(await screen.findByText(/耗时 30 秒/)).toBeInTheDocument();
+  });
+
+  test('falls back to the last execution update for legacy done works', async () => {
+    const updatedAt = '2026-10-26T08:00:45.000Z';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'legacy-done',
+        status: 'done',
+        outputPath,
+        createdAt: '2026-10-26T08:00:00.000Z',
+        completedAt: null,
+        metadata: {
+          execution: { stage: 'finalizing', updatedAt, lastProgressAt: updatedAt },
+        },
+      }),
+    ]);
+
+    await openWorksPage();
+
+    const header = await screen.findByText(/耗时/);
+    expect(header).toHaveTextContent(
+      `完成于 ${new Date(updatedAt).toLocaleString('zh-CN')}`,
+    );
+    expect(header).toHaveTextContent('耗时 45 秒');
+  });
+
+  test('hides the completion time for legacy works without any timestamp', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'timeless-done',
+        status: 'done',
+        outputPath,
+        completedAt: null,
+        metadata: null,
+      }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByText('已完成（done）');
+
+    expect(screen.queryByText(/完成于/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/耗时/)).not.toBeInTheDocument();
+  });
+
+  test('never shows a completion duration for failed works', async () => {
+    const updatedAt = '2026-10-26T08:00:45.000Z';
+    smo.works.list.mockResolvedValue([
+      createWork({
+        id: 'failed-work',
+        status: 'failed',
+        error: 'ComfyUI offline',
+        completedAt: null,
+        metadata: {
+          execution: { stage: 'executing', updatedAt, lastProgressAt: updatedAt },
+        },
+      }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByText('ComfyUI offline');
+
+    expect(screen.queryByText(/完成于/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/耗时/)).not.toBeInTheDocument();
+  });
+});
+
+describe('works rename', () => {
+  const outputPath = 'G:\\H3Selflift整合包\\ComfyUI\\output\\finished.mp4';
+
+  async function openWorksPage() {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '我的作品' }));
+    await screen.findByRole('heading', { name: '我的作品' });
+  }
+
+  test('renames a work through the modal and refreshes the list', async () => {
+    smo.works.list
+      .mockResolvedValueOnce([
+        createWork({ id: 'done-work', status: 'done', outputPath }),
+      ])
+      .mockResolvedValue([
+        createWork({ id: 'done-work', status: 'done', outputPath, title: '新品发布会' }),
+      ]);
+    smo.works.rename.mockResolvedValue(
+      createWork({ id: 'done-work', status: 'done', outputPath, title: '新品发布会' }),
+    );
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    const input = within(dialog).getByLabelText('作品标题');
+    expect(input).toHaveValue('');
+    fireEvent.change(input, { target: { value: '  新品发布会  ' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    await waitFor(() =>
+      expect(smo.works.rename).toHaveBeenCalledWith({
+        id: 'done-work',
+        title: '  新品发布会  ',
+      }),
+    );
+    expect(await screen.findByRole('heading', { name: '新品发布会' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  test('prefills the current title in the rename modal', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath, title: '旧标题' }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '旧标题' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+
+    expect(screen.getByLabelText('作品标题')).toHaveValue('旧标题');
+  });
+
+  test('rejects an empty title locally without calling the API', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    fireEvent.change(within(dialog).getByLabelText('作品标题'), {
+      target: { value: '   ' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/不能为空/);
+    expect(smo.works.rename).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: '重命名作品' })).toBeInTheDocument();
+  });
+
+  test('shows the rename error and keeps the modal open', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+    smo.works.rename.mockRejectedValue(new Error('数据库繁忙'));
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    fireEvent.change(within(dialog).getByLabelText('作品标题'), {
+      target: { value: '新标题' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('数据库繁忙');
+    expect(screen.getByRole('dialog', { name: '重命名作品' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '薄荷主播' })).toBeInTheDocument();
+  });
+
+  test('closes the rename modal without saving on cancel', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    const trigger = screen.getByRole('button', { name: '重命名作品 done-work' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(smo.works.rename).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  test('focuses the title input on open and wraps Tab between input and buttons', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    const input = within(dialog).getByLabelText('作品标题');
+    const cancel = within(dialog).getByRole('button', { name: '取消' });
+    const save = within(dialog).getByRole('button', { name: '保存标题' });
+    expect(input).toHaveFocus();
+
+    // Shift+Tab on the first control wraps to the last button.
+    expect(fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })).toBe(false);
+    expect(save).toHaveFocus();
+    // Tab on the last button wraps back to the input.
+    expect(fireEvent.keyDown(dialog, { key: 'Tab' })).toBe(false);
+    expect(input).toHaveFocus();
+    // Tab in the middle of the order is left to the browser default.
+    cancel.focus();
+    expect(fireEvent.keyDown(dialog, { key: 'Tab' })).toBe(true);
+    expect(fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })).toBe(true);
+  });
+
+  test('closes the rename modal with Escape when idle and restores focus', async () => {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    const trigger = screen.getByRole('button', { name: '重命名作品 done-work' });
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(smo.works.rename).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
+  test('blocks Tab and Escape while a rename is saving', async () => {
+    let resolveRename: ((work: Work) => void) | undefined;
+    smo.works.rename.mockImplementation(
+      () =>
+        new Promise<Work>((resolve) => {
+          resolveRename = resolve;
+        }),
+    );
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'done-work', status: 'done', outputPath }),
+    ]);
+
+    await openWorksPage();
+    await screen.findByRole('heading', { name: '薄荷主播' });
+
+    fireEvent.click(screen.getByRole('button', { name: '重命名作品 done-work' }));
+    const dialog = screen.getByRole('dialog', { name: '重命名作品' });
+    const input = within(dialog).getByLabelText('作品标题');
+    fireEvent.change(input, { target: { value: '新标题' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存标题' }));
+
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: '正在保存…' })).toBeDisabled(),
+    );
+    expect(input).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: '取消' })).toBeDisabled();
+
+    // Every control is disabled, so Tab must not escape into the background.
+    expect(fireEvent.keyDown(dialog, { key: 'Tab' })).toBe(false);
+    expect(fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })).toBe(false);
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: '重命名作品' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRename?.(createWork({ id: 'done-work', status: 'done', outputPath, title: '新标题' }));
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 });

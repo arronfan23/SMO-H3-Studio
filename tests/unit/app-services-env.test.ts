@@ -1,12 +1,13 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { app, dialog } from 'electron';
@@ -21,10 +22,15 @@ import {
 } from '../../src/main/app-services';
 import { ComfyClient } from '../../src/main/comfy';
 import { ComfyProcessManager } from '../../src/main/comfy-process';
-import { REQUIRED_COMFY_NODES } from '../../src/main/environment-setup';
+import {
+  EnvironmentSetupService,
+  REQUIRED_COMFY_NODES,
+  REQUIRED_IMAGE_COMFY_NODES,
+} from '../../src/main/environment-setup';
 import { detectHardware } from '../../src/main/hardware';
 import type { EnvironmentBackendInput } from '../../src/main/environment-setup';
 import type { EnvironmentPaths } from '../../src/shared/environment';
+import * as downloadModule from '../../src/main/download';
 
 const { protocolRegisterFileProtocol, electronAppState, legacyEnvironment } =
   vi.hoisted(() => ({
@@ -79,10 +85,30 @@ async function useDataDirectory(): Promise<string> {
   return directory;
 }
 
-async function startHttpServer(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+async function startHttpServer(
+  options: {
+    objectInfo?: Record<string, unknown>;
+    onObjectInfo?: (call: number) =>
+      | { status?: number; body?: unknown }
+      | void;
+  } = {},
+): Promise<{
+  baseUrl: string;
+  readonly objectInfoCalls: number;
+  close: () => Promise<void>;
+}> {
+  let objectInfoCalls = 0;
   const server: Server = createServer((request, response) => {
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ system: { os: 'test' }, devices: [] }));
+    let status = 200;
+    let body: unknown = { system: { os: 'test' }, devices: [] };
+    if (request.url === '/object_info') {
+      objectInfoCalls += 1;
+      const override = options.onObjectInfo?.(objectInfoCalls);
+      status = override?.status ?? 200;
+      body = override?.body ?? options.objectInfo ?? body;
+    }
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(typeof body === 'string' ? body : JSON.stringify(body));
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -90,6 +116,9 @@ async function startHttpServer(): Promise<{ baseUrl: string; close: () => Promis
   let closed = false;
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
+    get objectInfoCalls() {
+      return objectInfoCalls;
+    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -124,6 +153,56 @@ function mockHardware(gpu = 'Env GPU') {
     cudaComputeCapability: '12.0',
     freeDiskGiB: 512,
   });
+}
+
+function writeMediaEnvironmentConfig(
+  dataDirectory: string,
+  modelDirectory: string,
+): Promise<void> {
+  return writeFile(
+    join(dataDirectory, 'environment.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      runtimeId: 'sm120',
+      runtimeRoot: join(dataDirectory, 'runtime', 'sm120'),
+      modelDirectory,
+      outputDirectory: join(dataDirectory, 'output'),
+      profile: 'balanced-16gb',
+      hardwareFingerprint: {
+        gpu: 'Recorded GPU',
+        vramGiB: 16,
+        ramGiB: 64,
+        cudaComputeCapability: '12.0',
+      },
+      manifestVersion: '1',
+      status: 'ready',
+      createdAt: '2026-01-01T00:00:00+08:00',
+      updatedAt: '2026-01-01T00:00:00+08:00',
+    }),
+  );
+}
+
+async function writeVerifiedRuntime(runtimeRoot: string): Promise<void> {
+  const files: Record<string, string> = {
+    'python_embeded/python.exe': 'python',
+    'tools/launch.py': 'launch',
+    'tools/ffmpeg/ffmpeg.exe': 'ffmpeg',
+    'tools/ffmpeg/ffprobe.exe': 'ffprobe',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    const destination = join(runtimeRoot, ...path.split('/'));
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, content);
+  }
+  const manifest = Object.entries(files)
+    .map(
+      ([path, content]) =>
+        `${createHash('sha256').update(content).digest('hex')}  ${path}`,
+    )
+    .join('\n');
+  const manifestPath = join(runtimeRoot, 'docs', 'file-manifest.sha256');
+  await mkdir(dirname(manifestPath), { recursive: true });
+  await writeFile(manifestPath, `${manifest}\n`);
 }
 
 describe('createAppServices defaults', () => {
@@ -199,6 +278,101 @@ describe('createAppServices environment integration', () => {
       healthy: false,
     });
   });
+
+  test('selects an existing runtime root with a native directory dialog', async () => {
+    const dataDirectory = await useDataDirectory();
+    const showOpenDialog = vi.fn(async () => ({
+      canceled: false,
+      filePaths: ['D:\\Existing\\ComfyUI'],
+    }));
+    const services = await createAppServices({
+      dataDirectory,
+      fileDialog: { showOpenDialog },
+    });
+    cleanups.push(() => services.close());
+
+    await expect(services.environment.selectExistingRoot()).resolves.toBe(
+      'D:\\Existing\\ComfyUI',
+    );
+    expect(showOpenDialog).toHaveBeenCalledWith({
+      title: '选择已有 ComfyUI 运行目录',
+      properties: ['openDirectory'],
+    });
+  });
+
+  test('forwards existing environment imports to the setup service', async () => {
+    const dataDirectory = await useDataDirectory();
+    const importExisting = vi
+      .spyOn(EnvironmentSetupService.prototype, 'importExisting')
+      .mockResolvedValue({
+        config: null,
+        hardware: null,
+        selection: null,
+        installRoot: dataDirectory,
+        stage: 'ready',
+        progress: { downloadedBytes: 10, totalBytes: 10 },
+        error: null,
+        active: false,
+        healthy: true,
+      });
+    cleanups.push(() => importExisting.mockRestore());
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+    const input = {
+      runtimeRoot: 'D:\\Existing\\Runtime',
+      profileId: 'balanced-16gb' as const,
+    };
+
+    await expect(services.environment.importExisting(input)).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+    });
+    expect(importExisting).toHaveBeenCalledWith(input);
+  });
+
+  test('forwards environment validation to the setup service', async () => {
+    const dataDirectory = await useDataDirectory();
+    const validate = vi
+      .spyOn(EnvironmentSetupService.prototype, 'validate')
+      .mockResolvedValue({
+        config: null,
+        hardware: null,
+        selection: null,
+        installRoot: dataDirectory,
+        stage: 'ready',
+        progress: { downloadedBytes: 0, totalBytes: 0 },
+        error: null,
+        active: false,
+        healthy: true,
+      });
+    cleanups.push(() => validate.mockRestore());
+    const services = await createAppServices({ dataDirectory });
+    cleanups.push(() => services.close());
+
+    await expect(services.environment.validate()).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+    });
+    expect(validate).toHaveBeenCalledWith();
+  });
+
+  test.each([
+    { canceled: true, filePaths: [] },
+    { canceled: false, filePaths: [] },
+  ])(
+    'returns null when the existing-root dialog has no selected path: %j',
+    async (dialogResult) => {
+      const dataDirectory = await useDataDirectory();
+      const showOpenDialog = vi.fn(async () => dialogResult);
+      const services = await createAppServices({
+        dataDirectory,
+        fileDialog: { showOpenDialog },
+      });
+      cleanups.push(() => services.close());
+
+      await expect(services.environment.selectExistingRoot()).resolves.toBeNull();
+    },
+  );
 
   test('detects hardware against the requested install root', async () => {
     const dataDirectory = await useDataDirectory();
@@ -317,6 +491,160 @@ describe('createAppServices environment integration', () => {
     );
   });
 
+  test('installs image models under the active ComfyUI root and speech under its component root', async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
+    await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    const destinations: string[] = [];
+    const objectInfoDownloadCounts: number[] = [];
+    const upstream = await startHttpServer({
+      objectInfo: Object.fromEntries(
+        REQUIRED_IMAGE_COMFY_NODES.map((node) => [node, {}]),
+      ),
+      onObjectInfo: () => {
+        objectInfoDownloadCounts.push(destinations.length);
+      },
+    });
+    cleanups.push(() => upstream.close());
+    const download = vi.spyOn(downloadModule, 'downloadFile').mockImplementation(
+      async (options) => {
+        destinations.push(options.destination);
+        return {
+          resumed: false,
+          bytes: options.expectedSize,
+          sha256: options.expectedSha256,
+        };
+      },
+    );
+    cleanups.push(() => download.mockRestore());
+    const services = await createAppServices({
+      dataDirectory,
+      comfyBaseUrl: upstream.baseUrl,
+    });
+    cleanups.push(() => services.close());
+
+    await services.components.install('image');
+
+    expect(objectInfoDownloadCounts).toEqual([0, 3]);
+    const imageDestinations = destinations.slice();
+    expect(imageDestinations).toHaveLength(3);
+    for (const destination of imageDestinations) {
+      expect(destination.startsWith(`${dirname(modelDirectory)}\\`)).toBe(true);
+      expect(destination.startsWith(join(dataDirectory, 'components', 'image', 'models'))).toBe(
+        false,
+      );
+    }
+    expect(imageDestinations[0]).toBe(
+      join(
+        dirname(modelDirectory),
+        'diffusion_models',
+        'qwen_image_2.1_int8_convrot.safetensors',
+      ),
+    );
+
+    await services.components.install('speech');
+
+    const speechDestinations = destinations.slice(imageDestinations.length);
+    expect(speechDestinations).toHaveLength(27);
+    for (const destination of speechDestinations) {
+      expect(destination.startsWith(join(dataDirectory, 'components', 'speech', 'models'))).toBe(
+        true,
+      );
+    }
+    expect(upstream.objectInfoCalls).toBe(2);
+  });
+
+  test('marks image installation failed when the post-install model refresh fails and allows retry', async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
+    await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    const upstream = await startHttpServer({
+      objectInfo: Object.fromEntries(
+        REQUIRED_IMAGE_COMFY_NODES.map((node) => [node, {}]),
+      ),
+      onObjectInfo: (call) =>
+        call === 2
+          ? { status: 503, body: 'Qwen model refresh unavailable' }
+          : undefined,
+    });
+    cleanups.push(() => upstream.close());
+    const download = vi.spyOn(downloadModule, 'downloadFile').mockImplementation(
+      async (options) => ({
+        resumed: false,
+        bytes: options.expectedSize,
+        sha256: options.expectedSha256,
+      }),
+    );
+    cleanups.push(() => download.mockRestore());
+    const services = await createAppServices({
+      dataDirectory,
+      comfyBaseUrl: upstream.baseUrl,
+    });
+    cleanups.push(() => services.close());
+
+    await expect(services.components.install('image')).rejects.toThrow(
+      /HTTP 503.*Qwen model refresh unavailable/,
+    );
+    expect(services.components.getState('image')).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/HTTP 503.*Qwen model refresh unavailable/),
+      active: false,
+    });
+
+    await expect(services.components.install('image')).resolves.toMatchObject({
+      status: 'ready',
+      error: null,
+      active: false,
+    });
+    expect(upstream.objectInfoCalls).toBe(4);
+  });
+
+  test('fails image runtime inspection before downloading without changing H3 health', async () => {
+    const dataDirectory = await useDataDirectory();
+    const modelDirectory = join(dataDirectory, 'active-models', 'diffusion_models');
+    await writeMediaEnvironmentConfig(dataDirectory, modelDirectory);
+    await writeVerifiedRuntime(join(dataDirectory, 'runtime', 'sm120'));
+    const objectInfo = Object.fromEntries(
+      [
+        ...REQUIRED_COMFY_NODES,
+        'MiniMaxH3SparkAttentionSM120',
+        ...REQUIRED_IMAGE_COMFY_NODES,
+      ].map((node) => [node, {}]),
+    );
+    delete objectInfo.QwenImage21Cache;
+    const upstream = await startHttpServer({ objectInfo });
+    cleanups.push(() => upstream.close());
+    const download = vi.spyOn(downloadModule, 'downloadFile').mockImplementation(
+      async (options) => ({
+        resumed: false,
+        bytes: options.expectedSize,
+        sha256: options.expectedSha256,
+      }),
+    );
+    cleanups.push(() => download.mockRestore());
+    const services = await createAppServices({
+      dataDirectory,
+      comfyBaseUrl: upstream.baseUrl,
+    });
+    cleanups.push(() => services.close());
+
+    await expect(services.environment.validate()).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+    });
+    await expect(services.components.install('image')).rejects.toThrow(
+      /Qwen Image 2\.1/,
+    );
+
+    expect(download).not.toHaveBeenCalled();
+    expect(services.components.getState('image')).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/Qwen Image 2\.1/),
+      active: false,
+    });
+    expect((await services.environment.getState()).healthy).toBe(true);
+  });
+
   test('uses the Electron userData directory when the legacy data root is absent', async () => {
     legacyEnvironment.exists = false;
     const userDataDirectory = await useDataDirectory();
@@ -366,7 +694,10 @@ describe('packaged environment manifest', () => {
 
 describe('createEnvironmentStartBackend', () => {
   const objectInfoFixture = Object.fromEntries(
-    REQUIRED_COMFY_NODES.map((node) => [node, { input: {} }]),
+    [...REQUIRED_COMFY_NODES, 'MiniMaxH3SparkAttentionSM120'].map((node) => [
+      node,
+      { input: {} },
+    ]),
   );
 
   function makeBackendInput(
@@ -985,6 +1316,7 @@ describe('createEnvironmentStartBackend', () => {
     test('validates a ready config through health and required nodes, then reports healthy', async () => {
       const dataDirectory = await useDataDirectory();
       await writeReadyConfig(dataDirectory);
+      await writeVerifiedRuntime(join(dataDirectory, 'runtime', 'sm120'));
       const upstream = await startBackendServer();
       cleanups.push(() => upstream.close());
 
@@ -1009,6 +1341,7 @@ describe('createEnvironmentStartBackend', () => {
     test('rejects validation when the backend misses required nodes without activating', async () => {
       const dataDirectory = await useDataDirectory();
       await writeReadyConfig(dataDirectory);
+      await writeVerifiedRuntime(join(dataDirectory, 'runtime', 'sm120'));
       const upstream = await startBackendServer({ objectInfoValue: {} });
       cleanups.push(() => upstream.close());
 

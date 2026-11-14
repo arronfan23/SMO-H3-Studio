@@ -252,7 +252,7 @@ async function scanSensitiveFiles(root: string): Promise<string[]> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const full = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === 'test-results' || entry.name === '.worktrees') {
+        if (['test-results', '.worktrees', '.venv', '__pycache__'].includes(entry.name)) {
           violations.push(full);
         } else {
           await walk(full);
@@ -263,10 +263,13 @@ async function scanSensitiveFiles(root: string): Promise<string[]> {
       if (/\.(sqlite|sqlite3|db|log)$/.test(lower)) {
         violations.push(full);
       }
-      if (/\.(mp4|webm|mov)$/.test(lower)) {
+      if (/\.(safetensors|gguf|ckpt|pt|pth|onnx|tflite|pb|bin)$/.test(lower)) {
         violations.push(full);
       }
-      if (/\.(md|txt|json|js|ts|yaml|yml|html|css)$/.test(lower)) {
+      if (/\.(mp4|webm|mov|wav|mp3|flac|ogg|m4a|aac|opus)$/.test(lower)) {
+        violations.push(full);
+      }
+      if (/\.(md|txt|json|js|ts|yaml|yml|html|css|py|toml|lock)$/.test(lower)) {
         const content = await readFile(full, 'utf8');
         if (content.includes(TEST_LLM_API_KEY)) {
           violations.push(`${full} (contains test API key)`);
@@ -340,8 +343,10 @@ async function assertViewWithinViewport(
   viewName: string,
   selectors: string[],
 ): Promise<void> {
+  // Windows fractional display scaling can round scrollIntoView to a subpixel.
+  const roundingTolerance = 1;
   const violations = await page.evaluate(
-    ({ view, selectors }) => {
+    ({ view, selectors, roundingTolerance }) => {
       const viewport = { width: window.innerWidth, height: window.innerHeight };
       const results: Array<{
         view: string;
@@ -365,10 +370,10 @@ async function assertViewWithinViewport(
         element.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         const rect = element.getBoundingClientRect();
         if (
-          rect.left < 0 ||
-          rect.right > viewport.width ||
-          rect.top < 0 ||
-          rect.bottom > viewport.height
+          rect.left < -roundingTolerance ||
+          rect.right > viewport.width + roundingTolerance ||
+          rect.top < -roundingTolerance ||
+          rect.bottom > viewport.height + roundingTolerance
         ) {
           results.push({
             view,
@@ -380,7 +385,7 @@ async function assertViewWithinViewport(
       }
       return results;
     },
-    { view: viewName, selectors },
+    { view: viewName, selectors, roundingTolerance },
   );
   expect(violations).toEqual([]);
 }
@@ -433,6 +438,14 @@ async function saveLlmProfile(page: Page, baseUrl: string): Promise<void> {
   await page.click('button:has-text("保存设置")');
   await expect(page.locator('h3:has-text("已配置 LLM")')).toBeVisible();
   await expect(page.locator('#llm-api-key')).toHaveValue('');
+}
+
+async function openStudioVideo(page: Page): Promise<void> {
+  const parent = page.getByRole('button', { name: '制作台', exact: true });
+  if (await parent.getAttribute('aria-expanded') !== 'true') {
+    await parent.click();
+  }
+  await page.locator('#studio-video-button').click();
 }
 
 async function readVisibleTextJobId(page: Page): Promise<string> {
@@ -688,7 +701,11 @@ test.describe('SMO.H3 Studio portable package', () => {
     const workflowFiles = (await readdir(join(packagedResourcesPath, 'resources', 'workflows')))
       .filter((entry) => entry.endsWith('.json'))
       .sort();
-    expect(workflowFiles).toEqual(['audio-digital-human.json', 'text-ref2va.json']);
+    expect(workflowFiles).toEqual([
+      'audio-digital-human.json',
+      'qwen-image-2-1.json',
+      'text-ref2va.json',
+    ]);
 
     const skillEntries = await readdir(join(packagedResourcesPath, 'resources', 'skills'), {
       withFileTypes: true,
@@ -698,6 +715,57 @@ test.describe('SMO.H3 Studio portable package', () => {
       .map((entry) => entry.name)
       .sort();
     expect(skillDirectories).toHaveLength(9);
+
+    const speechDirectory = join(packagedResourcesPath, 'resources', 'speech');
+    expect((await readdir(speechDirectory)).sort()).toEqual([
+      'index_tts_service.py',
+      'pyproject.toml',
+      'uv.lock',
+    ]);
+    for (const file of [
+      'pyproject.toml',
+      'index_tts_service.py',
+      'uv.lock',
+    ]) {
+      expect((await stat(join(speechDirectory, file))).size).toBeGreaterThan(0);
+    }
+
+    const claudeExecutable = join(
+      packagedResourcesPath,
+      'app.asar.unpacked',
+      'node_modules',
+      '@anthropic-ai',
+      'claude-agent-sdk-win32-x64',
+      'claude.exe',
+    );
+    expect((await stat(claudeExecutable)).size).toBeGreaterThan(0);
+
+    const claudeConnectionError = await page!.evaluate(async (apiKey) => {
+      const api = (window as unknown as {
+        smo: {
+          sanmao: {
+            testConnection(input: {
+              baseUrl: string;
+              model: string;
+              apiKey: string;
+            }): Promise<unknown>;
+          };
+        };
+      }).smo;
+      try {
+        await api.sanmao.testConnection({
+          baseUrl: 'http://127.0.0.1:1/v1',
+          model: 'claude-e2e-test',
+          apiKey,
+        });
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, TEST_LLM_API_KEY);
+    expect(claudeConnectionError).not.toBeNull();
+    expect(claudeConnectionError).toMatch(/三脚猫|Claude|fetch|connect|ECONN|连接|请求/i);
+    expect(claudeConnectionError).not.toContain(TEST_LLM_API_KEY);
 
     const violations = await scanSensitiveFiles(packagedResourcesPath);
     expect(violations).toEqual([]);
@@ -722,7 +790,7 @@ test.describe('SMO.H3 Studio portable package', () => {
     await expect(page!.locator('h3:has-text("ComfyUI 连接正常")')).toBeVisible();
 
     // Non-empty studio preview comes from the seeded avatar.
-    await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+    await openStudioVideo(page!);
     await expect(
       page!.locator(`.person-preview h2:has-text("${AVATAR_NAME}")`),
     ).toBeVisible();
@@ -735,13 +803,14 @@ test.describe('SMO.H3 Studio portable package', () => {
     await page!.click('button:has-text("AI 润色")');
     await expect(page!.locator('#polished-tab')).toBeEnabled({ timeout: 30_000 });
     const polishedText = await page!.inputValue('#polished-text');
-    expect(polishedText).toContain('subject_definitions:');
+    expect(polishedText).toContain('integrated_multimodal_description:');
 
     const previousCount = comfyMock.submittedPromptIds.length;
     await page!.click('#text-mode-panel button:has-text("生成视频")');
     const jobId = await readVisibleTextJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
+    expect(comfyMock.uploadedImages).toEqual([]);
 
     // The submitted ComfyUI graph must come from the packaged workflow file.
     const packagedWorkflow = JSON.parse(
@@ -753,16 +822,37 @@ test.describe('SMO.H3 Studio portable package', () => {
     const submitted = comfyMock.submittedPrompts[comfyMock.submittedPrompts.length - 1];
     const submittedNodes = submitted.prompt as Record<
       string,
-      { class_type: string }
+      { class_type: string; inputs: Record<string, unknown> }
     >;
-    // The submitted graph must be exactly the packaged workflow: same node IDs,
-    // same node types (inputs are patched in place, never added or removed).
-    expect(Object.keys(submittedNodes).sort()).toEqual(
-      Object.keys(packagedWorkflow).sort(),
+    // T2VA removes the frozen reference-image node and converts node 136;
+    // every other packaged node survives, with one Spark node added at the
+    // final sampler boundary on supported hardware.
+    const expectedPackagedNodeIds = Object.keys(packagedWorkflow).filter(
+      (nodeId) => nodeId !== '226',
     );
-    for (const [nodeId, node] of Object.entries(submittedNodes)) {
-      expect(node.class_type).toBe(packagedWorkflow[nodeId].class_type);
+    expect(Object.keys(submittedNodes).sort()).toEqual(
+      [...expectedPackagedNodeIds, 'smo_spark'].sort(),
+    );
+    for (const [nodeId, node] of Object.entries(packagedWorkflow)) {
+      if (nodeId === '136' || nodeId === '226') {
+        continue;
+      }
+      expect(submittedNodes[nodeId].class_type).toBe(node.class_type);
     }
+    expect(submittedNodes['136'].class_type).toBe('MiniMaxH3ImageToVideo');
+    expect(submittedNodes['136'].inputs).not.toHaveProperty('audio_vae');
+    expect(submittedNodes['136'].inputs).not.toHaveProperty('ref_image_size');
+    expect(submittedNodes['136'].inputs).not.toHaveProperty('ref_images');
+    expect(
+      Object.keys(submittedNodes['136'].inputs).filter((key) =>
+        key.startsWith('ref_images.'),
+      ),
+    ).toEqual([]);
+    expect(submittedNodes['226']).toBeUndefined();
+    expect(submittedNodes.smo_spark.class_type).toBe('MiniMaxH3SparkAttentionSM120');
+    expect(submittedNodes.smo_spark.inputs.model).toEqual(['153', 0]);
+    expect(submittedNodes['269'].inputs.low_res_model).toEqual(['smo_spark', 0]);
+    expect(submittedNodes['124'].inputs.model).toEqual(['smo_spark', 0]);
 
     // Works view: completed work with playable packaged output.
     await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
@@ -798,7 +888,7 @@ test.describe('SMO.H3 Studio portable package', () => {
     ]) {
       await setViewport(app!, page!, width, height);
 
-      await page!.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await openStudioVideo(page!);
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
       await assertViewWithinViewport(page!, `package-studio-${width}`, [
         '.brand-lockup',

@@ -1,5 +1,5 @@
 import { realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { MediaRegistry } from './media';
 
 const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp'];
@@ -8,8 +8,8 @@ const AUDIO_EXTENSIONS = ['wav', 'mp3', 'flac', 'ogg', 'm4a'];
 export interface FileDialog {
   showOpenDialog(options: {
     title: string;
-    properties: ['openFile'];
-    filters: { name: string; extensions: string[] }[];
+    properties: ['openFile'] | ['openDirectory'];
+    filters?: { name: string; extensions: string[] }[];
   }): Promise<{ canceled: boolean; filePaths: string[] }>;
 }
 
@@ -51,6 +51,26 @@ export class FileService {
 
   selectAudio(): Promise<string | null> {
     return this.select('选择配音音频', '音频', AUDIO_EXTENSIONS, 'audio');
+  }
+
+  async authorizeDroppedImage(filePath: string): Promise<string> {
+    const extension = extname(filePath).toLowerCase().replace(/^\./, '');
+    if (!IMAGE_EXTENSIONS.includes(extension)) {
+      throw new Error(`Unsupported image extension: ${extension || '(none)'}`);
+    }
+    const canonicalPath = await this.canonicalMediaPath(filePath);
+    await this.mediaRegistry.authorizeSelectedImage(canonicalPath);
+    return canonicalPath;
+  }
+
+  async authorizeDroppedAudio(filePath: string): Promise<string> {
+    const extension = extname(filePath).toLowerCase().replace(/^\./, '');
+    if (!AUDIO_EXTENSIONS.includes(extension)) {
+      throw new Error(`Unsupported audio extension: ${extension || '(none)'}`);
+    }
+    const canonicalPath = await this.canonicalMediaPath(filePath);
+    await this.mediaRegistry.authorizeSelectedFile(canonicalPath);
+    return canonicalPath;
   }
 
   mediaUrl(filePath: string): Promise<string> {
@@ -104,6 +124,17 @@ export class FileService {
     return false;
   }
 
+  private async canonicalMediaPath(filePath: string): Promise<string> {
+    if (filePath.trim().length === 0 || !isAbsolute(filePath)) {
+      throw new Error('Media path must be absolute');
+    }
+    try {
+      return await realpath(filePath);
+    } catch {
+      throw new Error('Media file does not exist or is not a file');
+    }
+  }
+
   private async select(
     title: string,
     name: string,
@@ -119,11 +150,12 @@ export class FileService {
     if (filePath === undefined) {
       return null;
     }
+    const canonicalPath = await this.canonicalMediaPath(filePath);
     if (kind === 'image') {
-      await this.mediaRegistry.authorizeSelectedImage(filePath);
+      await this.mediaRegistry.authorizeSelectedImage(canonicalPath);
     } else {
-      await this.mediaRegistry.authorizeSelectedFile(filePath);
+      await this.mediaRegistry.authorizeSelectedFile(canonicalPath);
     }
-    return filePath;
+    return canonicalPath;
   }
 }

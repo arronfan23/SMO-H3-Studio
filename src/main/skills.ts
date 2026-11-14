@@ -36,6 +36,8 @@ const SKILL_DESCRIPTIONS: Record<SkillName, string> = {
 
 const GENERATION_MAX_TOKENS = 8192;
 const SYSTEM_PROMPT_MAX_CHARS = 72_000;
+const NARRATION_TAIL =
+  'The final 2 seconds contain no narration, dialogue, or other speech; only ambient sound, music, or visuals remain.';
 const REFERENCE_LABEL_PATTERN = /^<(?:Picture|Video|Audio|Subject) [1-9]\d*>$/;
 const STYLE_REFERENCES: Partial<Record<SkillName, readonly string[]>> = {
   '3d-animation-short-generator': [
@@ -437,6 +439,14 @@ function generationMessages(
   ];
 }
 
+function insertNarrationTail(text: string): string {
+  const soundscape = /^overall_soundscape:/m.exec(text);
+  if (!soundscape) {
+    return text;
+  }
+  return `${text.slice(0, soundscape.index)}${NARRATION_TAIL}\n\n${text.slice(soundscape.index)}`;
+}
+
 export class SkillsService {
   constructor(
     private readonly llm: ChatCompletionClient = new LlmService(),
@@ -526,6 +536,17 @@ export class SkillsService {
       text = (
         await this.llm.chatCompletion(profile, repairMessages, GENERATION_MAX_TOKENS)
       ).trim();
+      issues = validatePrompt(
+        text,
+        mode,
+        request.duration,
+        request.text,
+        completeSilence,
+      );
+    }
+
+    if (issues.length === 1 && issues[0] === 'Missing narration tail') {
+      text = insertNarrationTail(text);
       issues = validatePrompt(
         text,
         mode,

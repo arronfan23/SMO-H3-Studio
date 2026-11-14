@@ -275,6 +275,70 @@ describe('H3 dialogue, wrappers, and narration tail', () => {
     expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
   });
 
+  test('accepts a Chinese non-narration tail with only ambience, music, or visuals', () => {
+    const text = basePrompt(
+      `[Shot 1] The presenter (S1) says: ${dialogue} 最后2秒无旁白、对白或语音，仅保留环境声、音乐或画面。`,
+    );
+    expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
+
+  test.each([
+    '最后2秒无旁白，仅保留环境声。',
+    '最后2秒没有旁白，仅保留环境声。',
+    '最后2秒没有对白，只有音乐。',
+    '最后2秒无对话。',
+    '最后2秒没有对话。',
+  ])('accepts an ordinary Chinese negated tail: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
+
+  test.each([
+    '旁白在第10秒结束，最后2秒无旁白，仅保留环境声。',
+    '对白在第10秒结束，最后2秒没有对话，仅保留音乐。',
+    '旁白持续到第9秒结束，最后2秒无旁白。',
+    '旁白持续到第10秒结束，最后2秒无旁白。',
+    '最后2秒无旁白，前10秒有对白。',
+  ])('accepts a valid tail after an earlier speech schedule: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(validatePrompt(text, 't2va', 12, original)).toEqual([]);
+  });
+
+  test.each([
+    '最后2秒并非无旁白，仅保留环境声。',
+    '最后2秒不是无对白，只有音乐。',
+    '最后2秒并非完全没有旁白。',
+    '最后2秒并非完全无对白。',
+    '最后2秒不是完全没有旁白。',
+  ])('rejects a Chinese double negation that still implies speech: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
+  });
+
+  test.each([
+    '最后2秒保留现场声，前10秒无旁白。',
+    '最后2秒保留画面，前10秒没有旁白。',
+  ])('rejects an earlier-segment negation used as the tail declaration: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
+  });
+
+  test.each([
+    '最后2秒仍有对白和旁白，仅保留环境声。',
+    '最后2秒仍有对话，仅保留音乐。',
+    '最后2秒无旁白，但对白继续。',
+    '旁白持续到视频结束，最后2秒无旁白。',
+    '旁白持续到结束，最后2秒无旁白。',
+    '旁白直到最后，最后2秒无旁白。',
+    '旁白从第8秒持续到视频结束，最后2秒无旁白。',
+    '旁白从第10秒持续到视频结束，最后2秒无旁白。',
+    '最后2秒无旁白，第11秒仍有对白。',
+    'The last 2 seconds still contain dialogue and narration; only music remains.',
+  ])('rejects speech that continues into the final two seconds: %s', (declaration) => {
+    const text = basePrompt(`[Shot 1] The presenter (S1) says: ${dialogue} ${declaration}`);
+    expect(joinedIssues(text, 't2va', 12, original)).toContain('Missing narration tail');
+  });
+
   test.each([
     'The final 2 seconds contain only music and dialogue.',
     'The final 2 seconds contain only music and singing.',

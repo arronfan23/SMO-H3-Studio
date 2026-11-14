@@ -399,6 +399,9 @@ describe('H3 mode and Skill routing', () => {
 });
 
 describe('SkillsService polish validation and repair', () => {
+  const narrationTail =
+    'The final 2 seconds contain no narration, dialogue, or other speech; only ambient sound, music, or visuals remain.';
+
   test('returns the final text, Skill, mode, and attempt count', async () => {
     const valid = basePrompt();
     const llm = new FakeChatCompletion([valid]);
@@ -477,6 +480,83 @@ describe('SkillsService polish validation and repair', () => {
     expect(error.attempts).toBe(3);
     expect(error.issues.length).toBeGreaterThan(0);
     expect(error.message).toContain('after 2 repairs');
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  test('structurally appends and revalidates a tail when it is the only remaining issue', async () => {
+    const originalDialogue = '<d>[Chinese] 你好，世界！</d>';
+    const original = `Presenter narration: ${originalDialogue} A sign reads "营业中"`;
+    const draft = basePrompt(
+      `[Shot 1] A sign reads "营业中" while the presenter says: ${originalDialogue}`,
+    );
+    const llm = new FakeChatCompletion([draft, draft, draft]);
+
+    const result = await new SkillsService(llm).polish(profile, {
+      text: original,
+      duration: 8,
+      skill: 'h3-prompt-writing',
+    });
+
+    expect(result.text).toBe(
+      draft.replace(
+        '\n\noverall_soundscape:',
+        `\n\n${narrationTail}\n\noverall_soundscape:`,
+      ),
+    );
+    expect(result.attempts).toBe(3);
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  test.each([
+    {
+      scenario: 'missing fields',
+      original: '<d>[Chinese] 你好</d>',
+      draft: basePrompt('[Shot 1] The presenter says: <d>[Chinese] 你好</d>').replace(
+        '\n\noverall_soundscape: Soft room tone continues throughout the video.',
+        '',
+      ),
+      otherIssue: 'Missing required fields:',
+    },
+    {
+      scenario: 'modified dialogue',
+      original: '<d>[Chinese] 你好</d>',
+      draft: basePrompt('[Shot 1] The presenter says: <d>[Chinese] 你好！</d>'),
+      otherIssue: 'Dialogue was modified',
+    },
+    {
+      scenario: 'invalid timestamps',
+      original: '<d>[Chinese] 你好</d>',
+      draft: basePrompt(
+        '[Shot 1] The presenter says: <d>[Chinese] 你好</d> [Shot 2] The camera cuts closer.',
+      ),
+      otherIssue: 'Later shots must begin with At MM:SS.mmm',
+    },
+    {
+      scenario: 'interactive output',
+      original: '<d>[Chinese] 你好</d>',
+      draft: basePrompt(
+        '[Shot 1] The presenter says: <d>[Chinese] 你好</d> 请确认后继续生成。',
+      ),
+      otherIssue: 'Remove all questions, clarifications, confirmations, approval gates, and next-step requests',
+    },
+  ])('does not use tail repair to hide $scenario', async ({ original, draft, otherIssue }) => {
+    const llm = new FakeChatCompletion([draft, draft, draft]);
+    const service = new SkillsService(llm);
+
+    const error = await service
+      .polish(profile, { text: original, duration: 8, skill: 'h3-prompt-writing' })
+      .then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(PromptPolishError);
+    if (!(error instanceof PromptPolishError)) {
+      throw new Error('Expected PromptPolishError');
+    }
+    expect(error.issues).toEqual(
+      expect.arrayContaining([expect.stringContaining(otherIssue), 'Missing narration tail']),
+    );
     expect(llm.calls).toHaveLength(3);
   });
 

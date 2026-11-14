@@ -55,6 +55,7 @@ function Read-ZipMetadata {
     [long]$estimatedExtractedBytes = 0
     $pythonPaths = @()
     $launchScripts = @()
+    $ffmpegPaths = @()
     $ffprobePaths = @()
 
     foreach ($entry in $archive.Entries) {
@@ -66,19 +67,23 @@ function Read-ZipMetadata {
       if ($entryPath.EndsWith('/tools/launch.py', [System.StringComparison]::OrdinalIgnoreCase)) {
         $launchScripts += $entryPath
       }
+      if ($entryPath.EndsWith('/tools/ffmpeg/ffmpeg.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $ffmpegPaths += $entryPath
+      }
       if ($entryPath.EndsWith('/tools/ffmpeg/ffprobe.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
         $ffprobePaths += $entryPath
       }
     }
 
-    if ($pythonPaths.Count -ne 1 -or $launchScripts.Count -ne 1 -or $ffprobePaths.Count -ne 1) {
-      throw "Expected exactly one python, launch script, and ffprobe entry in $Path"
+    if ($pythonPaths.Count -ne 1 -or $launchScripts.Count -ne 1 -or $ffmpegPaths.Count -ne 1 -or $ffprobePaths.Count -ne 1) {
+      throw "Expected exactly one python, launch script, ffmpeg, and ffprobe entry in $Path"
     }
 
     return [pscustomobject]@{
       EstimatedExtractedBytes = $estimatedExtractedBytes
       PythonPath = $pythonPaths[0]
       LaunchScript = $launchScripts[0]
+      FfmpegPath = $ffmpegPaths[0]
       FfprobePath = $ffprobePaths[0]
     }
   } finally {
@@ -124,6 +129,7 @@ function Test-ExistingPack {
       [long]$metadata.estimatedExtractedBytes -ne [long]$ZipMetadata.EstimatedExtractedBytes -or
       $metadata.pythonPath -ne $ZipMetadata.PythonPath -or
       $metadata.launchScript -ne $ZipMetadata.LaunchScript -or
+      $metadata.ffmpegPath -ne $ZipMetadata.FfmpegPath -or
       $metadata.ffprobePath -ne $ZipMetadata.FfprobePath -or
       $metadata.archiveParts.Count -ne $partCount
     ) {
@@ -259,6 +265,7 @@ function New-RuntimePack {
       estimatedExtractedBytes = [long]$ZipMetadata.EstimatedExtractedBytes
       pythonPath = $ZipMetadata.PythonPath
       launchScript = $ZipMetadata.LaunchScript
+      ffmpegPath = $ZipMetadata.FfmpegPath
       ffprobePath = $ZipMetadata.FfprobePath
     }
     Write-JsonFile -Path $MetadataPath -Value $metadata

@@ -53,6 +53,7 @@ export interface EnvironmentRuntime {
   estimatedExtractedBytes: number;
   pythonPath: string;
   launchScript: string;
+  ffmpegPath: string;
   ffprobePath: string;
 }
 
@@ -82,6 +83,11 @@ export type EnvironmentStage =
 export interface EnvironmentStartInput {
   profileId: EnvironmentProfile;
   installRoot: string;
+}
+
+export interface EnvironmentImportInput {
+  runtimeRoot: string;
+  profileId: EnvironmentProfile;
 }
 
 export interface EnvironmentProgress {

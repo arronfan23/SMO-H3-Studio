@@ -29,6 +29,7 @@
       "estimatedExtractedBytes": 7734935963,
       "pythonPath": "ComfyUI_SelfLift_Spark_SM89_CUDA130/python_embeded/python.exe",
       "launchScript": "ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/launch.py",
+      "ffmpegPath": "ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/ffmpeg/ffmpeg.exe",
       "ffprobePath": "ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/ffmpeg/ffprobe.exe"
     },
     "sm120": {
@@ -59,6 +60,7 @@
       "estimatedExtractedBytes": 7734750246,
       "pythonPath": "ComfyUI_SelfLift_Spark_SM120_CUDA130/python_embeded/python.exe",
       "launchScript": "ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/launch.py",
+      "ffmpegPath": "ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffmpeg.exe",
       "ffprobePath": "ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffprobe.exe"
     }
   },

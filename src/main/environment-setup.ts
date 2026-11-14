@@ -1,16 +1,27 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { win32 } from 'node:path';
+import { createInterface } from 'node:readline';
+import { parse as parseYaml } from 'yaml';
 import {
+  clearTemporaryDownload,
   downloadFile as defaultDownloadFile,
   downloadParts as defaultDownloadParts,
+  modelDownloadUrls,
+  prepareDownloadSource,
+  runtimeDownloadUrls,
+  validateDownloadPartPaths,
 } from './download';
-import { selectEnvironmentProfile } from './environment-manifest';
+import {
+  selectEnvironmentProfile,
+  selectEnvironmentRecommendation,
+} from './environment-manifest';
 import type { EnvironmentStore } from './environment-store';
 import type {
   EnvironmentConfig,
+  EnvironmentImportInput,
   EnvironmentManifest,
   EnvironmentModelFile,
   EnvironmentProfile,
@@ -21,6 +32,9 @@ import type {
   EnvironmentState,
 } from '../shared/environment';
 import type { HardwareInfo } from '../shared/types';
+import { selectSparkAcceleration } from './spark-acceleration';
+
+export { modelDownloadUrls, runtimeDownloadUrls } from './download';
 
 export const REQUIRED_COMFY_NODES = [
   'SelfLiftH3Sampler',
@@ -30,9 +44,48 @@ export const REQUIRED_COMFY_NODES = [
   'MiniMaxH3ReferenceToVideo',
 ] as const;
 
+export const REQUIRED_IMAGE_COMFY_NODES = [
+  'TextEncodeQwenImage21',
+  'QwenImage21Cache',
+  'SaveImageAdvanced',
+] as const;
+
+export interface ImageRuntimeInspection {
+  missingNodes: string[];
+  error: string | null;
+}
+
+/** Image support is optional and must not change the base H3 health verdict. */
+export function inspectImageRuntime(
+  objectInfo: Record<string, unknown>,
+): ImageRuntimeInspection {
+  const missingNodes = REQUIRED_IMAGE_COMFY_NODES.filter(
+    (node) => !Object.hasOwn(objectInfo, node),
+  );
+  return {
+    missingNodes: [...missingNodes],
+    error:
+      missingNodes.length > 0
+        ? '运行时需要支持 Qwen Image 2.1'
+        : null,
+  };
+}
+
+function requiredComfyNodesFor(config: EnvironmentConfig): string[] {
+  const acceleration = selectSparkAcceleration(config);
+  const sparkNode =
+    acceleration === 'spark-sm120'
+      ? 'MiniMaxH3SparkAttentionSM120'
+      : acceleration === 'spark-sm89'
+        ? 'MiniMaxH3SparkAttentionSM89'
+        : undefined;
+  return [...REQUIRED_COMFY_NODES, ...(sparkNode ? [sparkNode] : [])];
+}
+
 const REQUIRED_RUNTIME_FILES = [
   'python_embeded/python.exe',
   'tools/launch.py',
+  'tools/ffmpeg/ffmpeg.exe',
   'tools/ffmpeg/ffprobe.exe',
 ] as const;
 const EXTRA_MODEL_PATH_KEYS = [
@@ -52,6 +105,22 @@ const PROFILES = new Set<EnvironmentProfile>([
 const WINDOWS_DEVICE_NAME_PATTERN =
   /^(?:CONIN\$|CONOUT\$|CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3])(?:[ .]|$)/i;
 const WINDOWS_ILLEGAL_SEGMENT_PATTERN = /[<>:"|?*\x00-\x1F\x7F]/;
+const VERIFICATION_PROGRESS_INTERVAL_BYTES = 64 * 1024 * 1024;
+
+export interface ExistingModelVariant {
+  size: number;
+  sha256: string;
+}
+
+export const DEFAULT_EXISTING_MODEL_VARIANTS: Readonly<
+  Record<string, ExistingModelVariant>
+> = {
+  'loras/dmad_minimax_h3_4step_full_critic_comfy.safetensors': {
+    size: 1956188032,
+    sha256:
+      'b77b7c00a9091c65282029828c9e178e2090a30ca90582bc01a900fc7c777b71',
+  },
+};
 
 export interface EnvironmentBackendInput {
   runtimeRoot: string;
@@ -107,6 +176,11 @@ export interface EnvironmentExtractInput {
   archivePath: string;
   stagingDirectory: string;
   signal?: AbortSignal;
+  onProgress?: (progress: {
+    extractedBytes: number;
+    totalBytes: number;
+    currentFile?: string;
+  }) => void;
 }
 
 export type EnvironmentExtractor = (
@@ -122,8 +196,10 @@ export interface EnvironmentSetupServiceOptions {
   startBackend: EnvironmentStartBackend;
   downloadParts?: typeof defaultDownloadParts;
   downloadFile?: typeof defaultDownloadFile;
+  downloadRetryDelay?: (attempt: number) => Promise<void>;
   extract?: EnvironmentExtractor;
   extractor?: EnvironmentExtractor;
+  existingModelVariants?: Readonly<Record<string, ExistingModelVariant>>;
 }
 
 interface InstallationLayout {
@@ -144,6 +220,38 @@ interface InstallationLayout {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRuntimeDownloadHashMismatch(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message === 'Downloaded SHA256 does not match the expected SHA256' ||
+      error.message === 'Merged archive SHA256 does not match the expected SHA256')
+  );
+}
+
+export const MODEL_DOWNLOAD_ATTEMPTS = 6;
+const RUNTIME_DOWNLOAD_ATTEMPTS = 6;
+
+async function wait(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) signal.throwIfAborted();
+  let timer: NodeJS.Timeout | undefined;
+  const onAbort = () => {
+    clearTimeout(timer);
+  };
+  try {
+    await new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, milliseconds);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    clearTimeout(timer);
+  }
+  signal?.throwIfAborted();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -227,6 +335,40 @@ function validateInstallRoot(value: string): string {
   return win32.normalize(value);
 }
 
+export async function resolveExistingModelRoot(runtimeRoot: string): Promise<string> {
+  const comfyDirectory = win32.join(runtimeRoot, 'ComfyUI');
+  const configPath = win32.join(comfyDirectory, 'extra_model_paths.yaml');
+  const defaultModelRoot = () => validateInstallRoot(win32.join(comfyDirectory, 'models'));
+  let source: string;
+  try {
+    source = await readFile(configPath, 'utf8');
+  } catch (error) {
+    if (isMissing(error)) return defaultModelRoot();
+    throw error;
+  }
+
+  let document: unknown;
+  try {
+    document = parseYaml(source);
+  } catch (error) {
+    throw new Error(`Failed to parse ${configPath}: ${errorMessage(error)}`);
+  }
+
+  const section = isRecord(document) ? document.h3_selflift_models : undefined;
+  if (!isRecord(section) || !Object.hasOwn(section, 'base_path')) {
+    return defaultModelRoot();
+  }
+  const basePath = section.base_path;
+  if (typeof basePath !== 'string') {
+    throw new Error('h3_selflift_models.base_path must be a string');
+  }
+  try {
+    return validateInstallRoot(basePath);
+  } catch (error) {
+    throw new Error(`Invalid h3_selflift_models.base_path: ${errorMessage(error)}`);
+  }
+}
+
 function installRootKey(value: string): string {
   return win32.normalize(value).toLowerCase();
 }
@@ -248,7 +390,7 @@ function runtimeTopLevel(runtime: EnvironmentRuntime): string {
   const topLevel = runtimeSegments[0];
   if (
     !topLevel ||
-    [runtime.launchScript, runtime.ffprobePath].some(
+    [runtime.launchScript, runtime.ffmpegPath, runtime.ffprobePath].some(
       (path) => path.split('/')[0] !== topLevel,
     )
   ) {
@@ -322,6 +464,7 @@ async function verifyFileHash(
   expectedSize: number | undefined,
   signal: AbortSignal | undefined,
   label: string,
+  onProgress?: (verifiedBytes: number) => void,
 ): Promise<void> {
   let stats;
   try {
@@ -340,8 +483,21 @@ async function verifyFileHash(
   const stream = createReadStream(path);
   const abort = () => stream.destroy(new Error('Environment setup cancelled'));
   signal?.addEventListener('abort', abort, { once: true });
+  let verifiedBytes = 0;
+  let lastReportedBytes = 0;
   try {
-    for await (const chunk of stream) hash.update(chunk as Buffer);
+    for await (const chunk of stream) {
+      hash.update(chunk as Buffer);
+      verifiedBytes += (chunk as Buffer).length;
+      if (
+        onProgress &&
+        verifiedBytes - lastReportedBytes >=
+          VERIFICATION_PROGRESS_INTERVAL_BYTES
+      ) {
+        lastReportedBytes = verifiedBytes;
+        onProgress(verifiedBytes);
+      }
+    }
   } finally {
     signal?.removeEventListener('abort', abort);
   }
@@ -349,6 +505,10 @@ async function verifyFileHash(
   const actual = hash.digest('hex');
   if (actual !== expectedSha256.toLowerCase()) {
     throw new Error(`${label} SHA256 mismatch: ${path}`);
+  }
+  if (onProgress && verifiedBytes > lastReportedBytes) {
+    lastReportedBytes = verifiedBytes;
+    onProgress(verifiedBytes);
   }
 }
 
@@ -390,16 +550,52 @@ async function verifyModelFiles(
   modelRoot: string,
   models: EnvironmentModelFile[],
   signal?: AbortSignal,
+  onProgress?: (currentFile: string, verifiedBytes: number) => void,
 ): Promise<void> {
+  let completedBytes = 0;
   for (const model of models) {
+    onProgress?.(model.path, completedBytes);
     await verifyFileHash(
       win32.join(modelRoot, ...model.path.split('/')),
       model.sha256,
       model.size,
       signal,
       `Model ${model.path}`,
+      onProgress
+        ? (verifiedBytes) => onProgress(model.path, completedBytes + verifiedBytes)
+        : undefined,
     );
+    completedBytes += model.size;
   }
+}
+
+async function selectExistingModelFingerprint(
+  modelRoot: string,
+  model: EnvironmentModelFile,
+  variant: ExistingModelVariant | undefined,
+): Promise<EnvironmentModelFile> {
+  if (variant === undefined) return model;
+
+  const path = win32.join(modelRoot, ...model.path.split('/'));
+  let stats;
+  try {
+    stats = await lstat(path);
+  } catch (error) {
+    if (isMissing(error)) throw new Error(`Model ${model.path} is missing: ${path}`);
+    throw error;
+  }
+  if (!stats.isFile()) {
+    throw new Error(`Model ${model.path} is not a regular file: ${path}`);
+  }
+
+  const fingerprint = [
+    { size: model.size, sha256: model.sha256 },
+    variant,
+  ].find((candidate) => candidate.size === stats.size);
+  if (fingerprint === undefined) {
+    throw new Error(`Model ${model.path} size mismatch: ${path}`);
+  }
+  return { ...model, ...fingerprint };
 }
 
 async function writeExtraModelPaths(
@@ -437,21 +633,38 @@ const POWERSHELL_EXTRACT_SCRIPT = String.raw`
 $InputJson = [System.Environment]::GetEnvironmentVariable('SMO_ENVIRONMENT_SETUP_ZIP')
 $payload = $InputJson | ConvertFrom-Json
 Add-Type -AssemblyName System.IO.Compression
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $staging = [System.IO.Path]::GetFullPath([string]$payload.StagingDirectory)
 $rootPrefix = $staging.TrimEnd('\', '/') + '\'
-[System.IO.Directory]::CreateDirectory($staging) | Out-Null
+
+function Write-ExtractProgress {
+  param([long]$ExtractedBytes, [long]$TotalBytes, [string]$CurrentFile)
+  $progress = @{
+    extractedBytes = $ExtractedBytes
+    totalBytes = $TotalBytes
+    currentFile = $CurrentFile
+  } | ConvertTo-Json -Compress
+  [Console]::Out.WriteLine("SMO_ZIP_PROGRESS $progress")
+}
+
+# Device paths bypass the legacy MAX_PATH limit for both drives and UNC shares.
+function Get-ExtendedPath([string]$Path) {
+  if ($Path.StartsWith('\\?\')) { return $Path }
+  if ($Path.StartsWith('\\')) { return '\\?\UNC\' + $Path.Substring(2) }
+  return '\\?\' + $Path
+}
 
 function Assert-Contained([string]$Candidate) {
-  $full = [System.IO.Path]::GetFullPath($Candidate)
-  if (-not $full.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+  if (-not $Candidate.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "ZIP entry is not contained in staging: $Candidate"
   }
-  return $full
+  return $Candidate
 }
 
 function Assert-NoReparsePoint([string]$Path) {
-  if ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path)) {
-    $item = Get-Item -Force -LiteralPath $Path
+  $extended = Get-ExtendedPath $Path
+  if ([System.IO.File]::Exists($extended) -or [System.IO.Directory]::Exists($extended)) {
+    $item = Get-Item -Force -LiteralPath $extended
     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
       throw "ZIP extraction refuses a reparse point: $Path"
     }
@@ -459,12 +672,24 @@ function Assert-NoReparsePoint([string]$Path) {
 }
 
 Assert-NoReparsePoint $staging
-$stream = [System.IO.File]::OpenRead([string]$payload.ArchivePath)
+$stream = [System.IO.File]::OpenRead((Get-ExtendedPath ([string]$payload.ArchivePath)))
 $archive = [System.IO.Compression.ZipArchive]::new(
   $stream,
   [System.IO.Compression.ZipArchiveMode]::Read
 )
 try {
+  $totalBytes = [long]0
+  foreach ($entry in $archive.Entries) {
+    if ($entry.FullName.Length -ne 0 -and -not $entry.FullName.EndsWith('/')) {
+      $totalBytes += $entry.Length
+    }
+  }
+  Write-ExtractProgress 0 $totalBytes ''
+
+  $extractedBytes = [long]0
+  $reportedBytes = [long]0
+  $lastFile = ''
+  $heartbeat = [System.Diagnostics.Stopwatch]::StartNew()
   foreach ($entry in $archive.Entries) {
     if ($entry.FullName.Length -eq 0) { continue }
     $normalized = $entry.FullName.Replace('\', '/')
@@ -496,26 +721,51 @@ try {
     for ($index = 0; $index -lt $directoryCount; $index += 1) {
       $current = [System.IO.Path]::Combine($current, $segments[$index])
       Assert-NoReparsePoint $current
-      if (-not [System.IO.Directory]::Exists($current)) {
-        [System.IO.Directory]::CreateDirectory($current) | Out-Null
+      $extendedCurrent = Get-ExtendedPath $current
+      if (-not [System.IO.Directory]::Exists($extendedCurrent)) {
+        [System.IO.Directory]::CreateDirectory($extendedCurrent) | Out-Null
       }
       Assert-NoReparsePoint $current
     }
     if ($directoryEntry) { continue }
 
     Assert-NoReparsePoint $target
+    $lastFile = $entry.FullName
     $source = $entry.Open()
     try {
       $destination = [System.IO.File]::Open(
-        $target,
+        (Get-ExtendedPath $target),
         [System.IO.FileMode]::CreateNew,
         [System.IO.FileAccess]::Write,
         [System.IO.FileShare]::None
       )
-      try { $source.CopyTo($destination) } finally { $destination.Dispose() }
+      try {
+        $buffer = New-Object 'byte[]' 1048576
+        $fileBytes = [long]0
+        while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+          $destination.Write($buffer, 0, $read)
+          $fileBytes += $read
+          $extractedBytes += $read
+          if (
+            ($extractedBytes - $reportedBytes) -ge 16MB -or
+            $heartbeat.ElapsedMilliseconds -ge 500
+          ) {
+            $destination.Flush()
+            Write-ExtractProgress $extractedBytes $totalBytes $entry.FullName
+            $reportedBytes = $extractedBytes
+            $heartbeat.Restart()
+          }
+        }
+        if ($fileBytes -ne $entry.Length) {
+          throw "ZIP entry ended before its declared size: $($entry.FullName)"
+        }
+      } finally { $destination.Dispose() }
     } finally {
       $source.Dispose()
     }
+  }
+  if ($extractedBytes -ne $reportedBytes) {
+    Write-ExtractProgress $extractedBytes $totalBytes $lastFile
   }
 } finally {
   $archive.Dispose()
@@ -526,37 +776,80 @@ try {
 export async function extractZipArchive(
   input: EnvironmentExtractInput,
 ): Promise<void> {
+  input.signal?.throwIfAborted();
   await mkdir(input.stagingDirectory, { recursive: true });
+  const child = spawn('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    POWERSHELL_EXTRACT_SCRIPT,
+  ], {
+    windowsHide: true,
+    env: {
+      ...process.env,
+      SMO_ENVIRONMENT_SETUP_ZIP: JSON.stringify({
+        ArchivePath: input.archivePath,
+        StagingDirectory: input.stagingDirectory,
+      }),
+    },
+  });
+  const abortExtraction = (): void => {
+    child.kill();
+  };
+  input.signal?.addEventListener('abort', abortExtraction, { once: true });
+  let stderr = '';
+  let callbackError: unknown;
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-1024 * 1024);
+  });
+  const lines = createInterface({ input: child.stdout });
+  lines.on('line', (line) => {
+    if (!line.startsWith('SMO_ZIP_PROGRESS ')) return;
+    try {
+      const parsed = JSON.parse(line.slice('SMO_ZIP_PROGRESS '.length));
+      if (
+        !isRecord(parsed) ||
+        typeof parsed.extractedBytes !== 'number' ||
+        typeof parsed.totalBytes !== 'number' ||
+        !Number.isSafeInteger(parsed.extractedBytes) ||
+        !Number.isSafeInteger(parsed.totalBytes) ||
+        parsed.extractedBytes < 0 ||
+        parsed.extractedBytes > parsed.totalBytes
+      ) {
+        return;
+      }
+      input.onProgress?.({
+        extractedBytes: parsed.extractedBytes,
+        totalBytes: parsed.totalBytes,
+        ...(typeof parsed.currentFile === 'string' && parsed.currentFile.length > 0
+          ? { currentFile: parsed.currentFile }
+          : {}),
+      });
+    } catch (error) {
+      callbackError = error;
+      child.kill();
+    }
+  });
   await new Promise<void>((resolve, reject) => {
-    execFile(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        POWERSHELL_EXTRACT_SCRIPT,
-      ],
-      {
-        windowsHide: true,
-        signal: input.signal,
-        maxBuffer: 1024 * 1024,
-        env: {
-          ...process.env,
-          SMO_ENVIRONMENT_SETUP_ZIP: JSON.stringify({
-            ArchivePath: input.archivePath,
-            StagingDirectory: input.stagingDirectory,
-          }),
-        },
-      },
-      (error, _stdout, stderr) => {
-        if (!error) {
-          resolve();
-          return;
-        }
+    child.on('error', reject);
+    child.on('close', (code) => {
+      input.signal?.removeEventListener('abort', abortExtraction);
+      if (callbackError) {
+        reject(callbackError);
+      } else if (input.signal?.aborted) {
+        reject(input.signal.reason);
+      } else if (code !== 0) {
         const detail = stderr.trim();
-        reject(new Error(detail ? `ZIP extraction failed: ${detail}` : error.message));
-      },
-    );
+        reject(new Error(
+          detail
+            ? `ZIP extraction failed: ${detail}`
+            : `ZIP extraction exited with code ${code}`,
+        ));
+      } else {
+        resolve();
+      }
+    });
   });
 }
 
@@ -569,6 +862,7 @@ export class EnvironmentSetupService {
     | { installRoot: string; promise: Promise<EnvironmentState> }
     | undefined;
   private controller: AbortController | undefined;
+  private activating = false;
 
   constructor(private readonly options: EnvironmentSetupServiceOptions) {
     this.state = {
@@ -647,13 +941,15 @@ export class EnvironmentSetupService {
   async cancel(): Promise<EnvironmentState> {
     const pending = this.inFlight;
     if (pending && this.controller) {
-      this.controller.abort(new Error('Environment setup cancelled'));
-      this.state = {
-        ...this.state,
-        active: false,
-        healthy: false,
-        error: 'Environment setup cancellation requested',
-      };
+      if (!this.activating) {
+        this.controller.abort(new Error('Environment setup cancelled'));
+        this.state = {
+          ...this.state,
+          active: false,
+          healthy: false,
+          error: 'Environment setup cancellation requested',
+        };
+      }
       await pending.catch(() => undefined);
     }
     return this.getState();
@@ -664,22 +960,69 @@ export class EnvironmentSetupService {
       return Promise.reject(new Error('Cannot start environment setup while detection is active'));
     }
     const inputKey = `${installRootKey(input.installRoot)}\0${input.profileId}`;
+    return this.trackOperation(inputKey, () => this.execute(input));
+  }
+
+  importExisting(input: EnvironmentImportInput): Promise<EnvironmentState> {
+    if (this.detectFlight) {
+      return Promise.reject(
+        new Error('Cannot import an environment while detection is active'),
+      );
+    }
+    const key = `import\0${installRootKey(input.runtimeRoot)}\0${input.profileId}`;
+    return this.trackOperation(key, () => this.executeImport(input));
+  }
+
+  validate(): Promise<EnvironmentState> {
+    if (this.detectFlight) {
+      return Promise.reject(
+        new Error('Cannot validate an environment while detection is active'),
+      );
+    }
+    return this.trackOperation('validate', () => this.executeValidation());
+  }
+
+  private trackOperation(
+    key: string,
+    callback: () => Promise<EnvironmentState>,
+  ): Promise<EnvironmentState> {
     if (this.inFlight) {
-      if (this.inFlightInput === inputKey) return this.inFlight;
+      if (this.inFlightInput === key) return this.inFlight;
       return Promise.reject(
         new Error('A different environment setup input is already active'),
       );
     }
-    const operation = this.execute(input);
+    const operation = callback();
     const tracked = operation.finally(() => {
       if (this.inFlight === tracked) {
         this.inFlight = undefined;
         this.inFlightInput = undefined;
+        this.activating = false;
       }
     });
     this.inFlight = tracked;
-    this.inFlightInput = inputKey;
+    this.inFlightInput = key;
     return tracked;
+  }
+
+  private async activateBackend(
+    transaction: EnvironmentBackendTransaction,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    this.activating = true;
+    await transaction.activate();
+  }
+
+  private async rollbackBackend(
+    transaction: EnvironmentBackendTransaction,
+  ): Promise<unknown> {
+    try {
+      await transaction.rollback();
+      return undefined;
+    } catch (error) {
+      return error;
+    }
   }
 
   private async executeDetect(installRoot: string): Promise<EnvironmentState> {
@@ -696,7 +1039,13 @@ export class EnvironmentSetupService {
     };
     try {
       const hardware = await this.options.detectHardware(normalizedRoot);
-      this.state = { ...this.state, hardware, active: false, error: restoredError };
+      this.state = {
+        ...this.state,
+        hardware,
+        stage: 'select',
+        active: false,
+        error: restoredError,
+      };
       return this.getState();
     } catch (error) {
       this.state = { ...this.state, active: false, healthy: false, error: errorMessage(error) };
@@ -821,6 +1170,290 @@ export class EnvironmentSetupService {
     );
   }
 
+  private async executeValidation(): Promise<EnvironmentState> {
+    const controller = new AbortController();
+    this.controller = controller;
+    const { signal } = controller;
+    let transaction: EnvironmentBackendTransaction | undefined;
+    let transactionActivated = false;
+
+    try {
+      await this.loaded;
+      if (this.state.active) {
+        throw new Error('Cannot validate the environment while setup is active');
+      }
+      const config = this.state.config;
+      if (config === null || config.status !== 'ready') {
+        throw new Error('Environment validation requires a ready configuration');
+      }
+      const runtime: EnvironmentRuntime | undefined =
+        this.options.manifest.runtimes[config.runtimeId];
+      if (runtime === undefined) {
+        throw new Error(
+          `The environment manifest has no runtime ${config.runtimeId}`,
+        );
+      }
+      signal.throwIfAborted();
+      this.state = {
+        ...this.state,
+        stage: 'start',
+        active: true,
+        healthy: false,
+        error: null,
+      };
+      await verifyRuntimeFiles(config.runtimeRoot, signal);
+      const resolveRuntimePath = (path: string) =>
+        win32.join(config.runtimeRoot, ...path.split('/').slice(1));
+      const result = await this.options.startBackend({
+        runtimeRoot: config.runtimeRoot,
+        modelDirectory: config.modelDirectory,
+        outputDirectory: config.outputDirectory,
+        profile: config.profile,
+        runtime,
+        pythonPath: resolveRuntimePath(runtime.pythonPath),
+        launchScript: resolveRuntimePath(runtime.launchScript),
+        ffprobePath: resolveRuntimePath(runtime.ffprobePath),
+        signal,
+      });
+      signal.throwIfAborted();
+      transaction = readBackendTransaction(result);
+      const objectInfo = readObjectInfo(result);
+      const missingNodes = requiredComfyNodesFor(config).filter(
+        (node) => !Object.hasOwn(objectInfo, node),
+      );
+      if (missingNodes.length > 0) {
+        throw new Error(`Backend is missing required nodes: ${missingNodes.join(', ')}`);
+      }
+      if (transaction === undefined) {
+        throw new Error('Backend validation did not return a backend transaction');
+      }
+
+      await this.activateBackend(transaction, signal);
+      transactionActivated = true;
+      return this.confirmBackendValidation();
+    } catch (error) {
+      let message = errorMessage(error);
+      if (transaction !== undefined && !transactionActivated) {
+        const rollbackError = await this.rollbackBackend(transaction);
+        if (rollbackError !== undefined) {
+          message += `; backend rollback failed: ${errorMessage(rollbackError)}`;
+        }
+      }
+      this.state = {
+        ...this.state,
+        error: message,
+        active: false,
+        healthy: false,
+      };
+      if (message !== errorMessage(error)) {
+        throw new Error(message, { cause: error });
+      }
+      throw error;
+    } finally {
+      if (this.controller === controller) this.controller = undefined;
+    }
+  }
+
+  private async executeImport(
+    input: EnvironmentImportInput,
+  ): Promise<EnvironmentState> {
+    const controller = new AbortController();
+    this.controller = controller;
+    const { signal } = controller;
+    let candidate: EnvironmentConfig | undefined;
+    let previousConfig: EnvironmentConfig | null = null;
+    let readyCommitted: EnvironmentConfig | undefined;
+    let transaction: EnvironmentBackendTransaction | undefined;
+    let transactionActivated = false;
+
+    try {
+      await this.loaded;
+      const runtimeRoot = validateInstallRoot(input.runtimeRoot);
+      if (!PROFILES.has(input.profileId)) {
+        throw new Error(`Unknown environment profile: ${String(input.profileId)}`);
+      }
+      const installRoot = validateInstallRoot(this.options.defaultInstallRoot);
+      previousConfig = this.state.config;
+      signal.throwIfAborted();
+      this.state = {
+        ...this.state,
+        installRoot,
+        stage: 'detect',
+        progress: { downloadedBytes: 0, totalBytes: 0 },
+        selection: null,
+        error: null,
+        active: true,
+        healthy: false,
+      };
+
+      const hardware = await this.options.detectHardware(runtimeRoot);
+      signal.throwIfAborted();
+      this.state = { ...this.state, hardware };
+      this.setStage('select');
+      const recommended = selectEnvironmentRecommendation(
+        hardware,
+        this.options.manifest,
+      );
+      validateProfile(input.profileId, hardware);
+      const selection: EnvironmentProfileSelection = {
+        ...recommended,
+        profile: input.profileId,
+      };
+      this.state = { ...this.state, selection };
+
+      const modelRoot = await resolveExistingModelRoot(runtimeRoot);
+      signal.throwIfAborted();
+      const modelDirectory = win32.join(modelRoot, 'diffusion_models');
+      runtimeTopLevel(selection.runtime);
+      const resolveRuntimePath = (path: string) =>
+        win32.join(runtimeRoot, ...path.split('/').slice(1));
+      const pythonPath = resolveRuntimePath(selection.runtime.pythonPath);
+      const launchScript = resolveRuntimePath(selection.runtime.launchScript);
+      const ffprobePath = resolveRuntimePath(selection.runtime.ffprobePath);
+      const now = new Date().toISOString();
+      candidate = {
+        schemaVersion: 1,
+        runtimeId: selection.runtime.id,
+        runtimeRoot,
+        modelDirectory,
+        outputDirectory: this.options.outputDirectory,
+        installRoot,
+        profile: selection.profile,
+        hardwareFingerprint: {
+          gpu: hardware.gpu,
+          vramGiB: hardware.vramGiB,
+          ramGiB: hardware.ramGiB,
+          cudaComputeCapability: hardware.cudaComputeCapability,
+        },
+        manifestVersion: String(this.options.manifest.version),
+        status: 'installing',
+        createdAt:
+          previousConfig?.runtimeRoot === runtimeRoot
+            ? previousConfig.createdAt
+            : now,
+        updatedAt: now,
+      };
+
+      this.setStage('verify');
+      await verifyRuntimeFiles(runtimeRoot, signal);
+      const variants =
+        this.options.existingModelVariants ?? DEFAULT_EXISTING_MODEL_VARIANTS;
+      const modelFiles: EnvironmentModelFile[] = [];
+      for (const model of selection.modelFiles) {
+        signal.throwIfAborted();
+        modelFiles.push(
+          await selectExistingModelFingerprint(
+            modelRoot,
+            model,
+            variants[model.path],
+          ),
+        );
+      }
+      const totalBytes = modelFiles.reduce(
+        (total, model) => total + model.size,
+        0,
+      );
+      if (!Number.isSafeInteger(totalBytes)) {
+        throw new Error('Existing model byte total must be a safe integer');
+      }
+      this.setProgress(0, totalBytes);
+      await verifyModelFiles(
+        modelRoot,
+        modelFiles,
+        signal,
+        (currentFile, verifiedBytes) => {
+          this.setProgress(verifiedBytes, totalBytes, currentFile);
+        },
+      );
+
+      signal.throwIfAborted();
+      this.setStage('start');
+      const result = await this.options.startBackend({
+        runtimeRoot,
+        modelDirectory,
+        outputDirectory: this.options.outputDirectory,
+        profile: selection.profile,
+        runtime: selection.runtime,
+        pythonPath,
+        launchScript,
+        ffprobePath,
+        signal,
+      });
+      signal.throwIfAborted();
+      transaction = readBackendTransaction(result);
+      const objectInfo = readObjectInfo(result);
+      const missingNodes = requiredComfyNodesFor(candidate).filter(
+        (node) => !Object.hasOwn(objectInfo, node),
+      );
+      if (missingNodes.length > 0) {
+        throw new Error(`Backend is missing required nodes: ${missingNodes.join(', ')}`);
+      }
+
+      signal.throwIfAborted();
+      const ready = await this.options.store.commitReady(candidate);
+      readyCommitted = ready;
+      if (transaction !== undefined) {
+        await this.activateBackend(transaction, signal);
+        transactionActivated = true;
+      } else {
+        signal.throwIfAborted();
+      }
+      this.state = {
+        ...this.state,
+        config: ready,
+        stage: 'ready',
+        error: null,
+        active: false,
+        healthy: true,
+      };
+      return this.getState();
+    } catch (error) {
+      const originalMessage = errorMessage(error);
+      let message = originalMessage;
+      this.state = {
+        ...this.state,
+        error: originalMessage,
+        active: false,
+        healthy: false,
+      };
+      if (transaction !== undefined && !transactionActivated) {
+        const rollbackError = await this.rollbackBackend(transaction);
+        if (rollbackError !== undefined) {
+          message += `; backend rollback failed: ${errorMessage(rollbackError)}`;
+        }
+      }
+      if (readyCommitted && candidate) {
+        try {
+          if (previousConfig?.status === 'ready') {
+            const restored = await this.options.store.commitReady(previousConfig);
+            this.state = { ...this.state, config: restored };
+          } else {
+            const failed: EnvironmentConfig = {
+              ...candidate,
+              status: 'failed',
+              updatedAt: new Date().toISOString(),
+            };
+            await this.options.store.save(failed);
+            this.state = { ...this.state, config: failed };
+          }
+        } catch (rollbackError) {
+          this.state = {
+            ...this.state,
+            config: readyCommitted,
+          };
+          message += `; ready rollback failed: ${errorMessage(rollbackError)}`;
+        }
+      }
+      this.state = { ...this.state, error: message };
+      if (message !== originalMessage) {
+        throw new Error(message, { cause: error });
+      }
+      throw error;
+    } finally {
+      if (this.controller === controller) this.controller = undefined;
+    }
+  }
+
   private async execute(input: EnvironmentStartInput): Promise<EnvironmentState> {
     const controller = new AbortController();
     this.controller = controller;
@@ -926,31 +1559,97 @@ export class EnvironmentSetupService {
       } else {
         await assertNotReparsePoint(layout.workDirectory, 'the installation work directory');
         await assertNotReparsePoint(layout.downloadDirectory, 'the download directory');
-        await (this.options.downloadParts ?? defaultDownloadParts)({
+        const downloadDirectory = layout.downloadDirectory;
+        const archivePath = layout.archivePath;
+        const { parts: validatedParts } = validateDownloadPartPaths({
           parts: selection.runtime.archiveParts,
-          directory: layout.downloadDirectory,
-          destination: layout.archivePath,
-          expectedSize: selection.runtime.archiveSize,
-          expectedSha256: selection.runtime.archiveSha256,
-          signal,
-          onProgress: (progress) => {
-            this.setProgress(
-              progress.downloadedBytes,
-              progress.totalBytes,
-              progress.path,
-            );
-          },
+          directory: downloadDirectory,
+          destination: archivePath,
         });
+        const sourcesByPart = selection.runtime.archiveParts.map((part) =>
+          runtimeDownloadUrls(part.url),
+        );
+        const partDestinations = validatedParts.map(
+          (part) => part.resolvedPartPath,
+        );
+        const downloadDestinations = [...partDestinations, archivePath];
+        const clearRuntimeTemporaryDownloads = async () => {
+          await Promise.all(
+            downloadDestinations.map((destination) =>
+              clearTemporaryDownload(destination),
+            ),
+          );
+        };
+        const sourceCount = Math.max(...sourcesByPart.map((sources) => sources.length));
+        let downloaded = false;
+        for (let sourceIndex = 0; sourceIndex < sourceCount; sourceIndex += 1) {
+          const parts = selection.runtime.archiveParts.map((part, index) => {
+            const sources = sourcesByPart[index];
+            return { ...part, url: sources[sourceIndex] ?? sources[0] };
+          });
+          for (const [index, part] of parts.entries()) {
+            await prepareDownloadSource(partDestinations[index], part.url);
+          }
+          await prepareDownloadSource(
+            archivePath,
+            JSON.stringify(parts.map((part) => part.url)),
+          );
+          for (let attempt = 1; attempt <= RUNTIME_DOWNLOAD_ATTEMPTS; attempt += 1) {
+            try {
+              await (this.options.downloadParts ?? defaultDownloadParts)({
+                parts,
+                directory: layout.downloadDirectory,
+                destination: layout.archivePath,
+                expectedSize: selection.runtime.archiveSize,
+                expectedSha256: selection.runtime.archiveSha256,
+                signal,
+                onProgress: (progress) => {
+                  this.setProgress(
+                    progress.downloadedBytes,
+                    progress.totalBytes,
+                    progress.path,
+                  );
+                },
+              });
+              await clearRuntimeTemporaryDownloads();
+              downloaded = true;
+              break;
+            } catch (error) {
+              if (signal.aborted) throw error;
+              const finalAttempt = attempt === RUNTIME_DOWNLOAD_ATTEMPTS;
+              const finalSource = sourceIndex === sourceCount - 1;
+              if (finalAttempt && finalSource && isRuntimeDownloadHashMismatch(error)) {
+                await clearRuntimeTemporaryDownloads();
+              }
+              if (finalAttempt) {
+                if (finalSource) throw error;
+                break;
+              }
+              await (this.options.downloadRetryDelay
+                ? this.options.downloadRetryDelay(attempt)
+                : wait(Math.min(1000 * 2 ** (attempt - 1), 8000), signal));
+            }
+          }
+          if (downloaded) break;
+        }
       }
 
       this.setStage('extract');
       if (!runtimeValid) {
+        this.setProgress(0, 0, 'runtime');
         await this.removeStaging(layout);
         await mkdir(layout.stagingDirectory, { recursive: true });
         await (this.options.extract ?? this.options.extractor ?? extractZipArchive)({
           archivePath: layout.archivePath,
           stagingDirectory: layout.stagingDirectory,
           signal,
+          onProgress: (progress) => {
+            this.setProgress(
+              progress.extractedBytes,
+              progress.totalBytes,
+              progress.currentFile,
+            );
+          },
         });
         signal.throwIfAborted();
         const stats = await lstat(layout.stagedRuntimeRoot);
@@ -973,20 +1672,43 @@ export class EnvironmentSetupService {
         for (const model of selection.modelFiles) {
           const destination = win32.join(layout.modelRoot, ...model.path.split('/'));
           this.setProgress(completedBytes, totalModelBytes, model.path);
-          await (this.options.downloadFile ?? defaultDownloadFile)({
-            url: model.url,
-            destination,
-            expectedSize: model.size,
-            expectedSha256: model.sha256,
-            signal,
-            onProgress: (progress) => {
-              this.setProgress(
-                completedBytes + progress.downloadedBytes,
-                totalModelBytes,
-                model.path,
-              );
-            },
-          });
+          const sources = modelDownloadUrls(model);
+          let downloaded = false;
+          for (const [sourceIndex, url] of sources.entries()) {
+            for (let attempt = 1; attempt <= MODEL_DOWNLOAD_ATTEMPTS; attempt += 1) {
+              try {
+                await (this.options.downloadFile ?? defaultDownloadFile)({
+                  url,
+                  destination,
+                  expectedSize: model.size,
+                  expectedSha256: model.sha256,
+                  signal,
+                  onProgress: (progress) => {
+                    this.setProgress(
+                      completedBytes + progress.downloadedBytes,
+                      totalModelBytes,
+                      model.path,
+                    );
+                  },
+                });
+                downloaded = true;
+                break;
+              } catch (error) {
+                if (signal.aborted) throw error;
+                if (attempt === MODEL_DOWNLOAD_ATTEMPTS) {
+                  if (sourceIndex === sources.length - 1) throw error;
+                  break;
+                }
+                await (this.options.downloadRetryDelay
+                  ? this.options.downloadRetryDelay(attempt)
+                  : wait(Math.min(1000 * 2 ** (attempt - 1), 8000), signal));
+                this.setProgress(completedBytes, totalModelBytes, model.path);
+              }
+            }
+            if (downloaded) {
+              break;
+            }
+          }
           completedBytes += model.size;
           this.setProgress(completedBytes, totalModelBytes, model.path);
         }
@@ -1025,7 +1747,7 @@ export class EnvironmentSetupService {
       signal.throwIfAborted();
       transaction = readBackendTransaction(result);
       const objectInfo = readObjectInfo(result);
-      const missingNodes = REQUIRED_COMFY_NODES.filter(
+      const missingNodes = requiredComfyNodesFor(candidate).filter(
         (node) => !Object.hasOwn(objectInfo, node),
       );
       if (missingNodes.length > 0) {
@@ -1035,12 +1757,13 @@ export class EnvironmentSetupService {
       signal.throwIfAborted();
       const ready = await this.options.store.commitReady(candidate);
       readyCommitted = ready;
-      signal.throwIfAborted();
       if (transaction !== undefined) {
         // The candidate only replaces the active backend once the ready
         // state is durably committed and no cancellation arrived in between.
-        await transaction.activate();
+        await this.activateBackend(transaction, signal);
         transactionActivated = true;
+      } else {
+        signal.throwIfAborted();
       }
       this.state = {
         ...this.state,
@@ -1052,7 +1775,10 @@ export class EnvironmentSetupService {
       };
       return this.getState();
     } catch (error) {
-      const originalMessage = errorMessage(error);
+      const originalMessage = signal.aborted
+        ? errorMessage(signal.reason)
+        : errorMessage(error);
+      let message = originalMessage;
       this.state = {
         ...this.state,
         error: originalMessage,
@@ -1060,7 +1786,10 @@ export class EnvironmentSetupService {
         healthy: false,
       };
       if (transaction !== undefined && !transactionActivated) {
-        await transaction.rollback().catch(() => undefined);
+        const rollbackError = await this.rollbackBackend(transaction);
+        if (rollbackError !== undefined) {
+          message += `; backend rollback failed: ${errorMessage(rollbackError)}`;
+        }
       }
       if (layout) await this.removeStaging(layout).catch(() => undefined);
       if (readyCommitted && candidate) {
@@ -1081,8 +1810,8 @@ export class EnvironmentSetupService {
           this.state = {
             ...this.state,
             config: readyCommitted,
-            error: `${originalMessage}; ready rollback failed: ${errorMessage(rollbackError)}`,
           };
+          message += `; ready rollback failed: ${errorMessage(rollbackError)}`;
         }
       } else if (candidate && candidateSaved && !preserveReady) {
         const failed: EnvironmentConfig = {
@@ -1096,9 +1825,13 @@ export class EnvironmentSetupService {
         } catch (saveError) {
           this.state = {
             ...this.state,
-            error: `${originalMessage}; unable to save failed state: ${errorMessage(saveError)}`,
           };
+          message += `; unable to save failed state: ${errorMessage(saveError)}`;
         }
+      }
+      this.state = { ...this.state, error: message };
+      if (message !== originalMessage) {
+        throw new Error(message, { cause: error });
       }
       throw error;
     } finally {

@@ -10,12 +10,25 @@ import {
 import type { JobCoordinator } from './jobs';
 import type { MediaRegistry } from './media';
 import type { Store } from './store';
+import { isSpeechGenerationRequest } from './speech-generation';
+import { isImageGenerationRequest } from './image-generation';
+import {
+  applySparkAcceleration,
+  selectSparkAcceleration,
+  type SparkAccelerationEnvironment,
+} from './spark-acceleration';
 import { patchWorkflow } from '../shared/workflow';
-import { withSubtitlePreference } from '../shared/generation-options';
-import { WORKFLOW_NODES, WORKFLOW_PATHS } from '../shared/workflow-nodes';
+import {
+  createNoReferenceTextWorkflow,
+  createReferenceTextWorkflow,
+  WORKFLOW_NODES,
+  WORKFLOW_PATHS,
+} from '../shared/workflow-nodes';
 import type {
   GenerationRequest,
   GenerationStartResult,
+  VideoGenerationRequest,
+  VideoMode,
   WorkExecutionState,
   WorkProgress,
   WorkStage,
@@ -38,7 +51,10 @@ const WORKFLOW_FILENAMES = {
 
 const PROGRESS_FLUSH_INTERVAL_MS = 200;
 
-type WorkflowGraph = Record<string, { inputs: Record<string, unknown> }>;
+type WorkflowGraph = Record<
+  string,
+  { class_type: string; inputs: Record<string, unknown> }
+>;
 
 export interface GenerationHandlerOptions {
   store: Pick<Store, 'listAvatars' | 'addWork' | 'updateWork'>;
@@ -46,13 +62,14 @@ export interface GenerationHandlerOptions {
     ComfyClient,
     'uploadFile' | 'submit' | 'waitForCompletion' | 'history' | 'cancel'
   >;
-  jobCoordinator: Pick<JobCoordinator, 'enqueue'>;
+  jobCoordinator: Pick<JobCoordinator, 'activeCount' | 'enqueue'>;
   workflowsDirectory: string;
   outputDirectory: string;
-  mediaRegistry: Pick<MediaRegistry, 'isSelectedFile'>;
+  mediaRegistry: Pick<MediaRegistry, 'isSelectedFile' | 'isSelectedImage'>;
   uploadsDirectory: string;
-  workflowResolver?: (mode: GenerationRequest["mode"]) => string;
+  workflowResolver?: (mode: VideoMode) => string;
   ensureReady?: () => Promise<unknown>;
+  acceleration?: SparkAccelerationEnvironment;
   copyFile?: typeof copyFile;
   durationReader?: AudioDurationReader;
   removeFile?: typeof rm;
@@ -83,13 +100,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function sanitizeRequest(request: GenerationRequest): GenerationRequest {
-  const sanitized: GenerationRequest = {
+function sanitizeRequest(request: VideoGenerationRequest): VideoGenerationRequest {
+  const sanitized: VideoGenerationRequest = {
     mode: request.mode,
     avatarId: request.avatarId,
     prompt: request.prompt,
     duration: request.duration,
     seed: request.seed,
+    steps: request.steps,
+    referenceImagePaths: [...(request.referenceImagePaths ?? [])],
   };
   if (request.audioPath !== undefined) {
     sanitized.audioPath = request.audioPath;
@@ -97,24 +116,39 @@ function sanitizeRequest(request: GenerationRequest): GenerationRequest {
   if (request.trimStart !== undefined) {
     sanitized.trimStart = request.trimStart;
   }
-  if (request.subtitles !== undefined) {
-    sanitized.subtitles = request.subtitles;
-  }
   return sanitized;
 }
 
-function validateRequest(request: GenerationRequest): void {
+function validateRequest(request: VideoGenerationRequest): void {
   if (
-    typeof request.avatarId !== 'string' ||
-    request.avatarId.trim().length === 0
+    request.avatarId !== null &&
+    (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0)
   ) {
     throw new Error('avatarId must not be empty');
+  }
+  const referenceImagePaths = request.referenceImagePaths === undefined
+    ? []
+    : request.referenceImagePaths;
+  if (
+    !Array.isArray(referenceImagePaths) ||
+    referenceImagePaths.length > 9 ||
+    referenceImagePaths.some(
+      (path) => typeof path !== 'string' || path.trim().length === 0,
+    )
+  ) {
+    throw new Error('referenceImagePaths must contain at most 9 non-empty strings');
+  }
+  if (request.mode === 'audio' && referenceImagePaths.length > 0) {
+    throw new Error('Reference images must be empty for audio generation');
   }
   if (typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
     throw new Error('Generation prompt must not be empty');
   }
   if (!Number.isInteger(request.seed) || request.seed < 0) {
     throw new Error('Generation seed must be a non-negative integer');
+  }
+  if (!Number.isInteger(request.steps) || request.steps < 1 || request.steps > 100) {
+    throw new Error('Generation steps must be an integer between 1 and 100');
   }
   if (request.mode === 'text') {
     if (!Number.isFinite(request.duration) || request.duration < 4 || request.duration > 15) {
@@ -124,6 +158,9 @@ function validateRequest(request: GenerationRequest): void {
   }
   if (request.mode !== 'audio') {
     throw new Error(`Invalid video mode: ${String(request.mode)}`);
+  }
+  if (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0) {
+    throw new Error('avatarId must not be empty');
   }
   if (typeof request.audioPath !== 'string' || request.audioPath.trim().length === 0) {
     throw new Error('audioPath is required for audio generation');
@@ -141,7 +178,7 @@ function validateRequest(request: GenerationRequest): void {
 
 function selectVideoOutput(
   files: ComfyOutputFile[],
-  mode: GenerationRequest['mode'],
+  mode: VideoMode,
 ): ComfyOutputFile {
   const outputNodeId = WORKFLOW_NODES[mode].output;
   const output = files.find(
@@ -225,8 +262,52 @@ async function uploadStagedAudio(
   }
 }
 
+const REFERENCE_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+
+async function cleanupStagedReference(
+  stagedPath: string,
+  remove: typeof rm,
+  reportError: (error: unknown) => void,
+): Promise<void> {
+  try {
+    await remove(stagedPath, { force: true });
+  } catch (error) {
+    try {
+      reportError(error);
+    } catch {
+      // Cleanup reporting must not replace the original job outcome.
+    }
+  }
+}
+
+async function stageReferenceImage(
+  sourcePath: string,
+  workId: string,
+  index: number,
+  uploadsDirectory: string,
+  copy: typeof copyFile,
+  remove: typeof rm,
+  reportError: (error: unknown) => void,
+): Promise<string> {
+  const extension = extname(sourcePath).toLowerCase();
+  if (!REFERENCE_IMAGE_EXTENSIONS.has(extension)) {
+    throw new Error('Reference image must be a PNG, JPEG, or WebP image');
+  }
+  await mkdir(uploadsDirectory, { recursive: true });
+  const stagedPath = join(uploadsDirectory, `${workId}-${index}${extension}`);
+  try {
+    await copy(sourcePath, stagedPath, constants.COPYFILE_EXCL);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      await cleanupStagedReference(stagedPath, remove, reportError);
+    }
+    throw error;
+  }
+  return stagedPath;
+}
+
 function reportCleanupError(error: unknown): void {
-  console.error('[SMO.H3 Studio] Failed to clean staged audio', error);
+  console.error('[SMO.H3 Studio] Failed to clean staged generation media', error);
 }
 
 function reportProgressError(error: unknown): void {
@@ -253,7 +334,7 @@ async function cleanupStagedAudio(
 }
 
 async function validateStagedAudioDuration(
-  request: GenerationRequest,
+  request: VideoGenerationRequest,
   stagedPath: string,
   readDuration: AudioDurationReader,
 ): Promise<void> {
@@ -295,14 +376,27 @@ export function createGenerationHandler(
   const progressErrorReporter = options.progressErrorReporter ?? reportProgressError;
 
   return async (input, executionOptions = {}) => {
-    validateRequest(input);
-    const avatar = store
-      .listAvatars()
-      .find((candidate) => candidate.id === input.avatarId);
-    if (!avatar) {
-      throw new Error(`Avatar not found: ${input.avatarId}`);
+    if (input.mode === 'speech') {
+      throw new Error('Speech generation requires the speech generation handler');
     }
+    if (input.mode === 'image') {
+      throw new Error('Image generation requires the image generation handler');
+    }
+    validateRequest(input);
     const request = sanitizeRequest(input);
+    const referenceImagePaths = request.mode === 'text'
+      ? request.referenceImagePaths ?? []
+      : [];
+    const hasReferences = referenceImagePaths.length > 0;
+    const avatar = hasReferences || request.avatarId === null
+      ? null
+      : store.listAvatars().find((candidate) => candidate.id === request.avatarId);
+    if (!hasReferences && request.avatarId !== null && !avatar) {
+      throw new Error(`Avatar not found: ${request.avatarId}`);
+    }
+    if (jobCoordinator.activeCount > 0) {
+      throw new Error('Another generation is already running');
+    }
     const originalRetryOf = input.retryOf;
     const workId = randomUUID();
     const workflowFilename = WORKFLOW_FILENAMES[request.mode];
@@ -321,7 +415,15 @@ export function createGenerationHandler(
         : resolve(workflowPath) === resolve(defaultWorkflowPath)
           ? workflowFilename
           : requestedWorkflowPath;
+    const acceleration = selectSparkAcceleration(options.acceleration);
     let stagedAudioPath: string | undefined;
+    for (const referencePath of referenceImagePaths) {
+      if (!(await mediaRegistry.isSelectedImage(referencePath))) {
+        throw new Error(
+          'Reference image path must be explicitly selected through files.selectImage',
+        );
+      }
+    }
     if (request.mode === 'audio') {
       const sourcePath = request.audioPath!;
       if (!(await mediaRegistry.isSelectedFile(sourcePath))) {
@@ -338,6 +440,7 @@ export function createGenerationHandler(
     const baseMetadata: WorkMetadata = {
       request,
       workflowVersion,
+      acceleration,
       ...(originalRetryOf ? { retryOf: originalRetryOf } : {}),
     };
 
@@ -386,9 +489,13 @@ export function createGenerationHandler(
       writeState();
     };
 
+    if (jobCoordinator.activeCount > 0) {
+      await cleanupStagedAudio(stagedAudioPath, remove, cleanupErrorReporter);
+      throw new Error('Another generation is already running');
+    }
     store.addWork({
       id: workId,
-      avatarId: request.avatarId,
+      avatarId: hasReferences ? null : request.avatarId,
       mode: request.mode,
       outputPath: null,
       status: 'pending',
@@ -503,10 +610,37 @@ export function createGenerationHandler(
         await options.ensureReady?.();
         throwIfCancelled();
         setExecution('uploading');
-        const image = await comfy.uploadFile({
-          filePath: avatar.photoPath,
-          kind: 'image',
-        });
+        const uploadedNames: string[] = [];
+        for (const [index, sourcePath] of referenceImagePaths.entries()) {
+          const stagedPath = await stageReferenceImage(
+            sourcePath,
+            workId,
+            index,
+            uploadsDirectory,
+            copy,
+            remove,
+            cleanupErrorReporter,
+          );
+          try {
+            throwIfCancelled();
+            uploadedNames.push(
+              await comfy.uploadFile({ filePath: stagedPath, kind: 'image' }),
+            );
+            throwIfCancelled();
+          } finally {
+            await cleanupStagedReference(
+              stagedPath,
+              remove,
+              cleanupErrorReporter,
+            );
+          }
+        }
+        const image = hasReferences || avatar === null
+          ? undefined
+          : await comfy.uploadFile({
+              filePath: avatar!.photoPath,
+              kind: 'image',
+            });
         throwIfCancelled();
         const audio =
           request.mode === 'audio'
@@ -517,30 +651,71 @@ export function createGenerationHandler(
           await readFile(workflowPath, 'utf8'),
         ) as WorkflowGraph;
         throwIfCancelled();
-        const generationPrompt = withSubtitlePreference(
-          request.prompt,
-          request.subtitles ?? false,
-          request.mode,
+        const configuredTransition =
+          frozen[WORKFLOW_NODES[request.mode].seed].inputs.transition_step;
+        if (!Number.isSafeInteger(configuredTransition) || (configuredTransition as number) < 1) {
+          throw new Error('SelfLift transition_step must be a positive integer');
+        }
+        // SelfLift reuses the final low-resolution prediction at the lift and
+        // therefore needs at least one subsequent high-resolution evaluation.
+        const transitionStep = Math.min(
+          configuredTransition as number,
+          Math.max(1, request.steps - 1),
         );
         const changes: Record<string, unknown> =
           request.mode === 'text'
             ? {
-                [WORKFLOW_PATHS.text.image]: image,
-                [WORKFLOW_PATHS.text.prompt]: generationPrompt,
+                ...(hasReferences || request.avatarId === null
+                  ? {}
+                  : { [WORKFLOW_PATHS.text.image]: image }),
+                [WORKFLOW_PATHS.text.prompt]: request.prompt,
                 [WORKFLOW_PATHS.text.duration]: request.duration,
                 [WORKFLOW_PATHS.text.seed]: request.seed,
+                [WORKFLOW_PATHS.text.steps]: request.steps,
                 [WORKFLOW_PATHS.text.output]: `SMO-H3/${workId}`,
               }
             : {
                 [WORKFLOW_PATHS.audio.image]: image,
                 [WORKFLOW_PATHS.audio.audio]: audio,
-                [WORKFLOW_PATHS.audio.prompt]: generationPrompt,
+                [WORKFLOW_PATHS.audio.prompt]: request.prompt,
                 [WORKFLOW_PATHS.audio.trimStart]: request.trimStart ?? 0,
                 [WORKFLOW_PATHS.audio.trimDuration]: request.duration,
                 [WORKFLOW_PATHS.audio.seed]: request.seed,
+                [WORKFLOW_PATHS.audio.steps]: request.steps,
                 [WORKFLOW_PATHS.audio.output]: `SMO-H3/${workId}`,
               };
-        const workflow = patchWorkflow(frozen, changes);
+        changes[WORKFLOW_PATHS[request.mode].transitionStep] = transitionStep;
+        if (request.mode === 'text' && request.steps === 1) {
+          changes[WORKFLOW_PATHS.text.sigmaRefinerStart] = 20;
+        }
+        const patchedWithReferences = patchWorkflow(frozen, changes);
+        const patched = request.mode === 'text'
+          ? hasReferences
+            ? createReferenceTextWorkflow(patchedWithReferences, uploadedNames)
+            : request.avatarId === null
+              ? createNoReferenceTextWorkflow(patchedWithReferences)
+              : patchedWithReferences
+          : patchedWithReferences;
+        if (request.mode === 'audio' && request.steps === 1) {
+          // A one-step BasicScheduler is [sigma, 0]. Force one intermediate
+          // sigma so SelfLift can run one low- and one high-resolution NFE.
+          const refinerId = 'smo_low_step_sigma_refiner';
+          patched[refinerId] = {
+            class_type: 'H3SigmaRefiner',
+            inputs: {
+              extra_steps: 1,
+              start_at_sigma: 20,
+              end_at_sigma: 0,
+              spacing: 'cosine',
+              sigmas: [WORKFLOW_NODES.audio.steps, 0],
+            },
+          };
+          patched[WORKFLOW_NODES.audio.seed].inputs.sigmas = [refinerId, 0];
+        }
+        const workflow = applySparkAcceleration(
+          patched,
+          acceleration,
+        );
         throwIfCancelled();
         const submitted = await comfy.submit(workflow);
         submittedPromptId = submitted.prompt_id;
@@ -564,6 +739,7 @@ export function createGenerationHandler(
         store.updateWork(workId, {
           status: 'done',
           outputPath,
+          completedAt: nowIso(),
           error: null,
         });
       } catch (error) {
@@ -597,28 +773,45 @@ export function createGenerationHandler(
       }
     };
 
-    // Failures settle in Store and coordinator events; callers receive the queued id immediately.
-    void jobCoordinator
-      .enqueue({
-        id: workId,
-        run,
-        cancel: async () => {
-          execution.cancelRequested = true;
-          await interruptIfRequested();
-        },
-      })
-      .catch(() => undefined);
-    return { id: workId };
+    try {
+      // Runtime failures settle in Store and coordinator events; callers
+      // receive the started id immediately.
+      void jobCoordinator
+        .enqueue({
+          id: workId,
+          run,
+          cancel: async () => {
+            execution.cancelRequested = true;
+            await interruptIfRequested();
+          },
+        })
+        .catch(() => undefined);
+      return { id: workId };
+    } catch (error) {
+      await cleanupStagedAudio(stagedAudioPath, remove, cleanupErrorReporter);
+      store.updateWork(workId, {
+        status: 'failed',
+        error: errorMessage(error),
+      });
+      throw error;
+    }
   };
 }
 
 export interface RetryHandlerOptions {
   store: Pick<Store, 'getWork' | 'listAvatars'>;
-  mediaRegistry: Pick<MediaRegistry, 'authorizeSelectedFile'>;
+  mediaRegistry: Pick<
+    MediaRegistry,
+    'authorizeSelectedFile' | 'authorizeSelectedImage'
+  >;
   startGeneration: GenerationHandler;
 }
 
-function isRetryableRequest(value: unknown): value is GenerationRequest {
+type RetryableRequest = Omit<VideoGenerationRequest, 'steps'> & {
+  steps?: VideoGenerationRequest['steps'];
+};
+
+function isRetryableRequest(value: unknown): value is RetryableRequest {
   if (typeof value !== 'object' || value === null) {
     return false;
   }
@@ -626,8 +819,22 @@ function isRetryableRequest(value: unknown): value is GenerationRequest {
   if (request.mode !== 'text' && request.mode !== 'audio') {
     return false;
   }
-  if (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0) {
+  const hasAvatar =
+    typeof request.avatarId === 'string' && request.avatarId.trim().length > 0;
+  if (!hasAvatar && !(request.mode === 'text' && request.avatarId === null)) {
     return false;
+  }
+  if (request.referenceImagePaths !== undefined) {
+    if (
+      !Array.isArray(request.referenceImagePaths) ||
+      request.referenceImagePaths.length > 9 ||
+      request.referenceImagePaths.some(
+        (path) => typeof path !== 'string' || path.trim().length === 0,
+      ) ||
+      (request.mode === 'audio' && request.referenceImagePaths.length > 0)
+    ) {
+      return false;
+    }
   }
   if (typeof request.prompt !== 'string' || request.prompt.trim().length === 0) {
     return false;
@@ -643,6 +850,15 @@ function isRetryableRequest(value: unknown): value is GenerationRequest {
     typeof request.seed !== 'number' ||
     !Number.isInteger(request.seed) ||
     request.seed < 0
+  ) {
+    return false;
+  }
+  if (
+    request.steps !== undefined &&
+    (typeof request.steps !== 'number' ||
+      !Number.isInteger(request.steps) ||
+      request.steps < 1 ||
+      request.steps > 100)
   ) {
     return false;
   }
@@ -670,7 +886,7 @@ function isRetryableRequest(value: unknown): value is GenerationRequest {
 }
 
 function isRetryableMetadata(value: unknown): value is {
-  request: GenerationRequest;
+  request: RetryableRequest;
   workflowVersion: string;
 } {
   if (typeof value !== 'object' || value === null) {
@@ -697,26 +913,102 @@ export function createRetryHandler(
     if (work.status !== 'failed') {
       throw new Error('Only failed works can be retried');
     }
+    if (work.mode === 'speech') {
+      if (!isSpeechGenerationRequest(work.metadata?.request)) {
+        throw new Error('Work metadata is missing a valid speech request');
+      }
+      const storedRequest = work.metadata.request;
+      if (storedRequest.speechMode === 'clone') {
+        const referenceAudioPath = storedRequest.referenceAudioPath!;
+        try {
+          const referenceStats = await stat(referenceAudioPath);
+          if (!referenceStats.isFile()) {
+            throw new Error('Original reference audio is not a file');
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error('Original reference audio is missing');
+          }
+          throw error;
+        }
+        await mediaRegistry.authorizeSelectedFile(referenceAudioPath);
+      }
+      return startGeneration({ ...storedRequest, retryOf: id });
+    }
+    if (work.mode === 'image') {
+      if (
+        !isImageGenerationRequest(work.metadata?.request) ||
+        typeof work.metadata?.workflowVersion !== 'string' ||
+        work.metadata.workflowVersion.length === 0
+      ) {
+        throw new Error('Work metadata is missing a valid image request or workflowVersion');
+      }
+      const storedRequest = work.metadata.request;
+      for (const referencePath of storedRequest.referenceImagePaths ?? []) {
+        try {
+          const referenceStats = await stat(referencePath);
+          if (!referenceStats.isFile()) {
+            throw new Error('Original reference image is not a file');
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error('Original reference image missing');
+          }
+          throw error;
+        }
+        await mediaRegistry.authorizeSelectedImage(referencePath);
+      }
+      return startGeneration(
+        { ...storedRequest, retryOf: id },
+        { workflowPath: work.metadata.workflowVersion },
+      );
+    }
     if (!isRetryableMetadata(work.metadata)) {
       throw new Error('Work metadata is missing request or workflowVersion');
     }
 
-    const { request } = work.metadata;
-    const avatar = store.listAvatars().find((candidate) => candidate.id === request.avatarId);
-    if (avatar === undefined) {
-      throw new Error(`Avatar not found: ${request.avatarId}`);
+    const storedRequest = work.metadata.request;
+    const request: VideoGenerationRequest = {
+      ...storedRequest,
+      steps: storedRequest.steps ?? (storedRequest.mode === 'text' ? 8 : 6),
+    };
+    const referenceImagePaths = request.mode === 'text'
+      ? request.referenceImagePaths ?? []
+      : [];
+    const hasReferences = referenceImagePaths.length > 0;
+    for (const referencePath of referenceImagePaths) {
+      try {
+        const referenceStats = await stat(referencePath);
+        if (!referenceStats.isFile()) {
+          throw new Error('Original reference image is not a file');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error('Original reference image missing');
+        }
+        throw error;
+      }
+      await mediaRegistry.authorizeSelectedImage(referencePath);
     }
+    if (!hasReferences && request.avatarId !== null) {
+      const avatar = store
+        .listAvatars()
+        .find((candidate) => candidate.id === request.avatarId);
+      if (avatar === undefined) {
+        throw new Error(`Avatar not found: ${request.avatarId}`);
+      }
 
-    try {
-      const photoStats = await stat(avatar.photoPath);
-      if (!photoStats.isFile()) {
-        throw new Error('Avatar photo is not a file');
+      try {
+        const photoStats = await stat(avatar.photoPath);
+        if (!photoStats.isFile()) {
+          throw new Error('Avatar photo is not a file');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error('Original avatar photo is missing');
+        }
+        throw error;
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new Error('Original avatar photo is missing');
-      }
-      throw error;
     }
 
     if (request.mode === 'audio') {

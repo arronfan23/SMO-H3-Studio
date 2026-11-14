@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type {
+  EnvironmentImportInput,
   EnvironmentStartInput,
   EnvironmentState,
 } from './environment';
@@ -7,18 +8,33 @@ import { ASPECT_RATIO_OPTIONS, type AspectRatio } from './generation-options';
 import { H3_MODES, type H3Mode } from './prompt-contract';
 import { SKILL_NAMES, type SkillName } from './skills';
 import type {
+  MediaComponentId,
+  MediaComponentState,
+} from './media-components';
+import type {
   Avatar,
   GenerationRequest,
   GenerationStartResult,
   HardwareInfo,
   HardwareProfile,
   HardwareRecommendationInput,
+  ImageGenerationRequest,
+  SpeechCapabilities,
+  SpeechGenerationRequest,
+  SpeechMode,
+  VideoGenerationRequest,
   VideoMode,
   LlmProfile,
   LlmProfileView,
   LlmDiscoveryInput,
   Work,
 } from './types';
+import type {
+  SanmaoProfile,
+  SanmaoProfileView,
+  SanmaoStreamEvent,
+  SanmaoTestResult,
+} from './sanmao';
 
 export { SKILL_NAMES } from './skills';
 
@@ -42,28 +58,47 @@ export interface WindowScreenPoint {
 }
 
 export const IPC_CHANNELS = [
+  'app:getVersion',
   'jobs:start',
   'jobs:retry',
   'jobs:cancel',
+  'jobs:getState',
+  'speech:getCapabilities',
+  'components:getState',
+  'components:install',
+  'components:cancel',
   'files:selectImage',
   'files:selectAudio',
+  'files:authorizeDroppedImage',
+  'files:authorizeDroppedAudio',
   'files:mediaUrl',
   'files:openFolder',
+  'recordings:save',
+  'recordings:discard',
   'llm:saveProfile',
   'llm:getProfile',
   'llm:listModels',
   'llm:testModel',
   'llm:polish',
+  'sanmao:getProfile',
+  'sanmao:saveProfile',
+  'sanmao:testConnection',
+  'sanmao:listModels',
+  'sanmao:send',
+  'sanmao:cancel',
   'avatars:list',
   'avatars:create',
   'avatars:update',
   'avatars:delete',
   'works:list',
   'works:delete',
+  'works:rename',
   'comfy:health',
   'comfy:start',
   'comfy:open',
   'environment:getState',
+  'environment:selectExistingRoot',
+  'environment:import',
   'environment:detect',
   'environment:start',
   'environment:retry',
@@ -85,6 +120,12 @@ const ASPECT_RATIO_VALUES = ASPECT_RATIO_OPTIONS.map((option) => option.value) a
 const positiveFiniteNumber = z.number().finite().positive();
 const nonNegativeFiniteNumber = z.number().finite().nonnegative();
 const emptyPayload = z.object({}).strict();
+
+const sanmaoSendSchema = z.object({
+  conversationId: z.string().uuid(),
+  replyId: z.string().uuid(),
+  text: z.string().trim().min(1).max(32_000),
+}).strict();
 
 const httpUrlSchema = z.string().superRefine((value, context) => {
   let url: URL;
@@ -110,16 +151,28 @@ const httpUrlSchema = z.string().superRefine((value, context) => {
   }
 });
 
-const generationRequestSchema = z
+const sanmaoProfileSchema = z.object({
+  baseUrl: httpUrlSchema,
+  model: nonEmptyString,
+  apiKey: z.string().optional(),
+}).strict();
+
+const sanmaoModelDiscoverySchema = z.object({
+  baseUrl: httpUrlSchema.optional(),
+  apiKey: z.string().optional(),
+}).strict();
+
+const videoGenerationRequestSchema = z
   .object({
     mode: z.enum(['text', 'audio']),
-    avatarId: nonEmptyString,
+    avatarId: nonEmptyString.nullable(),
     prompt: nonEmptyString,
     duration: positiveFiniteNumber,
     seed: z.number().int().nonnegative(),
+    steps: z.number().int().min(1).max(100),
+    referenceImagePaths: z.array(nonEmptyString).max(9).default([]),
     audioPath: nonEmptyString.optional(),
     trimStart: nonNegativeFiniteNumber.optional(),
-    subtitles: z.boolean().optional(),
     retryOf: z.string().optional(),
   })
   .strict()
@@ -131,7 +184,89 @@ const generationRequestSchema = z
         message: 'audioPath is required for audio generation',
       });
     }
-  }) satisfies z.ZodType<GenerationRequest>;
+    if (
+      request.mode === 'audio' &&
+      (typeof request.avatarId !== 'string' || request.avatarId.trim().length === 0)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['avatarId'],
+        message: 'avatarId is required for audio generation',
+      });
+    }
+    if (request.mode === 'audio' && request.referenceImagePaths.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['referenceImagePaths'],
+        message: 'referenceImagePaths must be empty for audio generation',
+      });
+    }
+  }) satisfies z.ZodType<VideoGenerationRequest>;
+
+const speechGenerationRequestSchema = z
+  .object({
+    mode: z.literal('speech'),
+    speechMode: z.enum(['custom', 'clone']),
+    prompt: nonEmptyString,
+    language: nonEmptyString,
+    outputFormat: z.enum(['wav', 'mp3', 'flac', 'm4a']),
+    speechRate: z.number().finite().min(0.5).max(2).optional(),
+    speaker: nonEmptyString.optional(),
+    instruct: z.string().optional(),
+    referenceAudioPath: nonEmptyString.optional(),
+    referenceText: z.string().optional(),
+    retryOf: nonEmptyString.optional(),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (request.speechMode === 'custom' && request.referenceAudioPath === undefined) {
+      context.addIssue({
+        code: 'custom',
+        path: ['referenceAudioPath'],
+        message: 'referenceAudioPath is required for custom speech generation',
+      });
+    }
+    if (
+      request.speechMode === 'clone' &&
+      request.referenceAudioPath === undefined
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['referenceAudioPath'],
+        message: 'referenceAudioPath is required for clone speech generation',
+      });
+    }
+  }) satisfies z.ZodType<SpeechGenerationRequest>;
+
+const imageDimensionSchema = z
+  .number()
+  .int()
+  .min(256)
+  .max(4096)
+  .multipleOf(32);
+
+const imageGenerationRequestSchema = z
+  .object({
+    mode: z.literal('image'),
+    prompt: nonEmptyString,
+    width: imageDimensionSchema,
+    height: imageDimensionSchema,
+    seed: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    steps: z.number().int().min(1).max(100),
+    referenceImagePaths: z.array(nonEmptyString).max(4).default([]),
+    retryOf: nonEmptyString.optional(),
+  })
+  .strict() satisfies z.ZodType<ImageGenerationRequest>;
+
+const generationRequestSchema = z.union([
+  videoGenerationRequestSchema,
+  speechGenerationRequestSchema,
+  imageGenerationRequestSchema,
+]) satisfies z.ZodType<GenerationRequest>;
+
+const componentIdSchema = z
+  .enum(['speech', 'image']) satisfies z.ZodType<MediaComponentId>;
+const componentRequestSchema = z.object({ id: componentIdSchema }).strict();
 
 const llmProfileInputSchema = z
   .object({
@@ -240,6 +375,13 @@ const environmentStartSchema = z
   })
   .strict() satisfies z.ZodType<EnvironmentStartInput>;
 
+const environmentImportSchema = z
+  .object({
+    runtimeRoot: nonEmptyString,
+    profileId: environmentProfileIdSchema,
+  })
+  .strict() satisfies z.ZodType<EnvironmentImportInput>;
+
 function requestSchema<T extends (typeof IPC_CHANNELS)[number], P extends z.ZodType>(
   channel: T,
   payload: P,
@@ -249,6 +391,7 @@ function requestSchema<T extends (typeof IPC_CHANNELS)[number], P extends z.ZodT
 
 export function createIpcSchema() {
   return z.discriminatedUnion('channel', [
+    requestSchema('app:getVersion', emptyPayload),
     requestSchema('jobs:start', generationRequestSchema),
     requestSchema(
       'jobs:retry',
@@ -258,8 +401,24 @@ export function createIpcSchema() {
       'jobs:cancel',
       z.object({ id: nonEmptyString.optional() }).strict(),
     ),
+    requestSchema('jobs:getState', emptyPayload),
+    requestSchema(
+      'speech:getCapabilities',
+      z.object({ speechMode: z.enum(['custom', 'clone']) }).strict(),
+    ),
+    requestSchema('components:getState', componentRequestSchema),
+    requestSchema('components:install', componentRequestSchema),
+    requestSchema('components:cancel', componentRequestSchema),
     requestSchema('files:selectImage', emptyPayload),
     requestSchema('files:selectAudio', emptyPayload),
+    requestSchema(
+      'files:authorizeDroppedImage',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
+    requestSchema(
+      'files:authorizeDroppedAudio',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
     requestSchema(
       'files:mediaUrl',
       z.object({ path: nonEmptyString }).strict(),
@@ -268,11 +427,33 @@ export function createIpcSchema() {
       'files:openFolder',
       z.object({ path: nonEmptyString }).strict(),
     ),
+    requestSchema(
+      'recordings:save',
+      z
+        .object({
+          bytes: z.instanceof(Uint8Array),
+          mimeType: nonEmptyString,
+        })
+        .strict(),
+    ),
+    requestSchema(
+      'recordings:discard',
+      z.object({ path: nonEmptyString }).strict(),
+    ),
     requestSchema('llm:saveProfile', llmProfileInputSchema),
     requestSchema('llm:getProfile', emptyPayload),
     requestSchema('llm:listModels', llmDiscoveryInputSchema),
     requestSchema('llm:testModel', llmProfileInputSchema),
     requestSchema('llm:polish', polishRequestSchema),
+    requestSchema('sanmao:getProfile', emptyPayload),
+    requestSchema('sanmao:saveProfile', sanmaoProfileSchema),
+    requestSchema('sanmao:testConnection', sanmaoProfileSchema),
+    requestSchema('sanmao:listModels', sanmaoModelDiscoverySchema),
+    requestSchema('sanmao:send', sanmaoSendSchema),
+    requestSchema(
+      'sanmao:cancel',
+      z.object({ replyId: z.string().uuid() }).strict(),
+    ),
     requestSchema('avatars:list', emptyPayload),
     requestSchema(
       'avatars:create',
@@ -291,10 +472,16 @@ export function createIpcSchema() {
       'works:delete',
       z.object({ id: nonEmptyString }).strict(),
     ),
+    requestSchema(
+      'works:rename',
+      z.object({ id: nonEmptyString, title: nonEmptyString.max(120) }).strict(),
+    ),
     requestSchema('comfy:health', emptyPayload),
     requestSchema('comfy:start', emptyPayload),
     requestSchema('comfy:open', emptyPayload),
     requestSchema('environment:getState', emptyPayload),
+    requestSchema('environment:selectExistingRoot', emptyPayload),
+    requestSchema('environment:import', environmentImportSchema),
     requestSchema('environment:detect', environmentDetectSchema),
     requestSchema('environment:start', environmentStartSchema),
     requestSchema('environment:retry', environmentStartSchema),
@@ -327,6 +514,10 @@ export interface PolishResult {
   attempts: number;
 }
 
+export interface JobState {
+  activeId: string | null;
+}
+
 export interface ComfyHealth {
   system: Record<string, unknown>;
   devices: Record<string, unknown>[];
@@ -334,6 +525,9 @@ export interface ComfyHealth {
 }
 
 export interface SmoApi {
+  readonly app: {
+    getVersion(): Promise<string>;
+  };
   readonly avatars: {
     list(): Promise<Avatar[]>;
     create(input: IpcPayload<'avatars:create'>): Promise<Avatar>;
@@ -344,13 +538,33 @@ export interface SmoApi {
     start(request: GenerationRequest): Promise<GenerationStartResult>;
     retry(id: string): Promise<GenerationStartResult>;
     cancel(id?: string): Promise<void>;
+    getState(): Promise<JobState>;
+  };
+
+  readonly speech: {
+    getCapabilities(speechMode: SpeechMode): Promise<SpeechCapabilities>;
+  };
+  readonly components: {
+    getState(id: MediaComponentId): Promise<MediaComponentState>;
+    install(id: MediaComponentId): Promise<MediaComponentState>;
+    cancel(id: MediaComponentId): Promise<void>;
   };
 
   readonly files: {
     selectImage(): Promise<string | null>;
     selectAudio(): Promise<string | null>;
+    // Accepts the dropped File itself; the preload resolves its absolute path
+    // via Electron webUtils before invoking IPC, so the renderer can never
+    // authorize an arbitrary string path. Typed structurally (unknown) so the
+    // main-process tsconfig (no DOM lib) still compiles this API surface.
+    authorizeDroppedImage(file: unknown): Promise<string>;
+    authorizeDroppedAudio(file: unknown): Promise<string>;
     mediaUrl(path: string): Promise<string>;
     openFolder(path: string): Promise<void>;
+  };
+  readonly recordings: {
+    save(blob: Blob): Promise<string>;
+    discard(path: string): Promise<void>;
   };
   readonly llm: {
     saveProfile(input: LlmProfile & { apiKey?: string }): Promise<void>;
@@ -359,6 +573,21 @@ export interface SmoApi {
     testModel(input: LlmProfile & { apiKey?: string }): Promise<LlmTestResult>;
     polish(request: LlmPolishInput): Promise<PolishResult>;
   };
+  readonly sanmao: {
+    getProfile(): Promise<SanmaoProfileView | null>;
+    saveProfile(input: SanmaoProfile & { apiKey?: string }): Promise<void>;
+    testConnection(
+      input: SanmaoProfile & { apiKey?: string },
+    ): Promise<SanmaoTestResult>;
+    listModels(input: { baseUrl?: string; apiKey?: string }): Promise<string[]>;
+    send(input: {
+      conversationId: string;
+      replyId: string;
+      text: string;
+    }): Promise<{ ok: true }>;
+    cancel(replyId: string): Promise<void>;
+    subscribe(listener: (event: SanmaoStreamEvent) => void): () => void;
+  };
   readonly comfy: {
     health(): Promise<ComfyHealth>;
     start(): Promise<ComfyHealth>;
@@ -366,6 +595,8 @@ export interface SmoApi {
   };
   readonly environment: {
     getState(): Promise<EnvironmentState>;
+    selectExistingRoot(): Promise<string | null>;
+    importExisting(input: EnvironmentImportInput): Promise<EnvironmentState>;
     detect(installRoot?: string): Promise<EnvironmentState>;
     start(input: EnvironmentStartInput): Promise<EnvironmentState>;
     retry(input: EnvironmentStartInput): Promise<EnvironmentState>;
@@ -381,6 +612,7 @@ export interface SmoApi {
   readonly works: {
     list(): Promise<Work[]>;
     delete(id: string): Promise<void>;
+    rename(input: IpcPayload<'works:rename'>): Promise<Work>;
   };
   readonly window: {
     minimize(): Promise<void>;

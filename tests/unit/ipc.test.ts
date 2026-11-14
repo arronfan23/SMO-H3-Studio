@@ -22,6 +22,8 @@ import {
 import { JobCoordinator } from '../../src/main/jobs';
 import { LlmService } from '../../src/main/llm';
 import { FileLlmConfigStore } from '../../src/main/llm-config';
+import { FileSanmaoConfigStore } from '../../src/main/sanmao-config';
+import { SanmaoService } from '../../src/main/sanmao-service';
 import { SkillsService } from '../../src/main/skills';
 import { Store } from '../../src/main/store';
 import { MediaRegistry } from '../../src/main/media';
@@ -32,21 +34,29 @@ import {
   type SmoApi,
 } from '../../src/shared/ipc';
 import { ASPECT_RATIO_OPTIONS } from '../../src/shared/generation-options';
-import type { Avatar, HardwareInfo, Work } from '../../src/shared/types';
+import type {
+  Avatar,
+  HardwareInfo,
+  ImageGenerationRequest,
+  SpeechGenerationRequest,
+  Work,
+} from '../../src/shared/types';
 import {
   startLlmUpstream,
   type LocalLlmUpstream,
 } from '../fixtures/llm-upstream';
 
-const { cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke } = vi.hoisted(() => {
+const { appGetVersion, cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke, webUtilsGetPathForFile } = vi.hoisted(() => {
   const prefix = Buffer.from('ipc-test-cipher\0');
   const transform = (value: Buffer) =>
     Buffer.from(value.map((byte) => byte ^ 0x5a));
 
   return {
+    appGetVersion: vi.fn(() => '0.3.15-test'),
     exposeInMainWorld: vi.fn(),
     ipcMainHandle: vi.fn(),
     ipcRendererInvoke: vi.fn(),
+    webUtilsGetPathForFile: vi.fn(),
     cipher: {
       isEncryptionAvailable: () => true,
       encryptString: (value: string) =>
@@ -62,10 +72,12 @@ const { cipher, exposeInMainWorld, ipcMainHandle, ipcRendererInvoke } = vi.hoist
 });
 
 vi.mock('electron', () => ({
+  app: { getVersion: appGetVersion },
   contextBridge: { exposeInMainWorld },
   ipcMain: { handle: ipcMainHandle },
   ipcRenderer: { invoke: ipcRendererInvoke },
   safeStorage: cipher,
+  webUtils: { getPathForFile: webUtilsGetPathForFile },
 }));
 
 const generationRequest = {
@@ -74,7 +86,30 @@ const generationRequest = {
   prompt: 'A quiet studio shot.',
   duration: 8,
   seed: 42,
+  steps: 12,
+  referenceImagePaths: [] as string[],
 } as const;
+
+const speechGenerationRequest: SpeechGenerationRequest = {
+  mode: 'speech',
+  speechMode: 'custom',
+  prompt: '本地语音 IPC 测试',
+  language: 'Chinese',
+  outputFormat: 'mp3',
+  speaker: 'Vivian',
+  instruct: '自然地说',
+  referenceAudioPath: 'G:\\audio\\reference.wav',
+};
+
+const imageGenerationRequest: ImageGenerationRequest = {
+  mode: 'image',
+  prompt: '玻璃温室里的晨光',
+  width: 1344,
+  height: 768,
+  seed: 99,
+  steps: 30,
+  referenceImagePaths: [],
+};
 
 const polishRequest = {
   text: 'Animate this presenter photo.',
@@ -117,8 +152,19 @@ const environmentState = {
   healthy: false,
 } as const;
 
+const speechComponentState = {
+  id: 'speech',
+  status: 'ready',
+  downloadedBytes: 100,
+  totalBytes: 100,
+  currentFile: null,
+  error: null,
+  active: false,
+} as const;
+
 class TestIpcRegistry implements IpcHandlerRegistry {
   readonly handlers = new Map<string, IpcHandler>();
+  readonly events: Array<[string, unknown]> = [];
 
   handle(channel: string, handler: IpcHandler): void {
     if (this.handlers.has(channel)) {
@@ -132,7 +178,9 @@ class TestIpcRegistry implements IpcHandlerRegistry {
     if (!handler) {
       throw new Error(`No test handler registered for ${channel}`);
     }
-    return Promise.resolve(handler(payload));
+    return Promise.resolve(handler(payload, {
+      emit: (channel, event) => this.events.push([channel, event]),
+    }));
   }
 }
 
@@ -154,6 +202,22 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     join(directory, 'llm-config.json'),
     cipher,
   );
+  const sanmaoConfig = new FileSanmaoConfigStore(
+    join(directory, 'sanmao-config.json'),
+    cipher,
+  );
+  const sanmao = new SanmaoService({
+    store: sanmaoConfig,
+    queryImpl: async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'OK',
+      };
+    },
+    claudeExecutablePath: join(directory, 'claude.exe'),
+  });
   const jobCoordinator = new JobCoordinator();
   const registry = new TestIpcRegistry();
   const showOpenDialog = vi.fn();
@@ -166,6 +230,17 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
   });
   const services: IpcServices = {
     startGeneration: async () => ({ id: 'injected-job' }),
+    speech: {
+      getCapabilities: async () => ({
+        speakers: ['Vivian'],
+        languages: ['Auto', 'Chinese'],
+      }),
+    },
+    components: {
+      getState: () => ({ ...speechComponentState }),
+      install: async () => ({ ...speechComponentState }),
+      cancel: () => undefined,
+    },
     retryWork: async () => ({ id: 'injected-retry' }),
     deleteWork: async () => {
       throw new Error('Unexpected deleteWork call');
@@ -185,6 +260,8 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
       },
     },
     llmConfig,
+    sanmao,
+    sanmaoConfig,
     store,
     avatars: new AvatarService({
       avatarsDirectory: join(directory, 'avatars'),
@@ -192,6 +269,10 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
       mediaRegistry,
     }),
     files: new FileService({ mediaRegistry, dialog: { showOpenDialog }, outputDirectory: join(directory, 'output'), dataDirectory: directory }),
+    recordings: {
+      save: async () => join(directory, 'recordings', 'recorded.wav'),
+      discard: async () => undefined,
+    },
     comfy: {
       health: async () => ({ system: {}, devices: [] }),
     },
@@ -200,6 +281,8 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     environment: {
       getState: async () => ({ ...environmentState }),
       detect: async () => ({ ...environmentState }),
+      selectExistingRoot: vi.fn(async () => null),
+      importExisting: vi.fn(async () => ({ ...environmentState })),
       start: async () => ({ ...environmentState }),
       retry: async () => ({ ...environmentState }),
       cancel: async () => ({ ...environmentState }),
@@ -277,10 +360,105 @@ describe('IPC input schema', () => {
     ).toThrow(/audioPath/i);
   });
 
+  test('accepts no reference text generation with a null avatarId', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: {
+        ...generationRequest,
+        avatarId: null,
+        referenceImagePaths: [],
+      },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('defaults no reference paths for a legacy avatar request', () => {
+    const { referenceImagePaths: _referenceImagePaths, ...payload } =
+      generationRequest;
+
+    expect(
+      createIpcSchema().parse({ channel: 'jobs:start', payload }),
+    ).toEqual({
+      channel: 'jobs:start',
+      payload: { ...payload, avatarId: 'avatar-1', referenceImagePaths: [] },
+    });
+  });
+
+  test('accepts nine ordered reference paths at the IPC boundary', () => {
+    const referenceImagePaths = Array.from(
+      { length: 9 },
+      (_, index) => `G:\\refs\\${9 - index}.png`,
+    );
+    const request = {
+      channel: 'jobs:start',
+      payload: { ...generationRequest, avatarId: null, referenceImagePaths },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([
+    Array.from({ length: 10 }, (_, index) => `G:\\refs\\${index}.png`),
+    [''],
+    ['   '],
+    ['G:\\refs\\valid.png', 42],
+    null,
+    'G:\\refs\\not-an-array.png',
+  ])('rejects invalid video reference paths: %j', (referenceImagePaths) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...generationRequest, avatarId: null, referenceImagePaths },
+      }),
+    ).toThrow();
+  });
+
+  test.each([
+    { avatarId: '' },
+    { avatarId: '   ' },
+    { unknown: true },
+  ])('keeps no reference video input strict: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...generationRequest, avatarId: null, ...override },
+      }),
+    ).toThrow();
+  });
+
+  test.each([
+    { avatarId: null, referenceImagePaths: [] },
+    { avatarId: 'avatar-1', referenceImagePaths: ['G:\\refs\\one.png'] },
+  ])('keeps audio avatar and no reference constraints: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: {
+          ...generationRequest,
+          mode: 'audio',
+          audioPath: 'G:\\audio\\voice.mp3',
+          ...override,
+        },
+      }),
+    ).toThrow();
+  });
+
+  test('rejects subtitle preferences in new generation requests', () => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...generationRequest, subtitles: true },
+      }),
+    ).toThrow();
+  });
+
   test.each([
     { channel: 'files:selectImage', payload: {} },
     { channel: 'files:selectAudio', payload: {} },
     { channel: 'files:mediaUrl', payload: { path: 'G:\\media\\result.mp4' } },
+    { channel: 'files:authorizeDroppedImage', payload: { path: 'G:\\photos\\dropped.png' } },
+    { channel: 'files:authorizeDroppedAudio', payload: { path: 'G:\\audio\\voice.mp3' } },
   ])('accepts controlled file request $channel', (request) => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
@@ -312,8 +490,240 @@ describe('IPC input schema', () => {
     expect(schema.parse(request)).toEqual(request);
   });
 
+  test.each(['wav', 'mp3', 'flac', 'm4a'] as const)(
+    'speech accepts the %s output format with a strict custom request',
+    (outputFormat) => {
+      const request = {
+        channel: 'jobs:start',
+        payload: { ...speechGenerationRequest, outputFormat },
+      };
+
+      expect(createIpcSchema().parse(request)).toEqual(request);
+    },
+  );
+
+  test('speech accepts clone requests with blank reference text', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: {
+        mode: 'speech',
+        speechMode: 'clone',
+        prompt: '克隆语音',
+        language: 'Auto',
+        outputFormat: 'wav',
+        referenceAudioPath: 'G:\\audio\\reference.wav',
+        referenceText: '  ',
+      },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('sanmao accepts a strict streaming chat request', () => {
+    const request = {
+      channel: 'sanmao:send',
+      payload: {
+        conversationId: '00000000-0000-4000-8000-000000000101',
+        replyId: '00000000-0000-4000-8000-000000000102',
+        text: '你好，三脚猫',
+      },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([
+    {
+      conversationId: 'invalid',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '你好',
+    },
+    {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: ' ',
+    },
+    {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '好'.repeat(32_001),
+    },
+    {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '你好',
+      apiKey: 'must-not-be-accepted',
+    },
+  ])('sanmao rejects an invalid chat payload: %j', (payload) => {
+    expect(() => createIpcSchema().parse({
+      channel: 'sanmao:send',
+      payload,
+    })).toThrow();
+  });
+
+  test.each([
+    {},
+    { baseUrl: 'https://claude.test', apiKey: 'current-key' },
+  ])('sanmao accepts model discovery input: %j', (payload) => {
+    const request = { channel: 'sanmao:listModels', payload };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('sanmao rejects extra model discovery fields', () => {
+    expect(() => createIpcSchema().parse({
+      channel: 'sanmao:listModels',
+      payload: { model: 'must-not-be-required', extra: true },
+    })).toThrow();
+  });
+
+  test('speech accepts a native speech rate', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: { ...speechGenerationRequest, speechRate: 1.5 },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([0.49, 2.01, Number.NaN, Number.POSITIVE_INFINITY])(
+    'speech rejects invalid speechRate=%s',
+    (speechRate) => {
+      expect(() =>
+        createIpcSchema().parse({
+          channel: 'jobs:start',
+          payload: { ...speechGenerationRequest, speechRate },
+        }),
+      ).toThrow();
+    },
+  );
+
+  test('image accepts a strict generation request', () => {
+    const request = {
+      channel: 'jobs:start',
+      payload: imageGenerationRequest,
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('image defaults omitted reference image paths to an empty array', () => {
+    const { referenceImagePaths: _referenceImagePaths, ...payload } =
+      imageGenerationRequest;
+
+    expect(
+      createIpcSchema().parse({ channel: 'jobs:start', payload }),
+    ).toEqual({
+      channel: 'jobs:start',
+      payload: { ...payload, referenceImagePaths: [] },
+    });
+  });
+
+  test.each([1, 2, 3, 4])(
+    'image accepts %i authorized reference image paths',
+    (count) => {
+      const referenceImagePaths = Array.from(
+        { length: count },
+        (_, index) => `G:\\refs\\${index + 1}.png`,
+      );
+      const request = {
+        channel: 'jobs:start',
+        payload: { ...imageGenerationRequest, referenceImagePaths },
+      };
+
+      expect(createIpcSchema().parse(request)).toEqual(request);
+    },
+  );
+
+  test.each([
+    Array.from({ length: 5 }, (_, index) => `G:\\refs\\${index + 1}.png`),
+    [''],
+    ['   '],
+    ['G:\\refs\\valid.png', 42],
+    [null],
+    'G:\\refs\\not-an-array.png',
+  ])('image rejects invalid reference image paths: %j', (referenceImagePaths) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...imageGenerationRequest, referenceImagePaths },
+      }),
+    ).toThrow();
+  });
+
+  test.each([
+    { prompt: ' ' },
+    { width: 1000 },
+    { height: 1023 },
+    { seed: -1 },
+    { steps: 0 },
+    { steps: 101 },
+    { avatarId: 'avatar-must-not-be-accepted' },
+    { unknown: true },
+  ])('image rejects invalid or undeclared request fields: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...imageGenerationRequest, ...override },
+      }),
+    ).toThrow();
+  });
+
+  test.each([
+    { referenceAudioPath: undefined },
+    { referenceAudioPath: '' },
+    { language: '' },
+    { prompt: '  ' },
+    { outputFormat: 'ogg' },
+    { avatarId: 'must-not-be-accepted' },
+  ])('speech rejects an invalid custom request: %j', (override) => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: { ...speechGenerationRequest, ...override },
+      }),
+    ).toThrow();
+  });
+
+  test('speech rejects clone requests without an authorized-audio path field', () => {
+    expect(() =>
+      createIpcSchema().parse({
+        channel: 'jobs:start',
+        payload: {
+          mode: 'speech',
+          speechMode: 'clone',
+          prompt: '克隆语音',
+          language: 'Auto',
+          outputFormat: 'wav',
+        },
+      }),
+    ).toThrow(/referenceAudioPath/i);
+  });
+
+  test.each([
+    { channel: 'speech:getCapabilities', payload: {} },
+    { channel: 'speech:getCapabilities', payload: { speechMode: 'other' } },
+    { channel: 'speech:getCapabilities', payload: { speechMode: 'custom', extra: true } },
+    { channel: 'components:getState', payload: {} },
+    { channel: 'components:getState', payload: { id: 'other' } },
+    { channel: 'components:install', payload: { id: 'speech', extra: true } },
+    { channel: 'components:cancel', payload: { id: 'image', force: true } },
+  ])('speech component IPC rejects a non-strict payload: %j', (request) => {
+    expect(() => createIpcSchema().parse(request)).toThrow();
+  });
+
+  test.each([
+    { channel: 'speech:getCapabilities', payload: { speechMode: 'custom' } },
+    { channel: 'components:getState', payload: { id: 'speech' } },
+    { channel: 'components:install', payload: { id: 'image' } },
+    { channel: 'components:cancel', payload: { id: 'speech' } },
+  ])('speech component IPC accepts a controlled payload: %j', (request) => {
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
   test.each([
     'jobs:cancel',
+    'jobs:getState',
     'llm:getProfile',
     'avatars:list',
     'works:list',
@@ -326,7 +736,12 @@ describe('IPC input schema', () => {
     expect(createIpcSchema().parse(request)).toEqual(request);
   });
 
-  test.each(['environment:getState', 'environment:cancel', 'environment:validate'])(
+  test.each([
+    'environment:getState',
+    'environment:selectExistingRoot',
+    'environment:cancel',
+    'environment:validate',
+  ])(
     'accepts %s with an empty payload',
     (channel) => {
       const request = { channel, payload: {} };
@@ -367,8 +782,32 @@ describe('IPC input schema', () => {
     },
   );
 
+  test('validates environment import with a strict payload', () => {
+    const request = {
+      channel: 'environment:import',
+      payload: {
+        runtimeRoot: 'D:\\Existing\\Runtime',
+        profileId: 'balanced-16gb',
+      },
+    } as const;
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+    for (const payload of [
+      { ...request.payload, extra: true },
+      { ...request.payload, runtimeRoot: '' },
+      { ...request.payload, runtimeRoot: '   ' },
+      { ...request.payload, profileId: 'turbo' },
+      { runtimeRoot: request.payload.runtimeRoot },
+    ]) {
+      expect(() =>
+        createIpcSchema().parse({ channel: 'environment:import', payload }),
+      ).toThrow();
+    }
+  });
+
   test.each([
     { channel: 'environment:getState', payload: { verbose: true } },
+    { channel: 'environment:selectExistingRoot', payload: { verbose: true } },
     { channel: 'environment:cancel', payload: { force: true } },
     { channel: 'environment:validate', payload: { verbose: true } },
     { channel: 'environment:detect', payload: { installRoot: '' } },
@@ -449,6 +888,24 @@ describe('IPC input schema', () => {
     expect(
       schema.parse({ channel: 'works:delete', payload: { id: 'work-1' } }),
     ).toEqual({ channel: 'works:delete', payload: { id: 'work-1' } });
+    expect(
+      schema.parse({
+        channel: 'works:rename',
+        payload: { id: 'work-1', title: '新标题' },
+      }),
+    ).toEqual({
+      channel: 'works:rename',
+      payload: { id: 'work-1', title: '新标题' },
+    });
+    expect(
+      schema.parse({
+        channel: 'works:rename',
+        payload: { id: 'work-1', title: '题'.repeat(120) },
+      }),
+    ).toEqual({
+      channel: 'works:rename',
+      payload: { id: 'work-1', title: '题'.repeat(120) },
+    });
 
     const hardware = schema.parse({
       channel: 'hardware:apply',
@@ -528,6 +985,20 @@ describe('IPC input schema', () => {
     { channel: 'jobs:retry', payload: { id: '' } },
     { channel: 'files:openFolder', payload: { path: '' } },
     { channel: 'files:openFolder', payload: { path: 'G:\\output', extra: true } },
+    { channel: 'files:authorizeDroppedImage', payload: {} },
+    { channel: 'files:authorizeDroppedImage', payload: { path: '' } },
+    { channel: 'files:authorizeDroppedImage', payload: { path: '   ' } },
+    {
+      channel: 'files:authorizeDroppedImage',
+      payload: { path: 'G:\\photos\\dropped.png', shell: true },
+    },
+    { channel: 'files:authorizeDroppedAudio', payload: {} },
+    { channel: 'files:authorizeDroppedAudio', payload: { path: '' } },
+    { channel: 'files:authorizeDroppedAudio', payload: { path: '   ' } },
+    {
+      channel: 'files:authorizeDroppedAudio',
+      payload: { path: 'G:\\audio\\voice.mp3', shell: true },
+    },
     { channel: 'comfy:open', payload: { url: 'http://example.com' } },
     { channel: 'avatars:update', payload: { id: '', name: 'Renamed' } },
     { channel: 'avatars:update', payload: { id: 'avatar-1', name: ' ' } },
@@ -536,6 +1007,12 @@ describe('IPC input schema', () => {
     { channel: 'avatars:delete', payload: { id: 'avatar-1', force: true } },
     { channel: 'works:delete', payload: { id: '' } },
     { channel: 'works:delete', payload: { id: 'work-1', force: true } },
+    { channel: 'works:rename', payload: { id: '', title: '新标题' } },
+    { channel: 'works:rename', payload: { id: 'work-1' } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '' } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '   ' } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '题'.repeat(121) } },
+    { channel: 'works:rename', payload: { id: 'work-1', title: '新标题', outputPath: 'x' } },
   ])('rejects invalid avatar mutation input: %j', (request) => {
     expect(() => createIpcSchema().parse(request)).toThrow();
   });
@@ -728,6 +1205,170 @@ describe('main-process IPC handlers', () => {
     expect(received).toEqual(generationRequest);
   });
 
+  test('forwards a speech generation request through jobs:start', async () => {
+    const startGeneration = vi.fn(async () => ({ id: 'speech-job' }));
+    const harness = await createHarness({ startGeneration });
+
+    await expect(
+      harness.invoke('jobs:start', speechGenerationRequest),
+    ).resolves.toEqual({ id: 'speech-job' });
+    expect(startGeneration).toHaveBeenCalledWith(speechGenerationRequest);
+  });
+
+  test('forwards an image generation request through jobs:start', async () => {
+    const startGeneration = vi.fn(async () => ({ id: 'image-job' }));
+    const harness = await createHarness({ startGeneration });
+
+    await expect(
+      harness.invoke('jobs:start', imageGenerationRequest),
+    ).resolves.toEqual({ id: 'image-job' });
+    expect(startGeneration).toHaveBeenCalledWith(imageGenerationRequest);
+  });
+
+  test('dispatches speech capabilities and component state, install, and cancel', async () => {
+    const getCapabilities = vi.fn(async () => ({
+      speakers: ['Vivian'],
+      languages: ['Chinese'],
+    }));
+    const getState = vi.fn(() => ({ ...speechComponentState }));
+    const install = vi.fn(async () => ({ ...speechComponentState }));
+    const cancel = vi.fn(() => undefined);
+    const harness = await createHarness({
+      speech: { getCapabilities },
+      components: { getState, install, cancel },
+    });
+
+    await expect(
+      harness.invoke('speech:getCapabilities', { speechMode: 'custom' }),
+    ).resolves.toEqual({ speakers: ['Vivian'], languages: ['Chinese'] });
+    expect(getCapabilities).toHaveBeenCalledWith('custom');
+    await expect(
+      harness.invoke('components:getState', { id: 'speech' }),
+    ).resolves.toEqual(speechComponentState);
+    expect(getState).toHaveBeenCalledWith('speech');
+    await expect(
+      harness.invoke('components:install', { id: 'image' }),
+    ).resolves.toEqual(speechComponentState);
+    expect(install).toHaveBeenCalledWith('image');
+    await harness.invoke('components:cancel', { id: 'speech' });
+    expect(cancel).toHaveBeenCalledWith('speech');
+  });
+
+  test('dispatches Sanmao config, connection, stream, and cancellation', async () => {
+    const harness = await createHarness();
+    const send = vi.fn(async (input) => {
+      input.onText('你好');
+      input.onText('，我是三脚猫');
+      return { replyId: input.replyId, text: '你好，我是三脚猫' };
+    });
+    const testConnection = vi.fn(async () => ({ ok: true as const, latencyMs: 12 }));
+    const cancel = vi.fn();
+    harness.services.sanmao = {
+      send,
+      testConnection,
+      listModels: vi.fn(async () => ['claude-a']),
+      cancel,
+      close: vi.fn(),
+    };
+    const profile = {
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-test',
+      apiKey: 'sanmao-secret',
+    };
+
+    await harness.invoke('sanmao:saveProfile', profile);
+    const view = await harness.invoke('sanmao:getProfile', {});
+    expect(view).toMatchObject({ baseUrl: profile.baseUrl, model: profile.model });
+    expect(view).not.toHaveProperty('apiKey');
+    await harness.invoke('sanmao:testConnection', profile);
+    expect(testConnection).toHaveBeenCalledWith(expect.objectContaining({
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      apiKey: profile.apiKey,
+    }));
+
+    const request = {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '你好',
+    };
+    await expect(harness.invoke('sanmao:send', request)).resolves.toEqual({ ok: true });
+    expect(harness.registry.events).toEqual([
+      ['sanmao:stream', { ...request, kind: 'delta', text: '你好' }],
+      ['sanmao:stream', { ...request, kind: 'delta', text: '，我是三脚猫' }],
+      ['sanmao:stream', { ...request, kind: 'done', text: '你好，我是三脚猫' }],
+    ]);
+
+    await harness.invoke('sanmao:cancel', { replyId: request.replyId });
+    expect(cancel).toHaveBeenCalledWith(request.replyId);
+
+    const listModels = vi.fn(async () => ['claude-a']);
+    harness.services.sanmao.listModels = listModels;
+    await expect(harness.invoke('sanmao:listModels', {
+      baseUrl: 'https://claude.test',
+      apiKey: 'override-key',
+    })).resolves.toEqual(['claude-a']);
+    expect(listModels).toHaveBeenCalledWith({
+      baseUrl: 'https://claude.test',
+      apiKey: 'override-key',
+    });
+  });
+
+  test('speech refuses a new component runtime install while any generation is active', async () => {
+    const install = vi.fn(async () => ({ ...speechComponentState }));
+    const harness = await createHarness({
+      components: {
+        getState: () => ({ ...speechComponentState }),
+        install,
+        cancel: () => undefined,
+      },
+    });
+    let finish = (): void => undefined;
+    const active = harness.jobCoordinator.enqueue({
+      id: 'active-video',
+      run: () => new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    });
+
+    await expect(
+      harness.invoke('components:install', { id: 'speech' }),
+    ).rejects.toThrow(/generation.*running|active generation/i);
+    expect(install).not.toHaveBeenCalled();
+    finish();
+    await active;
+  });
+
+  test('accepts video steps and forwards the request unchanged', async () => {
+    const startGeneration = vi.fn(async () => ({ id: 'job-steps' }));
+    const harness = await createHarness({ startGeneration });
+    const video = { ...generationRequest, steps: 12 };
+
+    await expect(harness.invoke('jobs:start', video)).resolves.toEqual({
+      id: 'job-steps',
+    });
+    expect(startGeneration).toHaveBeenCalledWith(video);
+
+    for (const steps of [0, 101, 1.5]) {
+      await expect(
+        harness.invoke('jobs:start', { ...video, steps }),
+      ).rejects.toThrow();
+    }
+    await expect(
+      harness.invoke('jobs:start', { ...video, unknown: true }),
+    ).rejects.toThrow();
+    expect(startGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  test('requires steps in new generation requests', async () => {
+    const harness = await createHarness();
+    const { steps: _steps, ...requestWithoutSteps } = generationRequest;
+
+    await expect(
+      harness.invoke('jobs:start', requestWithoutSteps),
+    ).rejects.toThrow();
+  });
+
   test('cancels only the requested job through the real JobCoordinator', async () => {
     const harness = await createHarness();
     let cancellations = 0;
@@ -750,6 +1391,27 @@ describe('main-process IPC handlers', () => {
     await harness.invoke('jobs:cancel', { id: 'job-1' });
     await completion;
     expect(cancellations).toBe(1);
+  });
+
+  test('returns idle and active job states through jobs:getState', async () => {
+    const harness = await createHarness();
+    let finish!: () => void;
+
+    await expect(harness.invoke('jobs:getState')).resolves.toEqual({ activeId: null });
+    const completion = harness.jobCoordinator.enqueue({
+      id: 'one',
+      run: () => new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    });
+    await expect(harness.invoke('jobs:getState')).resolves.toEqual({ activeId: 'one' });
+
+    finish();
+    await completion;
+    await expect(harness.invoke('jobs:getState')).resolves.toEqual({ activeId: null });
+    await expect(
+      harness.invoke('jobs:getState', { verbose: true }),
+    ).rejects.toThrow();
   });
 
   test('creates managed avatars and dispatches work queries to the real Store', async () => {
@@ -795,6 +1457,62 @@ describe('main-process IPC handlers', () => {
 
     harness.showOpenDialog.mockResolvedValue({ canceled: true, filePaths: [] });
     await expect(harness.invoke('files:selectImage')).resolves.toBeNull();
+  });
+
+  test('authorizes a dropped image so it can be used as an avatar photo', async () => {
+    const harness = await createHarness();
+    const source = join(harness.directory, 'dropped.png');
+    await writeFile(source, 'image-data');
+
+    await expect(
+      harness.invoke('avatars:create', { name: 'Dropped', photoPath: source }),
+    ).rejects.toThrow(/selectImage/i);
+
+    await expect(
+      harness.invoke('files:authorizeDroppedImage', { path: source }),
+    ).resolves.toBe(source);
+
+    const avatar = (await harness.invoke('avatars:create', {
+      name: 'Dropped',
+      photoPath: source,
+    })) as Avatar;
+    expect(avatar.photoPath).toContain(join(harness.directory, 'avatars'));
+    expect(await readFile(avatar.photoPath, 'utf8')).toBe('image-data');
+
+    const mediaUrl = await harness.invoke('files:mediaUrl', { path: source });
+    expect(mediaUrl).toMatch(/^smo-media:\/\/media\//);
+  });
+
+  test('rejects dropped non-image files without authorizing them', async () => {
+    const harness = await createHarness();
+    const audioPath = join(harness.directory, 'voice.mp3');
+    await writeFile(audioPath, 'audio');
+
+    await expect(
+      harness.invoke('files:authorizeDroppedImage', { path: audioPath }),
+    ).rejects.toThrow(/extension/i);
+    await expect(
+      harness.invoke('files:mediaUrl', { path: audioPath }),
+    ).rejects.toThrow(/not allowed/i);
+    await expect(
+      harness.invoke('avatars:create', { name: 'Nope', photoPath: audioPath }),
+    ).rejects.toThrow();
+  });
+
+  test('audio drop authorizes the file for controlled media access', async () => {
+    const harness = await createHarness();
+    const source = join(harness.directory, 'dropped.mp3');
+    await writeFile(source, 'audio-data');
+
+    await expect(
+      harness.invoke('files:mediaUrl', { path: source }),
+    ).rejects.toThrow(/not allowed/i);
+    await expect(
+      harness.invoke('files:authorizeDroppedAudio', { path: source }),
+    ).resolves.toBe(source);
+    await expect(
+      harness.invoke('files:mediaUrl', { path: source }),
+    ).resolves.toMatch(/^smo-media:\/\/media\//);
   });
 
   test('retries a work through the real retry handler', async () => {
@@ -896,6 +1614,44 @@ describe('main-process IPC handlers', () => {
       harness.invoke('works:delete', { id: 'work-1' }),
     ).resolves.toBeUndefined();
     expect(deleted).toEqual(['work-1']);
+  });
+
+  test('renames a work through the real Store without touching the output path', async () => {
+    const harness = await createHarness();
+    const avatar = harness.store.createAvatar({
+      name: 'Presenter',
+      photoPath: 'avatars/presenter.png',
+    });
+    const work = harness.store.addWork({
+      id: 'work-1',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: 'output/work-1.mp4',
+      status: 'done',
+    });
+
+    const renamed = (await harness.invoke('works:rename', {
+      id: work.id,
+      title: '  发布会成片  ',
+    })) as Work;
+
+    expect(renamed).toMatchObject({
+      id: work.id,
+      title: '发布会成片',
+      outputPath: 'output/work-1.mp4',
+    });
+    expect(harness.store.getWork(work.id)).toMatchObject({
+      title: '发布会成片',
+      outputPath: 'output/work-1.mp4',
+    });
+
+    await expect(
+      harness.invoke('works:rename', { id: work.id, title: '   ' }),
+    ).rejects.toThrow();
+    await expect(
+      harness.invoke('works:rename', { id: work.id, title: '题'.repeat(121) }),
+    ).rejects.toThrow();
+    expect(harness.store.getWork(work.id)?.title).toBe('发布会成片');
   });
 
   test('uses saved main-process credentials for all LLM services', async () => {
@@ -1221,6 +1977,56 @@ describe('main-process IPC handlers', () => {
     );
   });
 
+  test('dispatches existing-root selection and returns cancellation', async () => {
+    const harness = await createHarness();
+    const selectExistingRoot = vi.mocked(
+      harness.services.environment.selectExistingRoot,
+    );
+    selectExistingRoot.mockResolvedValueOnce('D:\\Existing\\ComfyUI');
+
+    await expect(
+      harness.invoke('environment:selectExistingRoot'),
+    ).resolves.toBe('D:\\Existing\\ComfyUI');
+
+    selectExistingRoot.mockResolvedValueOnce(null);
+    await expect(
+      harness.invoke('environment:selectExistingRoot'),
+    ).resolves.toBeNull();
+    expect(selectExistingRoot).toHaveBeenCalledTimes(2);
+
+    await expect(
+      harness.invoke('environment:selectExistingRoot', { verbose: true }),
+    ).rejects.toThrow();
+    expect(selectExistingRoot).toHaveBeenCalledTimes(2);
+  });
+
+  test('dispatches environment import only after strict validation', async () => {
+    const harness = await createHarness();
+    const importExisting = vi.mocked(
+      harness.services.environment.importExisting,
+    );
+    const input = {
+      runtimeRoot: 'D:\\Existing\\Runtime',
+      profileId: 'conservative' as const,
+    };
+    const ready = {
+      ...environmentState,
+      stage: 'ready' as const,
+      healthy: true,
+    };
+    importExisting.mockResolvedValueOnce(ready);
+
+    await expect(
+      harness.invoke('environment:import', input),
+    ).resolves.toEqual(ready);
+    expect(importExisting).toHaveBeenCalledWith(input);
+
+    await expect(
+      harness.invoke('environment:import', { ...input, extra: true }),
+    ).rejects.toThrow();
+    expect(importExisting).toHaveBeenCalledTimes(1);
+  });
+
   test('dispatches environment validate with an empty payload', async () => {
     const validate = vi.fn(async () => ({
       ...environmentState,
@@ -1231,6 +2037,8 @@ describe('main-process IPC handlers', () => {
       environment: {
         getState: async () => ({ ...environmentState }),
         detect: async () => ({ ...environmentState }),
+        selectExistingRoot: async () => null,
+        importExisting: async () => ({ ...environmentState }),
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel: async () => ({ ...environmentState }),
@@ -1259,6 +2067,8 @@ describe('main-process IPC handlers', () => {
       environment: {
         getState: async () => ({ ...environmentState }),
         detect,
+        selectExistingRoot: async () => null,
+        importExisting: async () => ({ ...environmentState }),
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel: async () => ({ ...environmentState }),
@@ -1287,6 +2097,8 @@ describe('main-process IPC handlers', () => {
         environment: {
           getState: async () => ({ ...environmentState }),
           detect: async () => ({ ...environmentState }),
+          selectExistingRoot: async () => null,
+          importExisting: async () => ({ ...environmentState }),
           start: run,
           retry: run,
           cancel: async () => ({ ...environmentState }),
@@ -1315,6 +2127,8 @@ describe('main-process IPC handlers', () => {
       environment: {
         getState: async () => ({ ...environmentState }),
         detect: async () => ({ ...environmentState }),
+        selectExistingRoot: async () => null,
+        importExisting: async () => ({ ...environmentState }),
         start: async () => ({ ...environmentState }),
         retry: async () => ({ ...environmentState }),
         cancel,
@@ -1358,6 +2172,15 @@ describe('LLM configuration privacy', () => {
   });
 });
 
+describe('app version IPC', () => {
+  test('returns the Electron package version through the fixed channel', async () => {
+    const harness = await createHarness();
+
+    expect(IPC_CHANNELS).toContain('app:getVersion');
+    await expect(harness.invoke('app:getVersion', {})).resolves.toBe('0.3.15-test');
+  });
+});
+
 describe('preload API', () => {
   let api: SmoApi;
 
@@ -1371,22 +2194,78 @@ describe('preload API', () => {
   beforeEach(() => {
     ipcRendererInvoke.mockReset();
     ipcRendererInvoke.mockImplementation(async () => undefined);
+    webUtilsGetPathForFile.mockReset();
+  });
+
+  test('authorizes dropped images by resolving the File through webUtils, never a raw path', async () => {
+    webUtilsGetPathForFile.mockReturnValue('G:\\photos\\dropped.png');
+    const file = { name: 'dropped.png' };
+
+    await api.files.authorizeDroppedImage(file);
+
+    expect(webUtilsGetPathForFile).toHaveBeenCalledWith(file);
+    expect(ipcRendererInvoke).toHaveBeenCalledTimes(1);
+    expect(ipcRendererInvoke).toHaveBeenCalledWith('files:authorizeDroppedImage', {
+      path: 'G:\\photos\\dropped.png',
+    });
+  });
+
+  test('cannot authorize an arbitrary string path from the renderer', async () => {
+    webUtilsGetPathForFile.mockImplementation(() => {
+      throw new Error('getPathForFile expects a File object');
+    });
+
+    // webUtils.getPathForFile rejects non-File input synchronously, before
+    // any IPC round-trip can happen.
+    expect(() => api.files.authorizeDroppedImage('G:\\private\\hacked.png')).toThrow(
+      /File object/,
+    );
+    expect(ipcRendererInvoke).not.toHaveBeenCalled();
+  });
+
+  test('audio drop resolves the File through webUtils instead of accepting a raw path', async () => {
+    webUtilsGetPathForFile.mockReturnValue('G:\\audio\\dropped.mp3');
+    const file = { name: 'dropped.mp3' };
+
+    await api.files.authorizeDroppedAudio(file);
+
+    expect(webUtilsGetPathForFile).toHaveBeenCalledWith(file);
+    expect(ipcRendererInvoke).toHaveBeenCalledTimes(1);
+    expect(ipcRendererInvoke).toHaveBeenCalledWith('files:authorizeDroppedAudio', {
+      path: 'G:\\audio\\dropped.mp3',
+    });
+  });
+
+  test('audio drop cannot authorize an arbitrary renderer path string', async () => {
+    webUtilsGetPathForFile.mockImplementation(() => {
+      throw new Error('getPathForFile expects a File object');
+    });
+
+    expect(() => api.files.authorizeDroppedAudio('G:\\private\\hacked.mp3')).toThrow(
+      /File object/,
+    );
+    expect(ipcRendererInvoke).not.toHaveBeenCalled();
   });
 
   test('exposes only the fixed domain methods', () => {
     expect(Object.keys(api).sort()).toEqual([
+      'app',
       'avatars',
       'comfy',
+      'components',
       'environment',
       'files',
       'hardware',
       'jobs',
       'llm',
+      'recordings',
+      'sanmao',
+      'speech',
       'window',
       'works',
     ]);
     expect(Object.keys(api.avatars).sort()).toEqual(['create', 'delete', 'list', 'update']);
-    expect(Object.keys(api.jobs).sort()).toEqual(['cancel', 'retry', 'start']);
+    expect(Object.keys(api.jobs).sort()).toEqual(['cancel', 'getState', 'retry', 'start']);
     expect(Object.keys(api.llm).sort()).toEqual([
       'getProfile',
       'listModels',
@@ -1395,22 +2274,33 @@ describe('preload API', () => {
       'testModel',
     ]);
     expect(Object.keys(api.comfy)).toEqual(['health', 'start', 'open']);
+    expect(Object.keys(api.speech)).toEqual(['getCapabilities']);
+    expect(Object.keys(api.components).sort()).toEqual([
+      'cancel',
+      'getState',
+      'install',
+    ]);
     expect(Object.keys(api.environment).sort()).toEqual([
       'cancel',
       'detect',
       'getState',
+      'importExisting',
       'retry',
+      'selectExistingRoot',
       'start',
       'validate',
     ]);
     expect(Object.keys(api.hardware).sort()).toEqual(['apply', 'detect', 'recommend', 'reset']);
-    expect(Object.keys(api.works)).toEqual(['delete', 'list']);
+    expect(Object.keys(api.works)).toEqual(['delete', 'list', 'rename']);
     expect(Object.keys(api.files).sort()).toEqual([
+      'authorizeDroppedAudio',
+      'authorizeDroppedImage',
       'mediaUrl',
       'openFolder',
       'selectAudio',
       'selectImage',
     ]);
+    expect(Object.keys(api.recordings).sort()).toEqual(['discard', 'save']);
     expect(Object.keys(api.window).sort()).toEqual([
       'beginResize',
       'close',
@@ -1420,6 +2310,7 @@ describe('preload API', () => {
       'resize',
       'toggleMaximize',
     ]);
+    expect(Object.keys(api.app)).toEqual(['getVersion']);
 
     const exposedMethods = Object.values(api).flatMap((domain) => Object.keys(domain));
     for (const forbidden of ['invoke', 'shell', 'process', 'require', 'ipcRenderer']) {
@@ -1428,6 +2319,11 @@ describe('preload API', () => {
   });
 
   test.each([
+    {
+      channel: 'app:getVersion',
+      payload: {},
+      call: (smo: SmoApi) => smo.app.getVersion(),
+    },
     {
       channel: 'avatars:list',
       payload: {},
@@ -1455,6 +2351,41 @@ describe('preload API', () => {
       call: (smo: SmoApi) => smo.jobs.start(generationRequest),
     },
     {
+      channel: 'jobs:start',
+      payload: speechGenerationRequest,
+      call: (smo: SmoApi) => smo.jobs.start(speechGenerationRequest),
+    },
+    {
+      channel: 'jobs:start',
+      payload: imageGenerationRequest,
+      call: (smo: SmoApi) => smo.jobs.start(imageGenerationRequest),
+    },
+    {
+      channel: 'speech:getCapabilities',
+      payload: { speechMode: 'custom' },
+      call: (smo: SmoApi) => smo.speech.getCapabilities('custom'),
+    },
+    {
+      channel: 'components:getState',
+      payload: { id: 'speech' },
+      call: (smo: SmoApi) => smo.components.getState('speech'),
+    },
+    {
+      channel: 'components:install',
+      payload: { id: 'image' },
+      call: (smo: SmoApi) => smo.components.install('image'),
+    },
+    {
+      channel: 'components:cancel',
+      payload: { id: 'speech' },
+      call: (smo: SmoApi) => smo.components.cancel('speech'),
+    },
+    {
+      channel: 'jobs:getState',
+      payload: {},
+      call: (smo: SmoApi) => smo.jobs.getState(),
+    },
+    {
       channel: 'jobs:cancel',
       payload: {},
       call: (smo: SmoApi) => smo.jobs.cancel(),
@@ -1478,6 +2409,22 @@ describe('preload API', () => {
       channel: 'files:mediaUrl',
       payload: { path: 'G:\\media\\result.mp4' },
       call: (smo: SmoApi) => smo.files.mediaUrl('G:\\media\\result.mp4'),
+    },
+    {
+      channel: 'files:authorizeDroppedImage',
+      payload: { path: 'G:\\photos\\dropped.png' },
+      call: (smo: SmoApi) => {
+        webUtilsGetPathForFile.mockReturnValueOnce('G:\\photos\\dropped.png');
+        return smo.files.authorizeDroppedImage({ name: 'dropped.png' });
+      },
+    },
+    {
+      channel: 'files:authorizeDroppedAudio',
+      payload: { path: 'G:\\audio\\dropped.mp3' },
+      call: (smo: SmoApi) => {
+        webUtilsGetPathForFile.mockReturnValueOnce('G:\\audio\\dropped.mp3');
+        return smo.files.authorizeDroppedAudio({ name: 'dropped.mp3' });
+      },
     },
     {
       channel: 'llm:saveProfile',
@@ -1582,6 +2529,20 @@ describe('preload API', () => {
       call: (smo: SmoApi) => smo.environment.getState(),
     },
     {
+      channel: 'environment:selectExistingRoot',
+      payload: {},
+      call: (smo: SmoApi) => smo.environment.selectExistingRoot(),
+    },
+    {
+      channel: 'environment:import',
+      payload: { runtimeRoot: 'D:\\Existing\\ComfyUI', profileId: 'balanced-16gb' },
+      call: (smo: SmoApi) =>
+        smo.environment.importExisting({
+          runtimeRoot: 'D:\\Existing\\ComfyUI',
+          profileId: 'balanced-16gb',
+        }),
+    },
+    {
       channel: 'environment:detect',
       payload: {},
       call: (smo: SmoApi) => smo.environment.detect(),
@@ -1623,6 +2584,11 @@ describe('preload API', () => {
       channel: 'works:delete',
       payload: { id: 'work-1' },
       call: (smo: SmoApi) => smo.works.delete('work-1'),
+    },
+    {
+      channel: 'works:rename',
+      payload: { id: 'work-1', title: '新标题' },
+      call: (smo: SmoApi) => smo.works.rename({ id: 'work-1', title: '新标题' }),
     },
     {
       channel: 'window:minimize',

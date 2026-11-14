@@ -1,45 +1,142 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { ExternalLink, FolderOpen, Play, RefreshCw, RotateCcw, Trash2, X } from 'lucide-react';
-import type { Avatar, VideoMode, Work, WorkStatus } from '../shared/types';
+import { ExternalLink, FolderOpen, Pencil, Play, RefreshCw, RotateCcw, Trash2, UserPlus, X } from 'lucide-react';
+import type { Avatar, Work, WorkMode, WorkStatus } from '../shared/types';
 import { StatusBadge } from './JobStatus';
 import { WorkProgressBar } from './WorkProgressBar';
 import { useMediaUrl } from './useMediaUrl';
-import { errorMessage, fileName, parentPath, readWorkExecution, readWorkProgress } from './ui';
+import { errorMessage, fileName, formatElapsedDuration, parentPath, readWorkExecution, readWorkProgress } from './ui';
 
-const FILTERS: { id: 'all' | VideoMode | WorkStatus; label: string }[] = [
+type WorkType = 'all' | 'speech' | 'image' | 'video';
+type VideoType = 'all' | 'text' | 'audio';
+type StatusFilter = 'all' | Exclude<WorkStatus, 'pending'>;
+
+const WORK_TYPE_FILTERS: { id: WorkType; label: string }[] = [
   { id: 'all', label: '全部' },
+  { id: 'speech', label: '语音' },
+  { id: 'image', label: '图像' },
+  { id: 'video', label: '视频' },
+];
+
+const VIDEO_TYPE_FILTERS: { id: VideoType; label: string }[] = [
+  { id: 'all', label: '全部视频' },
   { id: 'text', label: '文字生视频' },
   { id: 'audio', label: '音频数字人' },
-  { id: 'pending', label: '等待中' },
+];
+
+const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
+  { id: 'all', label: '全部状态' },
   { id: 'running', label: '运行中' },
   { id: 'done', label: '已完成' },
   { id: 'failed', label: '失败' },
 ];
 
-function WorkVideo({ work }: { work: Work }) {
+const WORK_MODE_LABELS: Record<WorkMode, string> = {
+  speech: '语音',
+  image: '图像',
+  text: '文字生视频',
+  audio: '音频数字人',
+};
+
+function WorkMedia({ work }: { work: Work }) {
   const { url, error } = useMediaUrl(work.outputPath);
+  const mediaLabel = work.mode === 'speech' ? '语音' : work.mode === 'image' ? '图像' : '视频';
   if (error) {
-    return <p className="form-error" role="alert">视频读取失败：{error}</p>;
+    return <p className="form-error" role="alert">{mediaLabel}读取失败：{error}</p>;
   }
   if (url === null) {
-    return <div className="video-placeholder">正在读取视频…</div>;
+    return <div className="video-placeholder">正在读取{mediaLabel}…</div>;
+  }
+  if (work.mode === 'speech') {
+    return <audio aria-label={`作品语音 ${work.id}`} controls preload="metadata" src={url} />;
+  }
+  if (work.mode === 'image') {
+    return <img aria-label={`作品图像 ${work.id}`} alt={`作品图像 ${work.id}`} src={url} />;
   }
   return <video aria-label={`作品视频 ${work.id}`} controls preload="metadata" src={url} />;
 }
 
-export function WorksPage({ avatars }: { avatars: Avatar[] }) {
+/**
+ * Completion timestamp shown for done works: the recorded completedAt, with a
+ * fallback to the last persisted execution update for records written before
+ * completedAt existed. Returns null when neither is available.
+ */
+function readWorkCompletion(work: Work): { completedAt: string; duration: string } | null {
+  if (work.status !== 'done') {
+    return null;
+  }
+  const completedAt = work.completedAt ?? readWorkExecution(work)?.updatedAt ?? null;
+  if (completedAt === null) {
+    return null;
+  }
+  const completedMs = Date.parse(completedAt);
+  const createdMs = Date.parse(work.createdAt);
+  if (Number.isNaN(completedMs) || Number.isNaN(createdMs)) {
+    return null;
+  }
+  return { completedAt, duration: formatElapsedDuration(completedMs - createdMs) };
+}
+
+/**
+ * Keeps Tab cycling inside a dialog's focusable controls, wrapping at both
+ * ends. When every control is disabled (e.g. while saving), Tab is swallowed
+ * so focus can never escape into the page behind the modal.
+ */
+function trapDialogTabKeyDown(
+  event: KeyboardEvent<HTMLDivElement>,
+  focusableSelector: string,
+): void {
+  const focusable = Array.from(
+    event.currentTarget.querySelectorAll<HTMLInputElement | HTMLButtonElement>(
+      focusableSelector,
+    ),
+  ).filter((element) => !element.disabled);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const active = document.activeElement;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (active === null || !focusable.includes(active as HTMLInputElement | HTMLButtonElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+export function WorksPage({
+  avatars,
+  onUseSpeech,
+  onImportImage,
+}: {
+  avatars: Avatar[];
+  onUseSpeech?: (audioPath: string) => void;
+  onImportImage?: (work: Work) => Promise<void>;
+}) {
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeFilter, setActiveFilter] = useState<'all' | VideoMode | WorkStatus>('all');
+  const [workType, setWorkType] = useState<WorkType>('all');
+  const [videoType, setVideoType] = useState<VideoType>('all');
+  const [status, setStatus] = useState<StatusFilter>('all');
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [retryError, setRetryError] = useState<Record<string, string>>({});
   const [deleteTarget, setDeleteTarget] = useState<Work | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Work | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const renameTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -85,17 +182,56 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
   }, [refresh, works]);
 
   const filteredWorks = useMemo(() => {
-    if (activeFilter === 'all') {
-      return works;
-    }
-    if (activeFilter === 'text' || activeFilter === 'audio') {
-      return works.filter((work) => work.mode === activeFilter);
-    }
-    return works.filter((work) => work.status === activeFilter);
-  }, [works, activeFilter]);
+    const modeFilteredWorks = works.filter((work) => {
+      if (workType === 'all') {
+        return true;
+      }
+      if (workType === 'video') {
+        return (
+          (work.mode === 'text' || work.mode === 'audio') &&
+          (videoType === 'all' || work.mode === videoType)
+        );
+      }
+      return work.mode === workType;
+    });
+    return modeFilteredWorks.filter((work) => status === 'all' || work.status === status);
+  }, [works, workType, videoType, status]);
 
-  const avatarName = (id: string): string =>
-    avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
+  const avatarName = (id: string | null): string =>
+    id === null
+      ? '无数字模特'
+      : avatars.find((avatar) => avatar.id === id)?.name ?? '未知模特';
+
+  const workTitle = (work: Work): string =>
+    work.title !== null && work.title.trim().length > 0
+      ? work.title
+      : work.mode === 'speech'
+        ? '语音作品'
+        : work.mode === 'image'
+          ? '图像作品'
+          : avatarName(work.avatarId);
+
+  const deleteTargetOutputPath = deleteTarget?.outputPath ?? null;
+  const deleteTargetDescription =
+    deleteTarget === null ||
+    deleteTargetOutputPath === null ||
+    deleteTargetOutputPath.trim().length === 0
+      ? null
+      : (() => {
+          const owner =
+            deleteTarget.mode === 'text' || deleteTarget.mode === 'audio'
+              ? deleteTarget.avatarId === null
+                ? '无数字模特的'
+                : `模特“${avatarName(deleteTarget.avatarId)}”的`
+              : '';
+          const mediaType =
+            deleteTarget.mode === 'speech'
+              ? '音频文件'
+              : deleteTarget.mode === 'image'
+                ? '图像文件'
+                : '视频文件';
+          return `确定要删除${owner}作品“${fileName(deleteTargetOutputPath)}”吗？作品记录和${mediaType}将一起删除，此操作不可撤销。`;
+        })();
 
   const retry = async (work: Work): Promise<void> => {
     setRetrying((current) => new Set(current).add(work.id));
@@ -154,6 +290,83 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     }
   }, [deleteTarget]);
 
+  const renameDialogWasOpen = useRef(false);
+
+  useEffect(() => {
+    if (renameTarget !== null) {
+      renameDialogWasOpen.current = true;
+      return;
+    }
+    if (!renameDialogWasOpen.current) {
+      return;
+    }
+    renameDialogWasOpen.current = false;
+    const trigger = renameTriggerRef.current;
+    renameTriggerRef.current = null;
+    if (trigger !== null && trigger.isConnected) {
+      trigger.focus();
+    } else {
+      pageRef.current?.focus();
+    }
+  }, [renameTarget]);
+
+  const openRenameDialog = (work: Work, trigger: HTMLButtonElement): void => {
+    renameTriggerRef.current = trigger;
+    setRenameTarget(work);
+    setRenameValue(work.title ?? '');
+    setRenameError(null);
+  };
+
+  const closeRenameDialog = (): void => {
+    setRenameTarget(null);
+    setRenameError(null);
+  };
+
+  const confirmRename = async (): Promise<void> => {
+    if (renameTarget === null || renaming) {
+      return;
+    }
+    if (renameValue.trim().length === 0) {
+      setRenameError('作品标题不能为空');
+      return;
+    }
+    setRenaming(true);
+    setRenameError(null);
+    try {
+      await window.smo.works.rename({ id: renameTarget.id, title: renameValue });
+      if (!mountedRef.current) {
+        return;
+      }
+      await refresh();
+      if (mountedRef.current) {
+        closeRenameDialog();
+      }
+    } catch (renameFailure) {
+      if (mountedRef.current) {
+        setRenameError(errorMessage(renameFailure));
+      }
+    } finally {
+      if (mountedRef.current) {
+        setRenaming(false);
+      }
+    }
+  };
+
+  const handleRenameDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!renaming) {
+        closeRenameDialog();
+      }
+      return;
+    }
+    if (event.key !== 'Tab') {
+      return;
+    }
+    trapDialogTabKeyDown(event, 'input, .modal-actions button');
+  };
+
   const openDeleteDialog = (work: Work, trigger: HTMLButtonElement): void => {
     deleteTriggerRef.current = trigger;
     setDeleteTarget(work);
@@ -203,26 +416,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
     if (event.key !== 'Tab') {
       return;
     }
-    const buttons = Array.from(
-      event.currentTarget.querySelectorAll<HTMLButtonElement>('.modal-actions button'),
-    ).filter((button) => !button.disabled);
-    if (buttons.length === 0) {
-      event.preventDefault();
-      return;
-    }
-    const active = document.activeElement;
-    const first = buttons[0];
-    const last = buttons[buttons.length - 1];
-    if (!buttons.includes(active as HTMLButtonElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && active === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
+    trapDialogTabKeyDown(event, '.modal-actions button');
   };
 
   return (
@@ -238,17 +432,48 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
         </button>
       </header>
       {error && <p className="form-error" role="alert">作品列表更新失败：{error}</p>}
-      <div className="works-filters" role="group" aria-label="作品筛选">
-        {FILTERS.map((filter) => (
-          <button
-            key={filter.id}
-            type="button"
-            className={activeFilter === filter.id ? 'button button-primary' : 'button button-secondary'}
-            onClick={() => setActiveFilter(filter.id)}
-          >
-            {filter.label}
-          </button>
-        ))}
+      <div className="works-filters">
+        <div className="works-filter-group" role="group" aria-label="作品类型">
+          {WORK_TYPE_FILTERS.map((filter) => (
+            <button
+              key={filter.id}
+              type="button"
+              aria-pressed={workType === filter.id}
+              className={workType === filter.id ? 'button button-primary' : 'button button-secondary'}
+              onClick={() => setWorkType(filter.id)}
+            >
+              {filter.label}
+            </button>
+          ))}
+        </div>
+        {workType === 'video' && (
+          <div className="works-filter-group" role="group" aria-label="视频类型">
+            {VIDEO_TYPE_FILTERS.map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                aria-pressed={videoType === filter.id}
+                className={videoType === filter.id ? 'button button-primary' : 'button button-secondary'}
+                onClick={() => setVideoType(filter.id)}
+              >
+                {filter.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="works-filter-group" role="group" aria-label="作品状态">
+          {STATUS_FILTERS.map((filter) => (
+            <button
+              key={filter.id}
+              type="button"
+              aria-pressed={status === filter.id}
+              className={status === filter.id ? 'button button-primary' : 'button button-secondary'}
+              onClick={() => setStatus(filter.id)}
+            >
+              {filter.label}
+            </button>
+          ))}
+        </div>
       </div>
       {loading ? (
         <div className="page-state">正在读取作品…</div>
@@ -256,12 +481,18 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
         <div className="empty-state"><h3>还没有作品</h3><p>提交生成任务后，可在这里查看真实进度和输出。</p></div>
       ) : (
         <div className="works-list">
-          {filteredWorks.map((work) => (
+          {filteredWorks.map((work) => {
+            const completion = readWorkCompletion(work);
+            return (
             <article className="work-item" key={work.id}>
               <header className="work-header">
                 <div>
-                  <h3>{avatarName(work.avatarId)}</h3>
-                  <p>{work.mode === 'text' ? '文字生视频' : '音频数字人'} · {new Date(work.createdAt).toLocaleString('zh-CN')}</p>
+                  <h3>{workTitle(work)}</h3>
+                  <p>
+                    {WORK_MODE_LABELS[work.mode]} · {new Date(work.createdAt).toLocaleString('zh-CN')}
+                    {completion !== null &&
+                      ` · 完成于 ${new Date(completion.completedAt).toLocaleString('zh-CN')} · 耗时 ${completion.duration}`}
+                  </p>
                 </div>
                 <StatusBadge status={work.status} />
               </header>
@@ -277,8 +508,17 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 <p className="form-error" role="alert">{work.error}</p>
               )}
               {retryError[work.id] && <p className="form-error" role="alert">{retryError[work.id]}</p>}
-              {work.status === 'done' && work.outputPath && <WorkVideo work={work} />}
+              {work.status === 'done' && work.outputPath && <WorkMedia work={work} />}
               <div className="work-actions">
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  aria-label={`重命名作品 ${work.id}`}
+                  onClick={(event) => openRenameDialog(work, event.currentTarget)}
+                >
+                  <Pencil size={16} aria-hidden="true" />
+                  重命名
+                </button>
                 {work.status === 'failed' && (
                   <button
                     className="button button-secondary"
@@ -290,6 +530,43 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                     {retrying.has(work.id) ? '正在重试…' : '重试'}
                   </button>
                 )}
+                {onUseSpeech !== undefined &&
+                  work.mode === 'speech' &&
+                  work.status === 'done' &&
+                  work.outputPath && (
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      aria-label={`用于音频数字人 ${work.id}`}
+                      onClick={() => onUseSpeech(work.outputPath!)}
+                    >
+                      <Play size={16} aria-hidden="true" />
+                      用于音频数字人
+                    </button>
+                  )}
+                {onImportImage !== undefined &&
+                  work.mode === 'image' &&
+                  work.status === 'done' &&
+                  work.outputPath && (
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      onClick={() => {
+                        setRetryError((current) => ({ ...current, [work.id]: '' }));
+                        void onImportImage(work).catch((importError: unknown) => {
+                          if (mountedRef.current) {
+                            setRetryError((current) => ({
+                              ...current,
+                              [work.id]: errorMessage(importError),
+                            }));
+                          }
+                        });
+                      }}
+                    >
+                      <UserPlus size={16} aria-hidden="true" />
+                      导入数字模特
+                    </button>
+                  )}
                 {work.status === 'done' && work.outputPath && (
                   <>
                     <button
@@ -323,7 +600,8 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 )}
               </div>
             </article>
-          ))}
+            );
+          })}
         </div>
       )}
       {deleteTarget !== null && (
@@ -337,9 +615,7 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
           <div className="modal-card">
             <h3>删除作品</h3>
             {deleteTarget.outputPath !== null && deleteTarget.outputPath.trim().length > 0 ? (
-              <p>
-                {`确定要删除模特“${avatarName(deleteTarget.avatarId)}”的作品“${fileName(deleteTarget.outputPath)}”吗？作品记录和视频文件将一起删除，此操作不可撤销。`}
-              </p>
+              <p>{deleteTargetDescription}</p>
             ) : deleteTarget.status === 'failed' ? (
               <p>这条失败记录将被删除，此操作不可撤销。</p>
             ) : (
@@ -363,6 +639,49 @@ export function WorksPage({ avatars }: { avatars: Avatar[] }) {
                 onClick={() => void confirmDelete()}
               >
                 {deleting ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {renameTarget !== null && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="重命名作品"
+          onKeyDown={handleRenameDialogKeyDown}
+        >
+          <div className="modal-card">
+            <h3>重命名作品</h3>
+            <div className="field">
+              <label htmlFor="work-rename-title">作品标题</label>
+              <input
+                id="work-rename-title"
+                value={renameValue}
+                maxLength={120}
+                autoFocus
+                disabled={renaming}
+                onChange={(event) => setRenameValue(event.target.value)}
+              />
+            </div>
+            {renameError && <p className="form-error" role="alert">{renameError}</p>}
+            <div className="modal-actions">
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={renaming}
+                onClick={closeRenameDialog}
+              >
+                <X size={16} aria-hidden="true" /> 取消
+              </button>
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={renaming}
+                onClick={() => void confirmRename()}
+              >
+                {renaming ? '正在保存…' : '保存标题'}
               </button>
             </div>
           </div>

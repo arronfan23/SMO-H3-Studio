@@ -1,15 +1,56 @@
 export type VideoMode = 'text' | 'audio';
+export type WorkMode = VideoMode | 'speech' | 'image';
+export type AudioOutputFormat = 'wav' | 'mp3' | 'flac' | 'm4a';
+export type SpeechMode = 'custom' | 'clone';
 
-export interface GenerationRequest {
+export interface VideoGenerationRequest {
   mode: VideoMode;
-  avatarId: string;
+  avatarId: string | null;
   prompt: string;
   duration: number;
   seed: number;
+  steps: number;
+  referenceImagePaths?: string[];
   audioPath?: string;
   trimStart?: number;
-  subtitles?: boolean;
   retryOf?: string;
+}
+
+export interface SpeechGenerationRequest {
+  mode: 'speech';
+  speechMode: SpeechMode;
+  prompt: string;
+  language: string;
+  outputFormat: AudioOutputFormat;
+  speechRate?: number;
+  speaker?: string;
+  instruct?: string;
+  referenceAudioPath?: string;
+  referenceText?: string;
+  retryOf?: string;
+  /** Legacy video metadata reads can inspect this only as undefined. */
+  steps?: never;
+}
+
+export interface ImageGenerationRequest {
+  mode: 'image';
+  prompt: string;
+  width: number;
+  height: number;
+  seed: number;
+  steps: number;
+  referenceImagePaths?: string[];
+  retryOf?: string;
+}
+
+export type GenerationRequest =
+  | VideoGenerationRequest
+  | SpeechGenerationRequest
+  | ImageGenerationRequest;
+
+export interface SpeechCapabilities {
+  speakers: string[];
+  languages: string[];
 }
 
 export interface GenerationStartResult {
@@ -67,21 +108,31 @@ export interface WorkMetadata {
 
 export interface Work {
   id: string;
-  avatarId: string;
-  mode: VideoMode;
+  avatarId: string | null;
+  mode: WorkMode;
   outputPath: string | null;
   status: WorkStatus;
   createdAt: string;
+  /** Optional user-given title; the UI falls back to the avatar name when null. */
+  title: string | null;
+  /** ISO timestamp recorded when the generation finished; null for older records. */
+  completedAt: string | null;
   promptId: string | null;
   metadata: WorkMetadata | null;
   error: string | null;
 }
 
-export type NewWork = Omit<Work, 'createdAt' | 'promptId' | 'metadata' | 'error'> &
-  Partial<Pick<Work, 'promptId' | 'metadata' | 'error'>>;
+export type NewWork = Omit<
+  Work,
+  'createdAt' | 'title' | 'completedAt' | 'promptId' | 'metadata' | 'error'
+> &
+  Partial<Pick<Work, 'title' | 'completedAt' | 'promptId' | 'metadata' | 'error'>>;
 
 export type WorkUpdate = Partial<
-  Pick<Work, 'status' | 'outputPath' | 'promptId' | 'error' | 'metadata'>
+  Pick<
+    Work,
+    'status' | 'outputPath' | 'title' | 'completedAt' | 'promptId' | 'error' | 'metadata'
+  >
 >;
 
 export interface LlmProfile {

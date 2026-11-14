@@ -17,19 +17,35 @@ import { dirname, join, win32 } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
   EnvironmentSetupService,
+  MODEL_DOWNLOAD_ATTEMPTS,
   REQUIRED_COMFY_NODES,
+  REQUIRED_IMAGE_COMFY_NODES,
   extractZipArchive,
+  inspectImageRuntime,
+  modelDownloadUrls,
+  runtimeDownloadUrls,
+  resolveExistingModelRoot,
+  type EnvironmentExtractInput,
   type EnvironmentSetupServiceOptions,
 } from '../../src/main/environment-setup';
+import * as environmentSetupModule from '../../src/main/environment-setup';
+import * as downloadModule from '../../src/main/download';
 import { EnvironmentStore } from '../../src/main/environment-store';
 import type {
+  DownloadFetch,
   DownloadFileOptions,
   DownloadPartsOptions,
   DownloadReceipt,
 } from '../../src/main/download';
+import {
+  downloadParts as realDownloadParts,
+  modelDownloadUrls as sharedModelDownloadUrls,
+  runtimeDownloadUrls as sharedRuntimeDownloadUrls,
+} from '../../src/main/download';
 import type {
   EnvironmentConfig,
   EnvironmentManifest,
+  EnvironmentState,
 } from '../../src/shared/environment';
 import type { HardwareInfo } from '../../src/shared/types';
 
@@ -42,6 +58,9 @@ type DownloadPartsMock = ReturnType<
 >;
 type DownloadFileMock = ReturnType<
   typeof vi.fn<(options: DownloadFileOptions) => Promise<DownloadReceipt>>
+>;
+type ExtractMock = ReturnType<
+  typeof vi.fn<(input: EnvironmentExtractInput) => Promise<void>>
 >;
 type CommitReady = (config: EnvironmentConfig) => Promise<EnvironmentConfig>;
 type CommitCapableStore = EnvironmentStore & { commitReady: CommitReady };
@@ -69,6 +88,108 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 
 function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function requestUrl(input: Parameters<DownloadFetch>[0]): string {
+  return typeof input === 'string'
+    ? input
+    : input instanceof URL
+      ? input.href
+      : input.url;
+}
+
+function bufferDownloadResponse(data: Buffer, range: string | null): Response {
+  if (!range) {
+    return new Response(data, {
+      status: 200,
+      headers: { 'Content-Length': String(data.length) },
+    });
+  }
+  const match = /^bytes=(\d+)-$/.exec(range);
+  if (!match) return new Response(null, { status: 400 });
+  const start = Number(match[1]);
+  return new Response(data.subarray(start), {
+    status: 206,
+    headers: {
+      'Content-Length': String(data.length - start),
+      'Content-Range': `bytes ${start}-${data.length - 1}/${data.length}`,
+    },
+  });
+}
+
+function incompleteDownloadResponse(data: Buffer): Response {
+  return new Response(data, {
+    status: 200,
+    headers: { 'Content-Length': String(data.length) },
+  });
+}
+
+function crc32(value: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function createStoredZip(entries: Array<{ name: string; content: Buffer }>): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8');
+    const checksum = crc32(entry.content);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0, 12);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(entry.content.length, 18);
+    local.writeUInt32LE(entry.content.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    localParts.push(local, name, entry.content);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(0, 14);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(entry.content.length, 20);
+    central.writeUInt32LE(entry.content.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + entry.content.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDirectory, end]);
 }
 
 function makeManifest(
@@ -110,6 +231,7 @@ function makeManifest(
       estimatedExtractedBytes: 1024,
       pythonPath: `${TOP_LEVEL}/python_embeded/python.exe`,
       launchScript: `${TOP_LEVEL}/tools/launch.py`,
+      ffmpegPath: `${TOP_LEVEL}/tools/ffmpeg/ffmpeg.exe`,
       ffprobePath: `${TOP_LEVEL}/tools/ffmpeg/ffprobe.exe`,
     };
   }
@@ -133,19 +255,62 @@ function makeHardware(overrides: Partial<HardwareInfo> = {}): HardwareInfo {
 }
 
 function makeObjectInfo(): Record<string, Record<string, unknown>> {
-  return Object.fromEntries(REQUIRED_COMFY_NODES.map((node) => [node, {}]));
+  return Object.fromEntries(
+    [...REQUIRED_COMFY_NODES, 'MiniMaxH3SparkAttentionSM120'].map((node) => [node, {}]),
+  );
 }
+
+describe('image runtime inspection', () => {
+  test('reports missing Qwen Image nodes with a component-specific error', () => {
+    expect(inspectImageRuntime({})).toEqual({
+      missingNodes: [...REQUIRED_IMAGE_COMFY_NODES],
+      error: expect.stringMatching(/运行时需要支持 Qwen Image 2\.1/),
+    });
+    expect(REQUIRED_COMFY_NODES).not.toEqual(
+      expect.arrayContaining([...REQUIRED_IMAGE_COMFY_NODES]),
+    );
+  });
+
+  test('accepts a runtime with all image nodes without changing H3 node requirements', () => {
+    const objectInfo = Object.fromEntries(
+      REQUIRED_IMAGE_COMFY_NODES.map((node) => [node, {}]),
+    );
+
+    expect(inspectImageRuntime(objectInfo)).toEqual({ missingNodes: [], error: null });
+    expect(REQUIRED_COMFY_NODES).toContain('SelfLiftH3Sampler');
+  });
+
+  test('keeps a healthy H3 environment ready when image-only nodes are absent', async () => {
+    const harness = await createHarness();
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true, error: null });
+    expect(inspectImageRuntime(makeObjectInfo()).missingNodes).toEqual([
+      ...REQUIRED_IMAGE_COMFY_NODES,
+    ]);
+  });
+});
 
 async function writeRuntimeFiles(
   runtimeRoot: string,
-  options: { corruptLaunch?: boolean; omitManifestEntry?: boolean } = {},
+  options: {
+    corruptLaunch?: boolean;
+    omitFfmpeg?: boolean;
+    omitManifestEntry?: boolean;
+  } = {},
 ): Promise<void> {
   const files = new Map([
     ['python_embeded/python.exe', Buffer.from('python')],
     ['tools/launch.py', Buffer.from('launch')],
+    ['tools/ffmpeg/ffmpeg.exe', Buffer.from('ffmpeg')],
     ['tools/ffmpeg/ffprobe.exe', Buffer.from('ffprobe')],
   ]);
   for (const [path, content] of files) {
+    if (options.omitFfmpeg && path === 'tools/ffmpeg/ffmpeg.exe') continue;
     const destination = join(runtimeRoot, ...path.split('/'));
     await mkdir(dirname(destination), { recursive: true });
     await writeFile(
@@ -176,6 +341,7 @@ interface Harness {
   runtimeRoot: string;
   backend: BackendMock;
   backendInputs: unknown[];
+  extract: ExtractMock;
   downloads: {
     parts: DownloadPartsMock;
     file: DownloadFileMock;
@@ -221,6 +387,7 @@ async function createHarness(
     configure?: (context: {
       failNextModel: { value: number };
       corruptLaunch: { value: boolean };
+      omitFfmpeg: { value: boolean };
       omitManifestEntry: { value: boolean };
       backend: BackendMock;
       downloadProgress: { current: (() => void) | undefined };
@@ -236,6 +403,7 @@ async function createHarness(
   const store = new EnvironmentStore(join(installRoot, 'environment.json'));
   const failNextModel = { value: -1 };
   const corruptLaunch = { value: false };
+  const omitFfmpeg = { value: false };
   const omitManifestEntry = { value: false };
   const downloadProgress = { current: undefined as (() => void) | undefined };
   const networkDownloads: string[] = [];
@@ -250,6 +418,7 @@ async function createHarness(
   overrides.configure?.({
     failNextModel,
     corruptLaunch,
+    omitFfmpeg,
     omitManifestEntry,
     backend,
     downloadProgress,
@@ -303,6 +472,13 @@ async function createHarness(
       sha256: options.expectedSha256,
     };
   });
+  const extract = vi.fn(async ({ stagingDirectory }: EnvironmentExtractInput) => {
+    await writeRuntimeFiles(join(stagingDirectory, TOP_LEVEL), {
+      corruptLaunch: corruptLaunch.value,
+      omitFfmpeg: omitFfmpeg.value,
+      omitManifestEntry: omitManifestEntry.value,
+    });
+  });
 
   const options: EnvironmentSetupServiceOptions = {
     store,
@@ -312,12 +488,8 @@ async function createHarness(
     detectHardware: async () => overrides.hardware ?? makeHardware(),
     downloadParts: parts,
     downloadFile: file,
-    extract: async ({ stagingDirectory }) => {
-      await writeRuntimeFiles(join(stagingDirectory, TOP_LEVEL), {
-        corruptLaunch: corruptLaunch.value,
-        omitManifestEntry: omitManifestEntry.value,
-      });
-    },
+    downloadRetryDelay: async () => undefined,
+    extract,
     startBackend: backend,
     ...overrides.service,
   };
@@ -331,11 +503,73 @@ async function createHarness(
     runtimeRoot: join(installRoot, 'runtime', TOP_LEVEL),
     backend,
     backendInputs,
+    extract,
     downloads: { parts, file },
     networkDownloads,
     setDownloadProgressHandler(handler) {
       downloadProgress.current = handler;
     },
+  };
+}
+
+async function seedExistingEnvironment(
+  harness: Harness,
+  options: {
+    modelRoot?: string;
+    content?: (path: string) => Buffer;
+    omitPath?: string;
+    corruptPath?: string;
+    writeYaml?: boolean;
+  } = {},
+): Promise<{ modelRoot: string; yaml?: string }> {
+  await writeRuntimeFiles(harness.runtimeRoot);
+  const modelRoot =
+    options.modelRoot ?? join(harness.runtimeRoot, 'ComfyUI', 'models');
+  const content = options.content ?? modelContent;
+  for (const model of harness.manifest.modelFiles) {
+    if (model.path === options.omitPath) continue;
+    const destination = join(modelRoot, ...model.path.split('/'));
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(
+      destination,
+      model.path === options.corruptPath
+        ? Buffer.from('corrupt existing model')
+        : content(model.path),
+    );
+  }
+
+  if (!options.writeYaml) return { modelRoot };
+  const yaml = [
+    'h3_selflift_models:',
+    `  base_path: '${modelRoot.replaceAll("'", "''")}'`,
+    '  diffusion_models: diffusion_models',
+    '',
+  ].join('\n');
+  const configPath = join(
+    harness.runtimeRoot,
+    'ComfyUI',
+    'extra_model_paths.yaml',
+  );
+  await writeFile(configPath, yaml, 'utf8');
+  return { modelRoot, yaml };
+}
+
+function makeSingleModelManifest(
+  content: Buffer,
+  path: string = MODEL_PATHS[0],
+): EnvironmentManifest {
+  const manifest = makeManifest();
+  return {
+    ...manifest,
+    modelFiles: [
+      {
+        url: 'https://models.test/large.safetensors',
+        path,
+        size: content.length,
+        sha256: sha256(content),
+        source: 'unit-test',
+      },
+    ],
   };
 }
 
@@ -369,6 +603,914 @@ async function seedReadyConfig(
 
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+async function createExistingModelFixture(): Promise<{
+  directory: string;
+  runtimeRoot: string;
+  configPath: string;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), 'smo-existing-models-'));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const runtimeRoot = join(directory, 'runtime');
+  const comfyDirectory = join(runtimeRoot, 'ComfyUI');
+  await mkdir(comfyDirectory, { recursive: true });
+  return {
+    directory,
+    runtimeRoot,
+    configPath: join(comfyDirectory, 'extra_model_paths.yaml'),
+  };
+}
+
+describe('resolveExistingModelRoot', () => {
+  test('reads a Chinese external base_path from h3_selflift_models', async () => {
+    const { directory, runtimeRoot, configPath } = await createExistingModelFixture();
+    const modelRoot = join(directory, '外置模型', '模型部分');
+    const yaml = `h3_selflift_models:\n  base_path: '${modelRoot}'\n  diffusion_models: diffusion_models\n`;
+    await writeFile(configPath, yaml, 'utf8');
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      win32.normalize(modelRoot),
+    );
+    expect(await readFile(configPath, 'utf8')).toBe(yaml);
+  });
+
+  test('falls back to ComfyUI/models when the config does not exist', async () => {
+    const { runtimeRoot } = await createExistingModelFixture();
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      join(runtimeRoot, 'ComfyUI', 'models'),
+    );
+  });
+
+  test('falls back to ComfyUI/models when h3_selflift_models is absent', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(configPath, "other_models:\n  base_path: 'D:\\models'\n", 'utf8');
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      join(runtimeRoot, 'ComfyUI', 'models'),
+    );
+  });
+
+  test('falls back to ComfyUI/models when base_path is absent', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(
+      configPath,
+      'h3_selflift_models:\n  diffusion_models: diffusion_models\n',
+      'utf8',
+    );
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).resolves.toBe(
+      join(runtimeRoot, 'ComfyUI', 'models'),
+    );
+  });
+
+  test.each([
+    {
+      scenario: 'a non-string',
+      yamlValue: '42',
+      error: /base_path.*string/i,
+    },
+    {
+      scenario: 'a non-absolute path',
+      yamlValue: 'models',
+      error: /absolute/i,
+    },
+    {
+      scenario: 'an unsafe Windows path',
+      yamlValue: "'C:\\models\\CON'",
+      error: /unsafe/i,
+    },
+  ])('rejects $scenario base_path', async ({ yamlValue, error }) => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(
+      configPath,
+      `h3_selflift_models:\n  base_path: ${yamlValue}\n`,
+      'utf8',
+    );
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).rejects.toThrow(error);
+  });
+
+  test('reports malformed YAML instead of silently falling back', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await writeFile(
+      configPath,
+      'h3_selflift_models:\n  base_path: [unterminated\n',
+      'utf8',
+    );
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).rejects.toThrow(
+      /failed to parse .*extra_model_paths\.yaml/i,
+    );
+  });
+
+  test('propagates non-ENOENT read failures', async () => {
+    const { runtimeRoot, configPath } = await createExistingModelFixture();
+    await mkdir(configPath);
+
+    await expect(resolveExistingModelRoot(runtimeRoot)).rejects.toMatchObject({
+      code: 'EISDIR',
+    });
+  });
+});
+
+describe('EnvironmentSetupService existing environment import', () => {
+  const LEGACY_LORA =
+    'loras/dmad_minimax_h3_4step_full_critic_comfy.safetensors';
+  const MIB = 1024 * 1024;
+
+  function makeTransaction(activateError?: Error) {
+    const activate = vi.fn(async () => {
+      if (activateError) throw activateError;
+    });
+    const rollback = vi.fn(async () => undefined);
+    return {
+      activate,
+      rollback,
+      result: {
+        systemStats: { system: { os: 'test' }, devices: [] },
+        objectInfo: makeObjectInfo(),
+        activate,
+        rollback,
+      },
+    };
+  }
+
+  test('imports verified files without downloads, extraction, or path rewrites', async () => {
+    const harness = await createHarness({
+      hardware: makeHardware({ freeDiskGiB: 0 }),
+    });
+    const { modelRoot } = await seedExistingEnvironment(harness);
+    const stage = harness.service as unknown as {
+      setStage(value: string): void;
+    };
+    const originalSetStage = stage.setStage.bind(harness.service);
+    const stages: string[] = [];
+    vi.spyOn(stage, 'setStage').mockImplementation((value) => {
+      stages.push(value);
+      originalSetStage(value);
+    });
+
+    const state = await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    expect(state).toMatchObject({
+      installRoot: harness.installRoot,
+      stage: 'ready',
+      active: false,
+      healthy: true,
+      progress: {
+        downloadedBytes: harness.manifest.modelFiles.reduce(
+          (total, model) => total + model.size,
+          0,
+        ),
+        totalBytes: harness.manifest.modelFiles.reduce(
+          (total, model) => total + model.size,
+          0,
+        ),
+      },
+      config: {
+        installRoot: harness.installRoot,
+        runtimeRoot: harness.runtimeRoot,
+        modelDirectory: join(modelRoot, 'diffusion_models'),
+        outputDirectory: harness.outputDirectory,
+        status: 'ready',
+      },
+    });
+    expect(stages).toEqual(['select', 'verify', 'start']);
+    expect(harness.downloads.parts).not.toHaveBeenCalled();
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+    expect(harness.extract).not.toHaveBeenCalled();
+    expect(harness.networkDownloads).toHaveLength(0);
+    expect(harness.backend).toHaveBeenCalledTimes(1);
+    expect(harness.backendInputs[0]).toMatchObject({
+      runtimeRoot: harness.runtimeRoot,
+      modelDirectory: join(modelRoot, 'diffusion_models'),
+      outputDirectory: harness.outputDirectory,
+      profile: 'high-memory-candidate',
+      runtime: harness.manifest.runtimes.sm120,
+      pythonPath: join(harness.runtimeRoot, 'python_embeded', 'python.exe'),
+      launchScript: join(harness.runtimeRoot, 'tools', 'launch.py'),
+      ffprobePath: join(
+        harness.runtimeRoot,
+        'tools',
+        'ffmpeg',
+        'ffprobe.exe',
+      ),
+    });
+    expect(
+      existsSync(
+        join(harness.runtimeRoot, 'ComfyUI', 'extra_model_paths.yaml'),
+      ),
+    ).toBe(false);
+  });
+
+  test('rejects an existing runtime without ffmpeg before starting the backend', async () => {
+    const harness = await createHarness();
+    await seedExistingEnvironment(harness);
+    await rm(join(harness.runtimeRoot, 'tools', 'ffmpeg', 'ffmpeg.exe'));
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/ffmpeg\.exe.*missing|missing.*ffmpeg\.exe/i);
+
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.service.getState()).toMatchObject({
+      stage: 'verify',
+      active: false,
+      healthy: false,
+      config: null,
+    });
+  });
+
+  test('uses an external YAML model root without modifying the YAML', async () => {
+    const harness = await createHarness();
+    const modelRoot = join(harness.installRoot, '外置模型');
+    const { yaml } = await seedExistingEnvironment(harness, {
+      modelRoot,
+      writeYaml: true,
+    });
+
+    const state = await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'balanced-16gb',
+    });
+
+    expect(state.config?.modelDirectory).toBe(
+      join(modelRoot, 'diffusion_models'),
+    );
+    expect(state.config?.outputDirectory).toBe(harness.outputDirectory);
+    expect(state.config?.installRoot).toBe(harness.installRoot);
+    expect(
+      await readFile(
+        join(harness.runtimeRoot, 'ComfyUI', 'extra_model_paths.yaml'),
+        'utf8',
+      ),
+    ).toBe(yaml);
+  });
+
+  test.each([
+    { scenario: 'missing', omitPath: MODEL_PATHS[0] },
+    { scenario: 'corrupt', corruptPath: MODEL_PATHS[0] },
+  ])('rejects a $scenario existing model without downloading it', async (fixture) => {
+    const harness = await createHarness();
+    await seedExistingEnvironment(harness, fixture);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/model|missing|sha256|hash/i);
+
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.service.getState()).toMatchObject({
+      stage: 'verify',
+      active: false,
+      healthy: false,
+      config: null,
+    });
+  });
+
+  test.each([
+    'C:\\',
+    'relative\\runtime',
+    'C:runtime',
+    'C:\\safe\\..\\escape',
+    '\\\\server\\share',
+    '\\\\?\\C:\\runtime',
+  ])('rejects unsafe runtimeRoot %s before hardware detection', async (runtimeRoot) => {
+    const harness = await createHarness();
+    const detectHardware = vi.fn(async () => makeHardware());
+    const service = new EnvironmentSetupService({
+      store: harness.store,
+      manifest: harness.manifest,
+      defaultInstallRoot: harness.installRoot,
+      outputDirectory: harness.outputDirectory,
+      detectHardware,
+      startBackend: harness.backend,
+    });
+
+    await expect(
+      service.importExisting({ runtimeRoot, profileId: 'conservative' }),
+    ).rejects.toThrow(/installRoot|path/i);
+    expect(detectHardware).not.toHaveBeenCalled();
+  });
+
+  test('rejects unknown and hardware-incompatible profiles', async () => {
+    const harness = await createHarness({
+      hardware: makeHardware({ vramGiB: 16 }),
+    });
+    await seedExistingEnvironment(harness);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'turbo' as never,
+      }),
+    ).rejects.toThrow(/unknown|profile/i);
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/20|high-memory/i);
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('accepts the official LoRA when a legacy variant is injected', async () => {
+    const officialContent = Buffer.from('official-lora');
+    const legacyContent = Buffer.from('legacy-variant-a');
+    const manifest = makeSingleModelManifest(officialContent, LEGACY_LORA);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => officialContent,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: {
+            size: legacyContent.length,
+            sha256: sha256(legacyContent),
+          },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => officialContent });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true });
+  });
+
+  test('accepts the injected fingerprint for the legacy LoRA variant', async () => {
+    const content = Buffer.from('legacy-variant-a');
+    const manifest = makeSingleModelManifest(
+      Buffer.from('official-lora'),
+      LEGACY_LORA,
+    );
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: { size: content.length, sha256: sha256(content) },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true });
+  });
+
+  test('rejects a LoRA whose size matches neither official nor legacy fingerprints', async () => {
+    const officialContent = Buffer.from('official-lora');
+    const legacyContent = Buffer.from('legacy-variant-a');
+    const unknownContent = Buffer.alloc(37, 1);
+    const manifest = makeSingleModelManifest(officialContent, LEGACY_LORA);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => officialContent,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: {
+            size: legacyContent.length,
+            sha256: sha256(legacyContent),
+          },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => unknownContent });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/size mismatch/i);
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('rejects a LoRA whose hash matches neither official nor legacy fingerprints', async () => {
+    const officialContent = Buffer.from('official-lora');
+    const legacyContent = Buffer.from('legacy-variant-a');
+    const unknownContent = Buffer.from('legacy-variant-b');
+    const manifest = makeSingleModelManifest(officialContent, LEGACY_LORA);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => officialContent,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: {
+            size: legacyContent.length,
+            sha256: sha256(legacyContent),
+          },
+        },
+      },
+    });
+    await seedExistingEnvironment(harness, { content: () => unknownContent });
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/sha256|hash/i);
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('pins the production legacy variant to the verified full-size fingerprint', () => {
+    const variants = (
+      environmentSetupModule as unknown as Record<string, unknown>
+    ).DEFAULT_EXISTING_MODEL_VARIANTS;
+
+    expect(variants).toEqual({
+      [LEGACY_LORA]: {
+        size: 1956188032,
+        sha256:
+          'b77b7c00a9091c65282029828c9e178e2090a30ca90582bc01a900fc7c777b71',
+      },
+    });
+  });
+
+  test('does not apply existing-model variants to installation verification', async () => {
+    const content = Buffer.from('legacy-variant-a');
+    const official = makeSingleModelManifest(content, LEGACY_LORA);
+    official.modelFiles[0].sha256 = sha256('legacy-variant-b');
+    const harness = await createHarness({
+      manifest: official,
+      modelContent: () => content,
+      service: {
+        existingModelVariants: {
+          [LEGACY_LORA]: { size: content.length, sha256: sha256(content) },
+        },
+      },
+    });
+    await writeRuntimeFiles(harness.runtimeRoot);
+    const destination = join(
+      harness.installRoot,
+      'models',
+      ...LEGACY_LORA.split('/'),
+    );
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, content);
+    await seedReadyConfig(harness);
+    const restarted = new EnvironmentSetupService({
+      store: harness.store,
+      manifest: official,
+      defaultInstallRoot: harness.installRoot,
+      outputDirectory: harness.outputDirectory,
+      detectHardware: async () => makeHardware(),
+      downloadParts: harness.downloads.parts,
+      downloadFile: harness.downloads.file,
+      startBackend: harness.backend,
+      existingModelVariants: {
+        [LEGACY_LORA]: { size: content.length, sha256: sha256(content) },
+      },
+    });
+
+    await expect(
+      restarted.start({
+        installRoot: harness.installRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/sha256|hash/i);
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+  });
+
+  test('cancel aborts model hashing and never publishes ready', async () => {
+    const content = Buffer.alloc(80 * MIB, 3);
+    const manifest = makeSingleModelManifest(content);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+    const progress = harness.service as unknown as {
+      setProgress(bytes: number, total: number, currentFile?: string): void;
+    };
+    const original = progress.setProgress.bind(harness.service);
+    let cancelling: Promise<unknown> | undefined;
+    vi.spyOn(progress, 'setProgress').mockImplementation(
+      (bytes, total, currentFile) => {
+        original(bytes, total, currentFile);
+        if (bytes > 0 && cancelling === undefined) {
+          cancelling = harness.service.cancel();
+        }
+      },
+    );
+
+    const pending = harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    await cancelling;
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: null,
+    });
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.backend).not.toHaveBeenCalled();
+  });
+
+  test('cancel aborts a waiting import backend and clears active state', async () => {
+    const backendStarted = createDeferred();
+    const finishBackend = createDeferred();
+    let observedSignal: AbortSignal | undefined;
+    const harness = await createHarness({
+      service: {
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          backendStarted.resolve();
+          await finishBackend.promise;
+          input.signal.throwIfAborted();
+          return { systemStats: {}, objectInfo: makeObjectInfo() };
+        },
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    const pending = harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    await backendStarted.promise;
+    const cancelling = harness.service.cancel();
+    expect(observedSignal?.aborted).toBe(true);
+    finishBackend.resolve();
+
+    await expect(pending).rejects.toThrow(/abort|cancel/i);
+    await cancelling;
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: null,
+    });
+  });
+
+  test('cancel waits for atomic import activation without aborting it', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const harness = await createHarness({
+      service: {
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          return transaction.result;
+        },
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    const pending = harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    await activationStarted.promise;
+    let cancelSettled = false;
+    const cancelling = harness.service.cancel().then((state) => {
+      cancelSettled = true;
+      return state;
+    });
+
+    expect(observedSignal?.aborted).toBe(false);
+    expect(cancelSettled).toBe(false);
+    expect(harness.service.getState()).toMatchObject({
+      active: true,
+      healthy: false,
+      error: null,
+    });
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    await expect(cancelling).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('rejects a backend with missing nodes before committing ready', async () => {
+    const harness = await createHarness({
+      service: {
+        startBackend: async () => ({ systemStats: {}, objectInfo: {} }),
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/missing required nodes/i);
+    expect(await harness.store.load()).toBeNull();
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+      config: null,
+    });
+  });
+
+  test('a failed import ready commit rolls back the candidate and preserves old ready', async () => {
+    const old = await createHarness();
+    const oldReady = await seedReadyConfig(old);
+    const transaction = makeTransaction();
+    const harness = await createHarness({
+      outputDirectory: old.outputDirectory,
+      service: {
+        store: old.store,
+        startBackend: async () => transaction.result,
+      },
+    });
+    await seedExistingEnvironment(harness);
+    controlReadyCommit(
+      harness,
+      async () => {
+        throw new Error('import commit exploded');
+      },
+      join(old.installRoot, 'environment.json'),
+    );
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/import commit exploded/i);
+    expect(transaction.activate).not.toHaveBeenCalled();
+    expect(transaction.rollback).toHaveBeenCalledTimes(1);
+    expect(await old.store.load()).toEqual(oldReady);
+    expect(harness.service.getState().config).toEqual(oldReady);
+  });
+
+  test.each([{ previousReady: false }, { previousReady: true }])(
+    'activation failure rolls back import ready with previousReady=$previousReady',
+    async ({ previousReady }) => {
+      const old = previousReady ? await createHarness() : undefined;
+      const oldReady = old ? await seedReadyConfig(old) : undefined;
+      const transaction = makeTransaction(new Error('import activate exploded'));
+      const harness = await createHarness({
+        outputDirectory: old?.outputDirectory,
+        service: {
+          ...(old ? { store: old.store } : {}),
+          startBackend: async () => transaction.result,
+        },
+      });
+      await seedExistingEnvironment(harness);
+
+      await expect(
+        harness.service.importExisting({
+          runtimeRoot: harness.runtimeRoot,
+          profileId: 'high-memory-candidate',
+        }),
+      ).rejects.toThrow(/import activate exploded/i);
+
+      expect(transaction.rollback).toHaveBeenCalledTimes(1);
+      const persisted = await harness.store.load();
+      if (old && oldReady) {
+        expect(persisted).toEqual(oldReady);
+        expect(harness.service.getState().config).toEqual(oldReady);
+      } else {
+        expect(persisted?.status).toBe('failed');
+        expect(harness.service.getState().config?.status).toBe('failed');
+      }
+      expect(harness.service.getState()).toMatchObject({
+        active: false,
+        healthy: false,
+      });
+    },
+  );
+
+  test('surfaces an import backend rollback failure while restoring old ready', async () => {
+    const previous = await createHarness();
+    const oldReady = await seedReadyConfig(previous);
+    const transaction = makeTransaction(new Error('import activate exploded'));
+    transaction.rollback.mockRejectedValue(
+      new Error('import backend rollback exploded'),
+    );
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: {
+        store: previous.store,
+        startBackend: async () => transaction.result,
+      },
+    });
+    await seedExistingEnvironment(harness);
+
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(
+      /import activate exploded[\s\S]*import backend rollback exploded/i,
+    );
+    expect(await previous.store.load()).toEqual(oldReady);
+    expect(harness.service.getState()).toMatchObject({
+      config: oldReady,
+      active: false,
+      healthy: false,
+    });
+    expect(harness.service.getState().error).toMatch(
+      /import activate exploded[\s\S]*import backend rollback exploded/i,
+    );
+  });
+
+  test('reports throttled cumulative model verification progress', async () => {
+    const content = Buffer.alloc(64 * MIB + 128 * 1024, 7);
+    const manifest = makeSingleModelManifest(content);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+    const progress = harness.service as unknown as {
+      setProgress(bytes: number, total: number, currentFile?: string): void;
+    };
+    const original = progress.setProgress.bind(harness.service);
+    const updates: Array<{ bytes: number; total: number; file?: string }> = [];
+    vi.spyOn(progress, 'setProgress').mockImplementation(
+      (bytes, total, currentFile) => {
+        updates.push({ bytes, total, file: currentFile });
+        original(bytes, total, currentFile);
+      },
+    );
+
+    const state = await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    const modelUpdates = updates.filter(
+      (update) => update.file === manifest.modelFiles[0].path,
+    );
+    expect(modelUpdates.map((update) => update.bytes)).toEqual([
+      0,
+      64 * MIB,
+      content.length,
+    ]);
+    expect(modelUpdates.every((update) => update.total === content.length)).toBe(
+      true,
+    );
+    expect(state.progress).toMatchObject({
+      currentFile: manifest.modelFiles[0].path,
+      downloadedBytes: content.length,
+      totalBytes: content.length,
+    });
+  });
+
+  test('does not repeat final progress at an exact 64 MiB boundary', async () => {
+    const content = Buffer.alloc(64 * MIB, 11);
+    const manifest = makeSingleModelManifest(content);
+    const harness = await createHarness({
+      manifest,
+      modelContent: () => content,
+    });
+    await seedExistingEnvironment(harness, { content: () => content });
+    const progress = harness.service as unknown as {
+      setProgress(bytes: number, total: number, currentFile?: string): void;
+    };
+    const original = progress.setProgress.bind(harness.service);
+    const updates: Array<{ bytes: number; file?: string }> = [];
+    vi.spyOn(progress, 'setProgress').mockImplementation(
+      (bytes, _total, currentFile) => {
+        updates.push({ bytes, file: currentFile });
+        original(bytes, _total, currentFile);
+      },
+    );
+
+    await harness.service.importExisting({
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+
+    const modelUpdates = updates.filter(
+      (update) => update.file === manifest.modelFiles[0].path,
+    );
+    expect(modelUpdates.map((update) => update.bytes)).toEqual([0, 64 * MIB]);
+  });
+});
+
+describe('EnvironmentSetupService import coordination', () => {
+  test('identical imports share a promise and different imports are rejected', async () => {
+    const backendStarted = createDeferred();
+    const finishBackend = createDeferred();
+    const backend = vi.fn(async () => {
+      backendStarted.resolve();
+      await finishBackend.promise;
+      return { systemStats: {}, objectInfo: makeObjectInfo() };
+    });
+    const harness = await createHarness({
+      service: { startBackend: backend },
+    });
+    await seedExistingEnvironment(harness);
+    const input = {
+      runtimeRoot: harness.runtimeRoot,
+      profileId: 'high-memory-candidate' as const,
+    };
+
+    const first = harness.service.importExisting(input);
+    await backendStarted.promise;
+    const same = harness.service.importExisting({
+      ...input,
+      runtimeRoot: input.runtimeRoot.replaceAll('\\', '/'),
+    });
+    const differentProfile = harness.service.importExisting({
+      ...input,
+      profileId: 'balanced-16gb',
+    });
+    const differentRoot = harness.service.importExisting({
+      ...input,
+      runtimeRoot: join(harness.installRoot, 'other-runtime'),
+    });
+    expect(same).toBe(first);
+    finishBackend.resolve();
+
+    await expect(differentProfile).rejects.toThrow(/input|busy|active/i);
+    await expect(differentRoot).rejects.toThrow(/input|busy|active/i);
+    await first;
+    expect(backend).toHaveBeenCalledTimes(1);
+  });
+
+  test('import rejects during detection and installation', async () => {
+    const detectStarted = createDeferred();
+    const finishDetect = createDeferred();
+    const detectingHarness = await createHarness({
+      service: {
+        detectHardware: async () => {
+          detectStarted.resolve();
+          await finishDetect.promise;
+          return makeHardware();
+        },
+      },
+    });
+    const detecting = detectingHarness.service.detect();
+    await detectStarted.promise;
+    const duringDetect = detectingHarness.service.importExisting({
+      runtimeRoot: detectingHarness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    finishDetect.resolve();
+    await expect(duringDetect).rejects.toThrow(/detect|busy|active/i);
+    await detecting;
+
+    const downloadStarted = createDeferred();
+    const finishDownload = createDeferred();
+    const installingHarness = await createHarness({
+      service: {
+        downloadParts: async (options) => {
+          downloadStarted.resolve();
+          await finishDownload.promise;
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+    const installing = installingHarness.service.start({
+      installRoot: installingHarness.installRoot,
+      profileId: 'high-memory-candidate',
+    });
+    await downloadStarted.promise;
+    const duringInstall = installingHarness.service.importExisting({
+      runtimeRoot: installingHarness.runtimeRoot,
+      profileId: 'high-memory-candidate',
+    });
+    finishDownload.resolve();
+    await expect(duringInstall).rejects.toThrow(/input|busy|active/i);
+    await installing;
+  });
 });
 
 describe('EnvironmentSetupService installation', () => {
@@ -424,6 +1566,29 @@ describe('EnvironmentSetupService installation', () => {
       expect(yaml).toContain(`${key}: ${key}`);
     }
     expect(existsSync(join(harness.installRoot, '.smo-install', 'staging'))).toBe(false);
+  });
+
+  test('rejects an installed runtime without ffmpeg before becoming ready', async () => {
+    const harness = await createHarness({
+      configure: ({ omitFfmpeg }) => {
+        omitFfmpeg.value = true;
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/ffmpeg\.exe.*missing|missing.*ffmpeg\.exe/i);
+
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect((await harness.store.load())?.status).toBe('failed');
+    expect(harness.service.getState()).toMatchObject({
+      stage: 'verify',
+      active: false,
+      healthy: false,
+    });
   });
 
   test('records the normalized installRoot in the saved environment config', async () => {
@@ -532,6 +1697,36 @@ describe('EnvironmentSetupService installation', () => {
     expect(currentFiles).toEqual(['callback-runtime.zip']);
   });
 
+  test('reports runtime extraction progress while the install is active', async () => {
+    let stateDuringExtract: EnvironmentState | undefined;
+    const harness = await createHarness({
+      service: {
+        extract: async ({ stagingDirectory, onProgress }) => {
+          await writeRuntimeFiles(join(stagingDirectory, TOP_LEVEL));
+          onProgress?.({
+            extractedBytes: 7,
+            totalBytes: 21,
+            currentFile: 'Top/file.txt',
+          });
+          stateDuringExtract = harness.service.getState();
+        },
+      },
+    });
+
+    const state = await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(stateDuringExtract?.stage).toBe('extract');
+    expect(stateDuringExtract?.progress).toEqual({
+      downloadedBytes: 7,
+      totalBytes: 21,
+      currentFile: 'Top/file.txt',
+    });
+    expect(state.progress.downloadedBytes).toBeGreaterThan(0);
+  });
+
   test('start and retry share one in-flight operation', async () => {
     const harness = await createHarness();
     const [first, second] = await Promise.all([
@@ -595,6 +1790,20 @@ describe('EnvironmentSetupService installation', () => {
 });
 
 describe('EnvironmentSetupService operation coordination', () => {
+  test('successful detection moves to profile selection without starting a download', async () => {
+    const harness = await createHarness();
+
+    const state = await harness.service.detect(harness.installRoot);
+
+    expect(state).toMatchObject({
+      stage: 'select',
+      active: false,
+      progress: { downloadedBytes: 0, totalBytes: 0 },
+    });
+    expect(harness.downloads.parts).not.toHaveBeenCalled();
+    expect(harness.downloads.file).not.toHaveBeenCalled();
+  });
+
   test('start rejects while a detect operation is in flight', async () => {
     const detectStarted = createDeferred();
     const finishDetect = createDeferred();
@@ -740,6 +1949,498 @@ describe('EnvironmentSetupService operation coordination', () => {
 });
 
 describe('EnvironmentSetupService failures and recovery', () => {
+  test('retries the official GitHub source and falls back to the runtime mirror', async () => {
+    const manifest = makeManifest();
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    const mirrorUrl = `https://ghproxy.net/${officialUrl}`;
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    const urls: string[] = [];
+    const delays: number[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async (attempt) => {
+          delays.push(attempt);
+        },
+        downloadParts: async (options) => {
+          urls.push(options.parts[0].url);
+          if (options.parts[0].url === officialUrl) {
+            throw new Error('official connection timed out');
+          }
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls).toEqual([...Array(6).fill(officialUrl), mirrorUrl]);
+    expect(delays).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test('keeps resuming the runtime after more than three transient disconnects', async () => {
+    const manifest = makeManifest();
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    const mirrorUrl = `https://ghproxy.net/${officialUrl}`;
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    const urls: string[] = [];
+    let remainingFailures = 4;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: async (options) => {
+          urls.push(options.parts[0].url);
+          if (remainingFailures > 0) {
+            remainingFailures -= 1;
+            throw new TypeError('fetch failed');
+          }
+          return {
+            resumed: urls.length > 1,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls).toEqual(Array(5).fill(officialUrl));
+  });
+
+  test('does not resume official runtime bytes from the GitHub mirror', async () => {
+    const manifest = makeManifest();
+    const archive = Buffer.from('small test archive');
+    const prefix = archive.subarray(0, 6);
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    const mirrorUrl = `https://ghproxy.net/${officialUrl}`;
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    const requests: Array<{ url: string; range: string | null }> = [];
+    let officialRequests = 0;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: (options) =>
+          realDownloadParts({
+            ...options,
+            fetch: async (input, init) => {
+              const url = requestUrl(input);
+              const range = new Headers(init?.headers).get('range');
+              requests.push({ url, range });
+              if (url === officialUrl) {
+                officialRequests += 1;
+                if (officialRequests > 1) {
+                  return new Response('official unavailable', { status: 503 });
+                }
+                return incompleteDownloadResponse(prefix);
+              }
+              if (url === mirrorUrl) return bufferDownloadResponse(archive, range);
+              throw new Error(`Unexpected runtime URL: ${url}`);
+            },
+          }),
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(requests.at(-1)).toEqual({ url: mirrorUrl, range: null });
+    expect(
+      await readFile(
+        join(harness.installRoot, '.smo-install', 'downloads', 'sm120.zip'),
+      ),
+    ).toEqual(archive);
+  });
+
+  test('resumes a same-source runtime partial after a network failure', async () => {
+    const manifest = makeManifest();
+    const archive = Buffer.from('small test archive');
+    const prefix = archive.subarray(0, 6);
+    const url = manifest.runtimes.sm120.archiveParts[0].url;
+    const requests: Array<{ url: string; range: string | null }> = [];
+    let failing = true;
+    let failures = 0;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: (options) =>
+          realDownloadParts({
+            ...options,
+            fetch: async (input, init) => {
+              const range = new Headers(init?.headers).get('range');
+              requests.push({ url: requestUrl(input), range });
+              if (!failing) return bufferDownloadResponse(archive, range);
+              failures += 1;
+              if (failures === 1) {
+                return incompleteDownloadResponse(prefix);
+              }
+              return new Response('still unavailable', { status: 503 });
+            },
+          }),
+      },
+    });
+    const input = {
+      profileId: 'high-memory-candidate' as const,
+      installRoot: harness.installRoot,
+    };
+    const partPath = join(
+      harness.installRoot,
+      '.smo-install',
+      'downloads',
+      manifest.runtimes.sm120.archiveParts[0].path,
+    );
+
+    await expect(harness.service.start(input)).rejects.toThrow(/503/);
+    expect(await readFile(`${partPath}.part`)).toEqual(prefix);
+    await expect(readFile(`${partPath}.part.source`, 'utf8')).resolves.toBe(url);
+
+    requests.length = 0;
+    failing = false;
+    await harness.service.start(input);
+
+    expect(requests).toEqual([{ url, range: `bytes=${prefix.length}-` }]);
+  });
+
+  test('binds a merged runtime archive to every selected part URL', async () => {
+    const manifest = makeManifest();
+    const first = Buffer.from('first runtime part');
+    const second = Buffer.from('second runtime part');
+    const archive = Buffer.concat([first, second]);
+    const officialUrls = [
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1',
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part2',
+    ];
+    const mirrorUrls = officialUrls.map((url) => `https://ghproxy.net/${url}`);
+    manifest.runtimes.sm120.archiveParts = [first, second].map((data, index) => ({
+      url: officialUrls[index],
+      path: `sm120.zip.part${index + 1}`,
+      size: data.length,
+      sha256: sha256(data),
+    }));
+    manifest.runtimes.sm120.archiveSize = archive.length;
+    manifest.runtimes.sm120.archiveSha256 = sha256(archive);
+    const requests: string[] = [];
+    let observedMergedSource: string | undefined;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadParts: async (options) => {
+          observedMergedSource = await readFile(
+            `${options.destination}.part.source`,
+            'utf8',
+          );
+          return realDownloadParts({
+            ...options,
+            fetch: async (input, init) => {
+              const url = requestUrl(input);
+              requests.push(url);
+              const data = officialUrls.indexOf(url) === 0 ? first : second;
+              return bufferDownloadResponse(
+                data,
+                new Headers(init?.headers).get('range'),
+              );
+            },
+          });
+        },
+      },
+    });
+    const archivePath = join(
+      harness.installRoot,
+      '.smo-install',
+      'downloads',
+      'sm120.zip',
+    );
+    await mkdir(dirname(archivePath), { recursive: true });
+    await writeFile(`${archivePath}.part`, archive);
+    await writeFile(`${archivePath}.part.source`, JSON.stringify(mirrorUrls));
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(observedMergedSource).toBeDefined();
+    expect(JSON.parse(observedMergedSource!)).toEqual(officialUrls);
+    expect(requests).toEqual(officialUrls);
+  });
+
+  test('clears runtime temporary files after the final SHA256 mismatch', async () => {
+    const manifest = makeManifest();
+    const officialUrl =
+      'https://github.com/example/runtime/releases/download/v1/runtime.zip.part1';
+    manifest.runtimes.sm120.archiveParts[0].url = officialUrl;
+    let temporaryPaths: string[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadParts: async (options) => {
+          const destinations = [
+            ...options.parts.map((part) =>
+              join(options.directory, ...part.path.split('/')),
+            ),
+            options.destination,
+          ];
+          temporaryPaths = destinations.flatMap((destination) => [
+            `${destination}.part`,
+            `${destination}.part.chunks.json`,
+            `${destination}.part.chunks.json.tmp`,
+            `${destination}.part.source`,
+          ]);
+          for (const path of temporaryPaths) {
+            await mkdir(dirname(path), { recursive: true });
+            await writeFile(path, 'corrupt temporary data');
+          }
+          throw new Error('Merged archive SHA256 does not match the expected SHA256');
+        },
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/SHA256/);
+
+    for (const path of temporaryPaths) {
+      expect(existsSync(path), path).toBe(false);
+    }
+  });
+
+  test('rejects colliding runtime paths before touching existing files', async () => {
+    const manifest = makeManifest();
+    manifest.runtimes.sm120.archiveParts[0].path = 'sm120.zip.part.source';
+    const prepareSource = vi.spyOn(downloadModule, 'prepareDownloadSource');
+    const clearTemporary = vi.spyOn(downloadModule, 'clearTemporaryDownload');
+    try {
+      const harness = await createHarness({
+        manifest,
+        service: { downloadParts: realDownloadParts },
+      });
+      const downloadDirectory = join(
+        harness.installRoot,
+        '.smo-install',
+        'downloads',
+      );
+      const archivePath = join(downloadDirectory, 'sm120.zip');
+      const existingFiles = new Map([
+        [archivePath, 'existing archive'],
+        [join(downloadDirectory, 'sm120.zip.part.source'), 'existing formal part'],
+        [`${archivePath}.part`, 'existing merged partial'],
+        [`${archivePath}.part.chunks.json`, 'existing merged ledger'],
+      ]);
+      for (const [path, content] of existingFiles) {
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, content);
+      }
+
+      await expect(
+        harness.service.start({
+          profileId: 'high-memory-candidate',
+          installRoot: harness.installRoot,
+        }),
+      ).rejects.toThrow(/collision|collide/i);
+
+      for (const [path, content] of existingFiles) {
+        expect(await readFile(path, 'utf8')).toBe(content);
+      }
+      expect(prepareSource).not.toHaveBeenCalled();
+      expect(clearTemporary).not.toHaveBeenCalled();
+    } finally {
+      prepareSource.mockRestore();
+      clearTemporary.mockRestore();
+    }
+  });
+
+  test('downloads Hugging Face models through the accessible mirror first', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const urls: string[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadFile: async (options) => {
+          urls.push(options.url);
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls).toHaveLength(manifest.modelFiles.length);
+    expect(urls[0]).toBe(
+      'https://hf-mirror.com/test/model-0.safetensors',
+    );
+    expect(urls.every((url) => url.startsWith('https://hf-mirror.com/'))).toBe(true);
+  });
+
+  test('retries a failed model source before switching URLs', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const urls: string[] = [];
+    const attemptsByModel = new Map<string, number>();
+    const delays: number[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async (attempt) => {
+          delays.push(attempt);
+        },
+        downloadFile: async (options) => {
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          urls.push(options.url);
+          const attempt = (attemptsByModel.get(model.path) ?? 0) + 1;
+          attemptsByModel.set(model.path, attempt);
+          if (model.path === manifest.modelFiles[0].path && attempt < 3) {
+            throw new Error('mirror fetch failed');
+          }
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: attempt > 1,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls.slice(0, 3)).toEqual([
+      'https://hf-mirror.com/test/model-0.safetensors',
+      'https://hf-mirror.com/test/model-0.safetensors',
+      'https://hf-mirror.com/test/model-0.safetensors',
+    ]);
+    expect(delays).toEqual([1, 2]);
+  });
+
+  test('falls back from the mirror to the official model source', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const urls: string[] = [];
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadFile: async (options) => {
+          urls.push(options.url);
+          if (options.url.startsWith('https://hf-mirror.com/')) {
+            throw new Error('mirror fetch failed');
+          }
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls.slice(0, 7)).toEqual([
+      ...Array(6).fill('https://hf-mirror.com/test/model-0.safetensors'),
+      'https://huggingface.co/test/model-0.safetensors',
+    ]);
+  });
+
+  test('keeps resuming a model after more than three transient disconnects', async () => {
+    const manifest = makeManifest();
+    manifest.modelFiles.forEach((model, index) => {
+      model.url = `https://huggingface.co/test/model-${index}.safetensors`;
+    });
+    const firstModelUrl = 'https://hf-mirror.com/test/model-0.safetensors';
+    const urls: string[] = [];
+    let remainingFailures = 4;
+    const harness = await createHarness({
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadFile: async (options) => {
+          urls.push(options.url);
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          if (model === manifest.modelFiles[0] && remainingFailures > 0) {
+            remainingFailures -= 1;
+            throw new TypeError('fetch failed');
+          }
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: model === manifest.modelFiles[0],
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
+      },
+    });
+
+    await harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+
+    expect(urls.slice(0, 5)).toEqual(Array(5).fill(firstModelUrl));
+  });
+
   test('rejects insufficient disk space before any download', async () => {
     const harness = await createHarness({ hardware: makeHardware({ freeDiskGiB: 0 }) });
 
@@ -755,9 +2456,33 @@ describe('EnvironmentSetupService failures and recovery', () => {
   });
 
   test('retry preserves verified model files and only downloads missing models', async () => {
+    const manifest = makeManifest();
+    let remainingFailures = MODEL_DOWNLOAD_ATTEMPTS;
+    const networkDownloads: string[] = [];
     const harness = await createHarness({
-      configure: ({ failNextModel }) => {
-        failNextModel.value = 4;
+      manifest,
+      service: {
+        downloadRetryDelay: async () => undefined,
+        downloadFile: async (options) => {
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          if (model.path === manifest.modelFiles[4].path) {
+            if (remainingFailures > 0) {
+              remainingFailures -= 1;
+              throw new Error(`download failed for ${options.url}`);
+            }
+          }
+          if (!existsSync(options.destination)) networkDownloads.push(options.url);
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, modelContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
       },
     });
     const input = {
@@ -767,17 +2492,17 @@ describe('EnvironmentSetupService failures and recovery', () => {
 
     await expect(harness.service.start(input)).rejects.toThrow(/download failed/i);
     expect((await harness.store.load())?.status).toBe('failed');
-    const firstDownloads = [...harness.networkDownloads];
+    const firstDownloads = [...networkDownloads];
+    expect(firstDownloads).toHaveLength(4);
+
     await expect(harness.service.retry(input)).resolves.toMatchObject({
       stage: 'ready',
       healthy: true,
     });
 
-    const retriedUrls = harness.networkDownloads.slice(firstDownloads.length);
+    const retriedUrls = networkDownloads.slice(firstDownloads.length);
     expect(retriedUrls).toHaveLength(6);
-    expect(retriedUrls).not.toContain(harness.manifest.modelFiles[0].url);
-    expect(retriedUrls).not.toContain(harness.manifest.modelFiles[3].url);
-    expect(retriedUrls).toContain(harness.manifest.modelFiles[4].url);
+    expect(retriedUrls[0]).toBe(harness.manifest.modelFiles[4].url);
   });
 
   test('rejects a missing model even when its downloader reports success', async () => {
@@ -828,6 +2553,49 @@ describe('EnvironmentSetupService failures and recovery', () => {
     expect((await harness.store.load())?.status).toBe('failed');
     expect(harness.service.getState()).toMatchObject({ active: false, healthy: false });
     expect(harness.backend).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not become ready when the SM120 Spark node is missing', async () => {
+    const harness = await createHarness({
+      configure: ({ backend }) => {
+        backend.mockImplementation(async () => {
+          const info = makeObjectInfo();
+          delete info.MiniMaxH3SparkAttentionSM120;
+          return { systemStats: {}, objectInfo: info };
+        });
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(/MiniMaxH3SparkAttentionSM120/i);
+    expect(harness.service.getState()).toMatchObject({ active: false, healthy: false });
+  });
+
+  test('allows RTX 30 to pass validation without a Spark node', async () => {
+    const harness = await createHarness({
+      hardware: makeHardware({
+        gpu: 'NVIDIA GeForce RTX 3060',
+        vramGiB: 12,
+        cudaComputeCapability: '8.6',
+      }),
+      configure: ({ backend }) => {
+        backend.mockImplementation(async () => ({
+          systemStats: {},
+          objectInfo: Object.fromEntries(REQUIRED_COMFY_NODES.map((node) => [node, {}])),
+        }));
+      },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'balanced-16gb',
+        installRoot: harness.installRoot,
+      }),
+    ).resolves.toMatchObject({ stage: 'ready', healthy: true });
   });
 
   test('rejects critical runtime files whose upstream hash does not match', async () => {
@@ -1452,6 +3220,240 @@ describe('EnvironmentSetupService backend transactions', () => {
       healthy: false,
     });
   });
+
+  test('surfaces an install backend rollback failure and still saves failed config', async () => {
+    const transaction = makeTransaction(new Error('install activate exploded'));
+    transaction.rollback.mockRejectedValue(
+      new Error('install backend rollback exploded'),
+    );
+    const harness = await createHarness({
+      service: { startBackend: async () => transaction.result },
+    });
+
+    await expect(
+      harness.service.start({
+        profileId: 'high-memory-candidate',
+        installRoot: harness.installRoot,
+      }),
+    ).rejects.toThrow(
+      /install activate exploded[\s\S]*install backend rollback exploded/i,
+    );
+    expect((await harness.store.load())?.status).toBe('failed');
+    expect(harness.service.getState()).toMatchObject({
+      config: { status: 'failed' },
+      active: false,
+      healthy: false,
+    });
+    expect(harness.service.getState().error).toMatch(
+      /install activate exploded[\s\S]*install backend rollback exploded/i,
+    );
+  });
+
+  test('cancel waits for atomic install activation without aborting it', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const harness = await createHarness({
+      service: {
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          return transaction.result;
+        },
+      },
+    });
+
+    const pending = harness.service.start({
+      profileId: 'high-memory-candidate',
+      installRoot: harness.installRoot,
+    });
+    await activationStarted.promise;
+    let cancelSettled = false;
+    const cancelling = harness.service.cancel().then((state) => {
+      cancelSettled = true;
+      return state;
+    });
+
+    expect(observedSignal?.aborted).toBe(false);
+    expect(cancelSettled).toBe(false);
+    expect(harness.service.getState()).toMatchObject({
+      active: true,
+      healthy: false,
+      error: null,
+    });
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    await expect(cancelling).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('validation shares its operation and excludes imports until activation finishes', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    const startBackend = vi.fn(async () => transaction.result);
+    const previous = await createHarness();
+    const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: { store: previous.store, startBackend },
+    });
+
+    const pending = harness.service.validate();
+    await activationStarted.promise;
+    const same = harness.service.validate();
+    expect(same).toBe(pending);
+    await expect(
+      harness.service.importExisting({
+        runtimeRoot: harness.runtimeRoot,
+        profileId: 'high-memory-candidate',
+      }),
+    ).rejects.toThrow(/active|busy|input/i);
+    expect(startBackend).toHaveBeenCalledTimes(1);
+    expect(startBackend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeRoot: ready.runtimeRoot,
+        modelDirectory: ready.modelDirectory,
+        outputDirectory: ready.outputDirectory,
+        profile: ready.profile,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      config: ready,
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(await harness.store.load()).toEqual(ready);
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('cancel waits for atomic validation activation without aborting it', async () => {
+    const activationStarted = createDeferred();
+    const finishActivation = createDeferred();
+    const transaction = makeTransaction();
+    transaction.activate.mockImplementation(async () => {
+      activationStarted.resolve();
+      await finishActivation.promise;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const previous = await createHarness();
+    const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: {
+        store: previous.store,
+        startBackend: async (input) => {
+          observedSignal = input.signal;
+          return transaction.result;
+        },
+      },
+    });
+
+    const pending = harness.service.validate();
+    await activationStarted.promise;
+    let cancelSettled = false;
+    const cancelling = harness.service.cancel().then((state) => {
+      cancelSettled = true;
+      return state;
+    });
+
+    expect(observedSignal?.aborted).toBe(false);
+    expect(cancelSettled).toBe(false);
+    expect(harness.service.getState()).toMatchObject({
+      active: true,
+      healthy: false,
+      error: null,
+    });
+    finishActivation.resolve();
+
+    await expect(pending).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    await expect(cancelling).resolves.toMatchObject({
+      stage: 'ready',
+      healthy: true,
+      active: false,
+    });
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
+  test('surfaces a validation backend rollback failure', async () => {
+    const transaction = makeTransaction();
+    transaction.result.objectInfo = {};
+    transaction.rollback.mockRejectedValue(
+      new Error('validation backend rollback exploded'),
+    );
+    const previous = await createHarness();
+    const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: {
+        store: previous.store,
+        startBackend: async () => transaction.result,
+      },
+    });
+
+    await expect(harness.service.validate()).rejects.toThrow(
+      /missing required nodes[\s\S]*validation backend rollback exploded/i,
+    );
+    expect(await previous.store.load()).toEqual(ready);
+    expect(harness.service.getState()).toMatchObject({
+      config: ready,
+      active: false,
+      healthy: false,
+    });
+    expect(harness.service.getState().error).toMatch(
+      /missing required nodes[\s\S]*validation backend rollback exploded/i,
+    );
+  });
+
+  test('rejects validation when the ready runtime is missing ffmpeg', async () => {
+    const previous = await createHarness();
+    const ready = await seedReadyConfig(previous);
+    await writeRuntimeFiles(ready.runtimeRoot);
+    await rm(join(ready.runtimeRoot, 'tools', 'ffmpeg', 'ffmpeg.exe'));
+    const harness = await createHarness({
+      outputDirectory: previous.outputDirectory,
+      service: { store: previous.store },
+    });
+
+    await expect(harness.service.validate()).rejects.toThrow(
+      /ffmpeg\.exe.*missing|missing.*ffmpeg\.exe/i,
+    );
+
+    expect(harness.backend).not.toHaveBeenCalled();
+    expect(await previous.store.load()).toEqual(ready);
+    expect(harness.service.getState()).toMatchObject({
+      active: false,
+      healthy: false,
+    });
+  });
 });
 
 describe('EnvironmentSetupService runtime replacement and reparse safety', () => {
@@ -1610,6 +3612,7 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
 
   test('keeps old ready models and config when a manifest upgrade model download fails', async () => {
     const upgradedContent = (path: string) => Buffer.from(`upgraded model: ${path}`);
+    const manifest = makeManifest(upgradedContent);
     const first = await createHarness();
     await first.service.start({
       profileId: 'high-memory-candidate',
@@ -1628,10 +3631,25 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
     }
     const harness = await createHarness({
       installRoot: first.installRoot,
-      manifest: makeManifest(upgradedContent),
+      manifest,
       modelContent: upgradedContent,
-      configure: ({ failNextModel }) => {
-        failNextModel.value = 1;
+      service: {
+        downloadFile: async (options) => {
+          const model = manifest.modelFiles.find(
+            (candidate) => candidate.sha256 === options.expectedSha256,
+          );
+          if (!model) throw new Error('Unexpected model download');
+          if (model.path === 'text_encoders/MiniMax-H3/text.safetensors') {
+            throw new Error('download failed');
+          }
+          await mkdir(dirname(options.destination), { recursive: true });
+          await writeFile(options.destination, upgradedContent(model.path));
+          return {
+            resumed: false,
+            bytes: options.expectedSize,
+            sha256: options.expectedSha256,
+          };
+        },
       },
     });
 
@@ -1849,6 +3867,13 @@ describe('EnvironmentSetupService runtime replacement and reparse safety', () =>
   });
 });
 
+describe('download source compatibility', () => {
+  test('re-exports the shared download source helpers', () => {
+    expect(modelDownloadUrls).toBe(sharedModelDownloadUrls);
+    expect(runtimeDownloadUrls).toBe(sharedRuntimeDownloadUrls);
+  });
+});
+
 describe('production ZIP extraction', () => {
   test('extracts regular entries beneath staging', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'smo-zip-valid-'));
@@ -1886,5 +3911,76 @@ describe('production ZIP extraction', () => {
     ).rejects.toThrow(/traversal|unsafe|absolute|contained/i);
     expect(existsSync(join(directory, 'escape.txt'))).toBe(false);
     expect((await lstat(stagingDirectory)).isDirectory()).toBe(true);
+  });
+
+  test('extracts entries longer than the legacy Windows MAX_PATH', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-zip-long-path-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const archivePath = join(directory, 'long-path.zip');
+    const stagingDirectory = join(directory, 'staging');
+    const entryName = `${'L'.repeat(255)}/file.txt`;
+    const content = Buffer.from('ok', 'utf8');
+    await writeFile(archivePath, createStoredZip([{ name: entryName, content }]));
+    expect(stagingDirectory.length + entryName.length).toBeGreaterThan(260);
+
+    await extractZipArchive({ archivePath, stagingDirectory });
+
+    expect(
+      await readFile(join(stagingDirectory, entryName.replaceAll('/', '\\')), 'utf8'),
+    ).toBe('ok');
+  });
+
+  test('reports cumulative extraction progress', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-zip-progress-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const archivePath = join(directory, 'progress.zip');
+    const stagingDirectory = join(directory, 'staging');
+    const content = Buffer.alloc(1024 * 1024, 7);
+    await writeFile(
+      archivePath,
+      createStoredZip([{ name: 'Large/file.bin', content }]),
+    );
+    const reports: Array<{
+      extractedBytes: number;
+      totalBytes: number;
+      currentFile?: string;
+    }> = [];
+
+    await extractZipArchive({
+      archivePath,
+      stagingDirectory,
+      onProgress: (progress) => reports.push({ ...progress }),
+    });
+
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports.at(-1)).toEqual({
+      extractedBytes: content.length,
+      totalBytes: content.length,
+      currentFile: 'Large/file.bin',
+    });
+  });
+
+  test('reports the configured cancellation reason', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'smo-zip-cancel-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const archivePath = join(directory, 'cancel.zip');
+    const stagingDirectory = join(directory, 'staging');
+    const controller = new AbortController();
+    await writeFile(
+      archivePath,
+      createStoredZip([{ name: 'Large/file.bin', content: Buffer.alloc(1024 * 1024, 7) }]),
+    );
+    const pending = extractZipArchive({
+      archivePath,
+      stagingDirectory,
+      signal: controller.signal,
+      onProgress: () => {
+        if (!controller.signal.aborted) {
+          controller.abort(new Error('Environment setup cancelled'));
+        }
+      },
+    });
+
+    await expect(pending).rejects.toThrow('Environment setup cancelled');
   });
 });

@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { app as electronApp, ipcMain } from 'electron';
 import type { ComfyClient, ComfySystemStats } from './comfy';
 import type { AvatarService } from './avatars';
 import type { FileService } from './files';
@@ -6,7 +6,11 @@ import type { JobCoordinator } from './jobs';
 import type { LlmService } from './llm';
 import type { LlmConfigStore } from './llm-config';
 import type { SkillsService } from './skills';
+import type { RecordingService } from './recordings';
+import type { SanmaoService } from './sanmao-service';
+import type { FileSanmaoConfigStore } from './sanmao-config';
 import type { Store } from './store';
+import type { MediaComponentService } from './media-components';
 import {
   createIpcSchema,
   IPC_CHANNELS,
@@ -14,8 +18,10 @@ import {
   type HardwareWorkflowResult,
   type IpcRequest,
 } from '../shared/ipc';
+import { parseSanmaoStreamEvent, type SanmaoStreamEvent } from '../shared/sanmao';
 import type { GenerationHandler } from './generation';
 import type {
+  EnvironmentImportInput,
   EnvironmentStartInput,
   EnvironmentState,
 } from '../shared/environment';
@@ -25,10 +31,19 @@ import type {
   HardwareInfo,
   HardwareProfile,
   HardwareRecommendationInput,
+  SpeechCapabilities,
+  SpeechMode,
   VideoMode,
 } from '../shared/types';
 
-export type IpcHandler = (payload: unknown) => Promise<unknown>;
+export interface IpcHandlerContext {
+  emit(channel: 'sanmao:stream', event: SanmaoStreamEvent): void;
+}
+
+export type IpcHandler = (
+  payload: unknown,
+  context?: IpcHandlerContext,
+) => Promise<unknown>;
 
 export interface IpcHandlerRegistry {
   handle(channel: string, handler: IpcHandler): void;
@@ -40,18 +55,38 @@ export interface IpcServices {
   startGeneration: GenerationHandler;
   retryWork: (id: string) => Promise<GenerationStartResult>;
   deleteWork: (id: string) => Promise<void>;
-  jobCoordinator: Pick<JobCoordinator, 'cancel' | 'cancelActive'>;
+  jobCoordinator: Pick<
+    JobCoordinator,
+    'activeCount' | 'activeId' | 'cancel' | 'cancelActive'
+  >;
+  speech: {
+    getCapabilities: (speechMode: SpeechMode) => Promise<SpeechCapabilities>;
+  };
+  components: Pick<MediaComponentService, 'getState' | 'install' | 'cancel'>;
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
-  store: Pick<Store, 'listAvatars' | 'listWorks'>;
+  sanmao: Pick<SanmaoService, 'send' | 'testConnection' | 'listModels' | 'cancel' | 'close'>;
+  sanmaoConfig: FileSanmaoConfigStore;
+  store: Pick<Store, 'listAvatars' | 'listWorks' | 'renameWork'>;
   avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
-  files: Pick<FileService, 'selectImage' | 'selectAudio' | 'mediaUrl' | 'openFolder'>;
+  files: Pick<
+    FileService,
+    | 'selectImage'
+    | 'selectAudio'
+    | 'authorizeDroppedImage'
+    | 'authorizeDroppedAudio'
+    | 'mediaUrl'
+    | 'openFolder'
+  >;
+  recordings: Pick<RecordingService, 'save' | 'discard'>;
   comfy: Pick<ComfyClient, 'health'>;
   startComfy: () => Promise<ComfySystemStats>;
   openComfy: () => Promise<void>;
   environment: {
     getState: () => Promise<EnvironmentState>;
+    selectExistingRoot: () => Promise<string | null>;
+    importExisting: (input: EnvironmentImportInput) => Promise<EnvironmentState>;
     detect: (installRoot?: string) => Promise<EnvironmentState>;
     start: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
     retry: (input: EnvironmentStartInput) => Promise<EnvironmentState>;
@@ -68,15 +103,27 @@ export interface IpcServices {
 
 const electronIpcRegistry: IpcHandlerRegistry = {
   handle(channel, handler) {
-    ipcMain.handle(channel, (_event, payload: unknown) => handler(payload));
+    ipcMain.handle(channel, (event, payload: unknown) =>
+      handler(payload, {
+        emit: (streamChannel, streamEvent) => {
+          event.sender.send(
+            streamChannel,
+            parseSanmaoStreamEvent(streamEvent),
+          );
+        },
+      }),
+    );
   },
 };
 
 async function dispatch(
   request: IpcRequest,
   services: IpcServices,
+  context: IpcHandlerContext = { emit: () => undefined },
 ): Promise<unknown> {
   switch (request.channel) {
+    case 'app:getVersion':
+      return electronApp.getVersion();
     case 'jobs:start':
       return services.startGeneration(request.payload);
     case 'jobs:retry':
@@ -88,14 +135,39 @@ async function dispatch(
         await services.jobCoordinator.cancel(request.payload.id);
       }
       return undefined;
+    case 'jobs:getState':
+      return { activeId: services.jobCoordinator.activeId };
+    case 'speech:getCapabilities':
+      return services.speech.getCapabilities(request.payload.speechMode);
+    case 'components:getState':
+      return services.components.getState(request.payload.id);
+    case 'components:install':
+      if (services.jobCoordinator.activeCount > 0) {
+        throw new Error(
+          'Cannot install a component while another generation is running',
+        );
+      }
+      return services.components.install(request.payload.id);
+    case 'components:cancel':
+      services.components.cancel(request.payload.id);
+      return undefined;
     case 'files:selectImage':
       return services.files.selectImage();
     case 'files:selectAudio':
       return services.files.selectAudio();
+    case 'files:authorizeDroppedImage':
+      return services.files.authorizeDroppedImage(request.payload.path);
+    case 'files:authorizeDroppedAudio':
+      return services.files.authorizeDroppedAudio(request.payload.path);
     case 'files:mediaUrl':
       return services.files.mediaUrl(request.payload.path);
     case 'files:openFolder':
       await services.files.openFolder(request.payload.path);
+      return undefined;
+    case 'recordings:save':
+      return services.recordings.save(request.payload);
+    case 'recordings:discard':
+      await services.recordings.discard(request.payload.path);
       return undefined;
     case 'llm:saveProfile':
       await services.llmConfig.saveProfile(request.payload);
@@ -118,6 +190,53 @@ async function dispatch(
       }
       return services.skills.polish(credentials, request.payload);
     }
+    case 'sanmao:getProfile':
+      return services.sanmaoConfig.getProfile();
+    case 'sanmao:saveProfile':
+      await services.sanmaoConfig.saveProfile(request.payload);
+      return undefined;
+    case 'sanmao:testConnection':
+      return services.sanmao.testConnection(
+        await services.sanmaoConfig.resolveCredentials(request.payload),
+      );
+    case 'sanmao:listModels':
+      return services.sanmao.listModels(
+        await services.sanmaoConfig.resolveConnection(request.payload),
+      );
+    case 'sanmao:send': {
+      const { conversationId, replyId, text } = request.payload;
+      try {
+        const result = await services.sanmao.send({
+          conversationId,
+          replyId,
+          text,
+          onText: (delta) => context.emit('sanmao:stream', {
+            conversationId,
+            replyId,
+            kind: 'delta',
+            text: delta,
+          }),
+        });
+        context.emit('sanmao:stream', {
+          conversationId,
+          replyId,
+          kind: 'done',
+          text: result.text,
+        });
+        return { ok: true };
+      } catch (error) {
+        context.emit('sanmao:stream', {
+          conversationId,
+          replyId,
+          kind: 'error',
+          text: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    }
+    case 'sanmao:cancel':
+      services.sanmao.cancel(request.payload.replyId);
+      return undefined;
     case 'avatars:list':
       return services.store.listAvatars();
     case 'avatars:create':
@@ -134,6 +253,8 @@ async function dispatch(
     case 'works:delete':
       await services.deleteWork(request.payload.id);
       return undefined;
+    case 'works:rename':
+      return services.store.renameWork(request.payload.id, request.payload.title);
     case 'comfy:health':
       return services.comfy.health();
     case 'comfy:start':
@@ -143,6 +264,10 @@ async function dispatch(
       return undefined;
     case 'environment:getState':
       return services.environment.getState();
+    case 'environment:selectExistingRoot':
+      return services.environment.selectExistingRoot();
+    case 'environment:import':
+      return services.environment.importExisting(request.payload);
     case 'environment:detect':
       return services.environment.detect(request.payload.installRoot);
     case 'environment:start':
@@ -171,9 +296,12 @@ export function registerIpc(
   const schema = createIpcSchema();
 
   for (const channel of IPC_CHANNELS) {
-    registry.handle(channel, async (payload: unknown) => {
+    registry.handle(channel, async (
+      payload: unknown,
+      context?: IpcHandlerContext,
+    ) => {
       const request = schema.parse({ channel, payload });
-      return dispatch(request, services);
+      return dispatch(request, services, context);
     });
   }
 }

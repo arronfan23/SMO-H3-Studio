@@ -12,8 +12,8 @@ const BF16_UNET = 'minimax_h3_fl2va_bf16.safetensors';
 const temporaryDirectories: string[] = [];
 const GPU_OUTPUT = '"NVIDIA GeForce RTX 5080", 16384 MiB, 576.88, 12.0\n';
 const SYSTEM_OUTPUT = JSON.stringify({
-  WindowsVersion: 'Microsoft Windows 11 Pro 10.0.22631',
-  TotalMemoryBytes: 64 * 1024 ** 3,
+  WindowsVersion: 'Microsoft Windows 10 专业版 10.0.19045',
+  InstalledMemoryBytes: 64 * 1024 ** 3,
   FreeDiskBytes: 512 * 1024 ** 3,
 });
 
@@ -395,7 +395,7 @@ describe('detectHardware', () => {
     const info = await hardware.detectHardware(runner, targetDirectory);
 
     expect(info).toEqual({
-      windowsVersion: 'Microsoft Windows 11 Pro 10.0.22631',
+      windowsVersion: 'Microsoft Windows 10 专业版 10.0.19045',
       gpu: 'NVIDIA GeForce RTX 5080',
       vramGiB: 16,
       ramGiB: 64,
@@ -419,15 +419,42 @@ describe('detectHardware', () => {
       '-Command',
     ]);
     expect(calls[1].args).toHaveLength(5);
-    expect(calls[1].args[4]).toBe(JSON.stringify(targetDirectory));
+    expect(
+      Buffer.from(calls[1].args[4], 'base64').toString('utf8'),
+    ).toBe(JSON.stringify(targetDirectory));
     expect(calls[1].args[3]).not.toContain(targetDirectory);
+    expect(calls[1].args[3]).toContain(
+      '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);',
+    );
     expect(calls[1].args[3]).toContain("ConvertFrom-Json");
+    expect(calls[1].args[3]).toContain('FromBase64String');
+    expect(calls[1].args[3]).toContain("ErrorActionPreference = 'Stop'");
     expect(calls[1].args[3]).toContain('Get-CimInstance Win32_OperatingSystem');
-    expect(calls[1].args[3]).toContain('Get-CimInstance Win32_ComputerSystem');
-    expect(calls[1].args[3]).toContain('$targetDirectory = $TargetDirectoryJson | ConvertFrom-Json;');
+    expect(calls[1].args[3]).toContain('Get-CimInstance Win32_PhysicalMemory');
+    expect(calls[1].args[3]).toContain(
+      '$targetDirectory = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($TargetDirectoryBase64)) | ConvertFrom-Json;',
+    );
     expect(calls[1].args[3]).toContain('Get-PSDrive -Name $driveName');
     expect(calls[1].args[3]).toContain('ConvertTo-Json -Compress');
     expect(calls[1].timeoutMs).toBe(5000);
+  });
+
+  test('uses installed DIMM capacity when Windows reserves part of a 32 GiB system', async () => {
+    const usableMemoryBytes = 31.837474822998047 * 1024 ** 3;
+    const runner = async (request: CommandRequest): Promise<string> => {
+      return request.command === 'nvidia-smi'
+        ? GPU_OUTPUT
+        : JSON.stringify({
+            WindowsVersion: 'Microsoft Windows 11 专业版',
+            InstalledMemoryBytes: 32 * 1024 ** 3,
+            TotalMemoryBytes: usableMemoryBytes,
+            FreeDiskBytes: 512 * 1024 ** 3,
+          });
+    };
+
+    const info = await hardware.detectHardware(runner);
+
+    expect(info.ramGiB).toBe(32);
   });
 
   test('reports a clear GPU process failure', async () => {
@@ -480,4 +507,13 @@ describe('detectHardware', () => {
       /parse Windows hardware detection output/i,
     );
   });
+
+  test.skipIf(process.platform !== 'win32')(
+    'reads a non-zero free disk space on Windows',
+    async () => {
+      const info = await hardware.detectHardware(undefined, process.cwd());
+
+      expect(info.freeDiskGiB).toBeGreaterThan(0);
+    },
+  );
 });
