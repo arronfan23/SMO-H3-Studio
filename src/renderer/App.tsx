@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Image,
   Mic,
+  MessageCircle,
   Settings,
   Users,
   Video,
@@ -19,10 +20,12 @@ import { useEnvironment } from './useEnvironment';
 import { WindowResizeHandles } from './WindowResizeHandles';
 import { WindowTitlebar } from './WindowTitlebar';
 import { WorksPage } from './WorksPage';
+import { SanmaoPage } from './SanmaoPage';
 import { errorMessage } from './ui';
 
 const NAVIGATION = [
   { id: 'studio', label: '制作台', icon: Clapperboard },
+  { id: 'sanmao', label: '三脚猫', icon: MessageCircle },
   { id: 'avatars', label: '数字模特', icon: Users },
   { id: 'works', label: '我的作品', icon: FolderOpen },
   { id: 'settings', label: '设置', icon: Settings },
@@ -50,6 +53,7 @@ interface StudioApplicationProps {
 
 function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
   const [page, setPage] = useState<PageId>('studio');
+  const [settingsService, setSettingsService] = useState<'polish' | 'sanmao'>('polish');
   const [studioMode, setStudioMode] = useState<StudioMode>('video');
   const [studioExpanded, setStudioExpanded] = useState(true);
   const [avatars, setAvatars] = useState<Avatar[]>([]);
@@ -220,6 +224,15 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
               onModeChange={setStudioMode}
             />
           </div>
+          <div hidden={page !== 'sanmao'}>
+            <SanmaoPage
+              active={page === 'sanmao'}
+              onOpenSettings={() => {
+                setSettingsService('sanmao');
+                setPage('settings');
+              }}
+            />
+          </div>
           {page === 'avatars' && (
             <AvatarsPage
               avatars={avatars}
@@ -241,6 +254,7 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
             <SettingsPage
               modelDirectory={modelDirectory}
               onModelDirectoryChange={setModelDirectory}
+              service={settingsService}
             />
           )}
         </main>

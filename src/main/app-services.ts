@@ -37,6 +37,8 @@ import { defaultWorkflowsDirectory } from './paths';
 import { JobCoordinator, type JobEventErrorHandler } from './jobs';
 import { LlmService } from './llm';
 import { FileLlmConfigStore } from './llm-config';
+import { FileSanmaoConfigStore } from './sanmao-config';
+import { SanmaoService } from './sanmao-service';
 import { SkillsService } from './skills';
 import { Store } from './store';
 import { WorkService } from './works';
@@ -535,6 +537,7 @@ export async function createAppServices(
   let mediaComponents: MediaComponentService | undefined;
   let speechRuntime: SpeechRuntime | undefined;
   let speechProcess: SpeechProcessManager | undefined;
+  let sanmao: SanmaoService | undefined;
   const activeEnvironmentPaths: EnvironmentPaths = { ...environmentPaths };
 
   try {
@@ -562,6 +565,10 @@ export async function createAppServices(
     });
     const llmConfig = new FileLlmConfigStore(join(dataDirectory, 'llm-config.json'));
     const llm = new LlmService();
+    const sanmaoConfig = new FileSanmaoConfigStore(
+      join(dataDirectory, 'sanmao-config.json'),
+    );
+    sanmao = new SanmaoService({ store: sanmaoConfig });
     comfy = new ComfyClient(comfyBaseUrl);
     activeComfyProcess = new ComfyProcessManager(
       {
@@ -804,6 +811,8 @@ export async function createAppServices(
       llm,
       skills: new SkillsService(llm),
       llmConfig,
+      sanmao,
+      sanmaoConfig,
       avatars,
       files,
       recordings,
@@ -867,6 +876,7 @@ export async function createAppServices(
           await attempt('jobs', () => jobsCleanup);
           await attempt('speech-runtime', () => speechRuntime!.close());
           await attempt('speech-process', () => closeSpeechProcess());
+          await attempt('sanmao', () => sanmao!.close());
           await attempt('speech-components', () => mediaComponents!.cancel('speech'));
           await attempt('image-components', () => mediaComponents!.cancel('image'));
           await attempt('comfy-process', () => activeComfyProcess!.close());
@@ -901,6 +911,7 @@ export async function createAppServices(
     await jobCoordinator?.close();
     await speechRuntime?.close().catch(() => undefined);
     await speechProcess?.close().catch(() => undefined);
+    sanmao?.close();
     mediaComponents?.cancel('speech');
     mediaComponents?.cancel('image');
     await activeComfyProcess?.close();

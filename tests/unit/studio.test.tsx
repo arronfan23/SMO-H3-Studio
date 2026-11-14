@@ -14,6 +14,7 @@ import { DEFAULT_MODEL_DIRECTORY } from '../../src/shared/generation-options';
 import type { PolishResult, SmoApi } from '../../src/shared/ipc';
 import type { EnvironmentState } from '../../src/shared/environment';
 import type { Avatar, SpeechCapabilities, Work } from '../../src/shared/types';
+import type { SanmaoStreamEvent } from '../../src/shared/sanmao';
 
 const avatar: Avatar = {
   id: 'avatar-1',
@@ -71,6 +72,15 @@ function createSmoMock() {
       listModels: vi.fn(),
       testModel: vi.fn(),
       polish: vi.fn(),
+    },
+    sanmao: {
+      getProfile: vi.fn(),
+      saveProfile: vi.fn(),
+      testConnection: vi.fn(),
+      listModels: vi.fn(),
+      send: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn(),
     },
     comfy: { health: vi.fn(), open: vi.fn(), start: vi.fn() },
     environment: {
@@ -182,6 +192,13 @@ beforeEach(() => {
   smo.llm.getProfile.mockResolvedValue(null);
   smo.llm.saveProfile.mockResolvedValue(undefined);
   smo.llm.polish.mockRejectedValue(new Error('Unexpected polish'));
+  smo.sanmao.getProfile.mockResolvedValue(null);
+  smo.sanmao.saveProfile.mockResolvedValue(undefined);
+  smo.sanmao.testConnection.mockResolvedValue({ ok: true, latencyMs: 1 });
+  smo.sanmao.listModels.mockResolvedValue(['claude-a', 'claude-b']);
+  smo.sanmao.send.mockResolvedValue({ ok: true });
+  smo.sanmao.cancel.mockResolvedValue(undefined);
+  smo.sanmao.subscribe.mockReturnValue(() => undefined);
   smo.comfy.health.mockResolvedValue({ system: {}, devices: [] });
   smo.comfy.start.mockResolvedValue({ system: {}, devices: [] });
   const environment: EnvironmentState = {
@@ -1564,6 +1581,39 @@ describe('text-to-video studio', () => {
     fireEvent.click(studioModeButton('视频'));
     expect(studioModePanel('视频')).toBeVisible();
     expect(studioModeButton('视频')).toHaveAttribute('aria-current', 'page');
+  });
+
+  test('三脚猫顶级导航与切页后的会话保留', async () => {
+    smo.sanmao.getProfile.mockResolvedValue({
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-test',
+      keyStatus: 'valid',
+    });
+    let receive!: (event: SanmaoStreamEvent) => void;
+    smo.sanmao.subscribe.mockImplementation((listener) => {
+      receive = listener;
+      return () => undefined;
+    });
+    smo.sanmao.send.mockImplementation(async (input) => {
+      receive({
+        conversationId: input.conversationId,
+        replyId: input.replyId,
+        kind: 'done',
+        text: '这是三脚猫的回复',
+      });
+      return { ok: true };
+    });
+    await renderStudio();
+
+    fireEvent.click(screen.getByRole('button', { name: '三脚猫' }));
+    const input = await screen.findByLabelText('发送给三脚猫的消息');
+    fireEvent.change(input, { target: { value: '帮我检查文案' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(await screen.findByText('这是三脚猫的回复')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    fireEvent.click(screen.getByRole('button', { name: '三脚猫' }));
+    expect(screen.getByText('这是三脚猫的回复')).toBeInTheDocument();
   });
 
   test('收起二级目录不卸载语音、图像和视频草稿', async () => {
@@ -4684,6 +4734,39 @@ describe('settings page ComfyUI startup', () => {
 });
 
 describe('settings page LLM configuration', () => {
+  test('三脚猫在设置页获取并保存模型，不覆盖文字润色配置', async () => {
+    smo.sanmao.getProfile.mockResolvedValueOnce(null).mockResolvedValue({
+      baseUrl: 'https://claude.test',
+      model: 'claude-a',
+      keyStatus: 'valid',
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByText('未配置 LLM');
+
+    fireEvent.click(screen.getByRole('tab', { name: '三脚猫' }));
+    fireEvent.change(screen.getByLabelText('三脚猫服务地址'), {
+      target: { value: 'https://claude.test' },
+    });
+    fireEvent.change(screen.getByLabelText('三脚猫 API 密钥'), {
+      target: { value: 'sanmao-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '获取模型' }));
+
+    expect(await screen.findByRole('option', { name: 'claude-a' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('三脚猫模型'), {
+      target: { value: 'claude-a' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存三脚猫设置' }));
+
+    await waitFor(() => expect(smo.sanmao.saveProfile).toHaveBeenCalledWith({
+      baseUrl: 'https://claude.test',
+      model: 'claude-a',
+      apiKey: 'sanmao-key',
+    }));
+    expect(smo.llm.saveProfile).not.toHaveBeenCalled();
+  });
+
   test('saves the LLM profile and refreshes displayed values', async () => {
     smo.llm.getProfile.mockResolvedValue(null);
     smo.llm.saveProfile.mockResolvedValue(undefined);

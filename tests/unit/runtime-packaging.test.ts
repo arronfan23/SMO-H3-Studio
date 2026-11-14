@@ -56,6 +56,7 @@ interface BuilderModule {
 }
 
 interface ElectronBuilderConfig {
+  asarUnpack?: string[];
   extraResources?: Array<{
     from: string;
     to: string;
@@ -246,6 +247,28 @@ afterAll(() => {
 });
 
 describe('electron-builder.yml', () => {
+  test('declares the Claude SDK peer dependencies explicitly for packaging', async () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(projectRoot, 'package.json'), 'utf8'),
+    );
+
+    expect(packageJson.dependencies).toMatchObject({
+      '@modelcontextprotocol/sdk': expect.any(String),
+      '@anthropic-ai/sdk': expect.any(String),
+    });
+  });
+
+  test('unpacks the Claude Agent SDK and its Windows executable', () => {
+    const config = parseYaml(
+      readFileSync(join(projectRoot, 'electron-builder.yml'), 'utf8'),
+    ) as ElectronBuilderConfig;
+
+    expect(config.asarUnpack).toEqual(expect.arrayContaining([
+      'node_modules/@anthropic-ai/claude-agent-sdk/**/*',
+      'node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**/*',
+    ]));
+  });
+
   test('packages the complete speech runtime project without environment artifacts', () => {
     const config = parseYaml(
       readFileSync(join(projectRoot, 'electron-builder.yml'), 'utf8'),

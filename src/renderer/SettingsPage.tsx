@@ -4,6 +4,9 @@ import type { ComfyHealth } from '../shared/ipc';
 import { DEFAULT_MODEL_DIRECTORY } from '../shared/generation-options';
 import type { HardwareInfo, HardwareProfile, LlmProfileView, VideoMode } from '../shared/types';
 import { errorMessage } from './ui';
+import { SanmaoSettings } from './SanmaoSettings';
+
+type AiService = 'polish' | 'sanmao';
 
 type LlmStatus =
   | { kind: 'idle' }
@@ -52,10 +55,14 @@ function formatTiling(tiling: HardwareProfile["tiling"]): string {
 export function SettingsPage({
   modelDirectory: controlledDirectory,
   onModelDirectoryChange,
+  service,
 }: {
   modelDirectory?: string;
   onModelDirectoryChange?: (directory: string) => void;
+  service?: AiService;
 } = {}) {
+  const [aiService, setAiService] = useState<AiService>(service ?? 'polish');
+  const [sanmaoMounted, setSanmaoMounted] = useState(service === 'sanmao');
   const [localDirectory, setLocalDirectory] = useState(DEFAULT_MODEL_DIRECTORY);
   const modelDirectory = controlledDirectory ?? localDirectory;
   const setModelDirectory = onModelDirectoryChange ?? setLocalDirectory;
@@ -123,6 +130,14 @@ export function SettingsPage({
       mountedRef.current = false;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (service) setAiService(service);
+  }, [service]);
+
+  useEffect(() => {
+    if (aiService === 'sanmao') setSanmaoMounted(true);
+  }, [aiService]);
 
   const reenterRequired =
     profile !== null && profile.keyStatus === 'reenter-required';
@@ -485,7 +500,47 @@ export function SettingsPage({
               </button>
             )}
           </section>
-          <section className="settings-section">
+          <div className="settings-ai-tabs">
+            <span className="page-kicker">AI 服务</span>
+            <div className="tab-list" role="tablist" aria-label="AI 服务">
+              <button
+                id="ai-polish-tab"
+                type="button"
+                role="tab"
+                aria-selected={aiService === 'polish'}
+                aria-controls="ai-polish-panel"
+                onClick={() => setAiService('polish')}
+              >
+                文字润色
+              </button>
+              <button
+                id="ai-sanmao-tab"
+                type="button"
+                role="tab"
+                aria-selected={aiService === 'sanmao'}
+                aria-controls="ai-sanmao-panel"
+                onClick={() => setAiService('sanmao')}
+              >
+                三脚猫
+              </button>
+            </div>
+          </div>
+          <section
+            id="ai-sanmao-panel"
+            className="settings-section"
+            role="tabpanel"
+            aria-labelledby="ai-sanmao-tab"
+            hidden={aiService !== 'sanmao'}
+          >
+            {sanmaoMounted && <SanmaoSettings />}
+          </section>
+          <section
+            id="ai-polish-panel"
+            className="settings-section"
+            role="tabpanel"
+            aria-labelledby="ai-polish-tab"
+            hidden={aiService !== 'polish'}
+          >
             <span className="page-kicker">文字润色</span>
             <h3>{profile ? '已配置 LLM' : '未配置 LLM'}</h3>
             {profileError && <p className="form-error" role="alert">{profileError}</p>}
@@ -530,6 +585,7 @@ export function SettingsPage({
             )}
             <div className="settings-actions">
               <button
+                id="llm-save-profile"
                 className="button button-primary"
                 type="button"
                 disabled={!canSave || saving}

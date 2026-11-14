@@ -25,7 +25,7 @@
 
 ### 任务 1：实现模型发现与连接解析
 
-- [ ] **步骤 1：先写模型发现失败测试**
+- [x] **步骤 1：先写模型发现失败测试**
 
 创建 `tests/unit/sanmao-models.test.ts`：
 
@@ -42,13 +42,13 @@ test('lists unique model ids using Anthropic authentication', async () => {
 
 覆盖已有 `/v1` 地址不重复拼接、空 ID 过滤、401/403 脱敏、超时、非法 JSON、非数组响应和密钥不出现在错误中。
 
-- [ ] **步骤 2：运行测试确认模型发现模块不存在**
+- [x] **步骤 2：运行测试确认模型发现模块不存在**
 
 运行：`npx vitest run tests/unit/sanmao-models.test.ts`
 
 预期：FAIL，找不到 `sanmao-models.ts`。
 
-- [ ] **步骤 3：实现模型发现与配置解析**
+- [x] **步骤 3：实现模型发现与配置解析**
 
 实现：
 
@@ -71,7 +71,7 @@ export async function listSanmaoModels(
 
 在 `FileSanmaoConfigStore` 增加 `resolveConnection({ baseUrl?, apiKey? })`：缺省地址复用已保存地址；密钥为空时复用已保存密钥；首次配置缺少任一必需项时拒绝。
 
-- [ ] **步骤 4：重跑模型发现和配置测试**
+- [x] **步骤 4：重跑模型发现和配置测试**
 
 运行：`npx vitest run tests/unit/sanmao-models.test.ts tests/unit/sanmao-config.test.ts`
 
@@ -79,19 +79,19 @@ export async function listSanmaoModels(
 
 ### 任务 2：接入模型发现 IPC 和运行时模型刷新
 
-- [ ] **步骤 1：添加失败测试**
+- [x] **步骤 1：添加失败测试**
 
 在 `tests/unit/ipc.test.ts` 验证 `sanmao:listModels` 接受空对象和当前地址/密钥，拒绝额外字段；验证主进程先解析配置再返回模型。
 
 在 `tests/unit/sanmao-service.test.ts` 先保存模型 A，再改为模型 B，断言下一请求的 `options.model === 'claude-b'`，且已开始的请求仍使用 A。
 
-- [ ] **步骤 2：运行测试确认功能缺失**
+- [x] **步骤 2：运行测试确认功能缺失**
 
 运行：`npx vitest run tests/unit/ipc.test.ts tests/unit/sanmao-service.test.ts`
 
 预期：FAIL，缺少模型发现 channel 或运行时模型刷新断言。
 
-- [ ] **步骤 3：实现 IPC 与服务调用**
+- [x] **步骤 3：实现 IPC 与服务调用**
 
 新增严格 schema：
 
@@ -112,13 +112,13 @@ return services.sanmao.listModels(
 
 preload 暴露 `listModels(input)`，服务在 `send()` 和 `testConnection()` 开始时重新读取配置，不把模型缓存为永久字段。
 
-- [ ] **步骤 4：重跑 IPC 和服务测试**
+- [x] **步骤 4：重跑 IPC 和服务测试**
 
 运行同步骤 2，预期全部 PASS。
 
 ### 任务 3：将三脚猫连接配置迁入设置页
 
-- [ ] **步骤 1：编写设置页失败测试**
+- [x] **步骤 1：编写设置页失败测试**
 
 在 `tests/unit/studio.test.tsx` 或新建 `tests/unit/sanmao-settings.test.tsx` 覆盖：
 
@@ -132,19 +132,19 @@ expect(await screen.findByRole('option', { name: 'claude-a' })).toBeInTheDocumen
 
 覆盖独立密钥、手动输入、获取失败、连接测试、保存状态和文字润色配置不受影响。
 
-- [ ] **步骤 2：运行测试确认设置入口不存在**
+- [x] **步骤 2：运行测试确认设置入口不存在**
 
 运行：`npx vitest run tests/unit/studio.test.tsx tests/unit/sanmao-settings.test.tsx`
 
 预期：FAIL，设置页没有三脚猫选项卡。
 
-- [ ] **步骤 3：实现 SanmaoSettings 与 AI 服务选项卡**
+- [x] **步骤 3：实现 SanmaoSettings 与 AI 服务选项卡**
 
 设置页增加 `role="tablist" aria-label="AI 服务"`，选项卡为“文字润色 / 三脚猫”。将地址、密钥、模型、获取模型和测试连接移入 `SanmaoSettings`，原聊天页不再维护这些字段。
 
 模型控件同时支持列表选择和手动输入；模型 ID 使用同一个受控值。获取模型前不要求模型字段，获取失败保留旧模型并显示脱敏错误。
 
-- [ ] **步骤 4：重跑设置测试与类型检查**
+- [x] **步骤 4：重跑设置测试与类型检查**
 
 运行：`npx vitest run tests/unit/studio.test.tsx tests/unit/sanmao-settings.test.tsx && npm run typecheck`
 
@@ -152,7 +152,7 @@ expect(await screen.findByRole('option', { name: 'claude-a' })).toBeInTheDocumen
 
 ### 任务 4：重做三脚猫顶栏与模型切换
 
-- [ ] **步骤 1：编写聊天页失败测试**
+- [x] **步骤 1：编写聊天页失败测试**
 
 更新 `tests/unit/sanmao-form.test.tsx`：
 
@@ -168,13 +168,13 @@ await waitFor(() => expect(sanmao.saveProfile).toHaveBeenCalledWith(
 
 覆盖模型搜索、刷新、手动输入、回复中禁用、切换不清空对话、未配置时“前往设置”，以及切页后读取最新模型。原“连接设置”表单断言全部移除。
 
-- [ ] **步骤 2：运行测试确认新顶栏不存在**
+- [x] **步骤 2：运行测试确认新顶栏不存在**
 
 运行：`npx vitest run tests/unit/sanmao-form.test.tsx tests/unit/studio.test.tsx`
 
 预期：FAIL，找不到当前模型控件或前往设置按钮。
 
-- [ ] **步骤 3：实现专业顶栏和模型交互**
+- [x] **步骤 3：实现专业顶栏和模型交互**
 
 顶栏使用固定尺寸：助手名称/状态在左，`当前模型` 下拉框、刷新按钮和新建会话在右。移除连接设置按钮和原表单。
 
@@ -188,7 +188,7 @@ const [settingsService, setSettingsService] = useState<'polish' | 'sanmao'>('pol
 
 “前往设置”设置 `settingsService='sanmao'` 并切到设置页；三脚猫页在重新激活时重新读取 profile。
 
-- [ ] **步骤 4：运行 UI 测试和布局回归**
+- [x] **步骤 4：运行 UI 测试和布局回归**
 
 运行：`npx vitest run tests/unit/sanmao-form.test.tsx tests/unit/studio.test.tsx && npm run typecheck`
 
@@ -196,7 +196,7 @@ const [settingsService, setSettingsService] = useState<'polish' | 'sanmao'>('pol
 
 ### 任务 5：完整回归、打包与验收边界
 
-- [ ] **步骤 1：运行完整验证**
+- [x] **步骤 1：运行完整验证**
 
 ```powershell
 npm run typecheck
@@ -207,10 +207,16 @@ npx playwright test tests/e2e/studio.spec.ts
 
 记录实际通过数和跳过数，继续排除用户既有环境向导修改。
 
-- [ ] **步骤 2：构建并核对 Windows 包**
+- [x] **步骤 2：构建并核对 Windows 包**
 
 运行 `npm run pack` 或输出到独立目录。确认现有 SDK 与 `claude.exe` 解包仍然有效，设置和三脚猫页面进入包内，测试密钥和聊天记录不进入包。
 
-- [ ] **步骤 3：报告真实连接边界并检查工作树**
+- [x] **步骤 3：报告真实连接边界并检查工作树**
 
 没有用户有效 Claude 授权时，不宣称真实模型获取或对话通过。运行 `git status --short` 和 `git diff --check`，不得包含环境向导、缓存、密钥或聊天记录。实现默认不提交、不推送，完成后由用户选择收尾方式。
+
+#### 2026-11-14 发布前补充验收（0.5.0）
+
+- SDK 隔离同时适用于模型发现、连接测试和对话请求，用户本机 Claude 配置不会被隐式复用。
+- 类型检查通过；完整 Vitest 为 65 个文件、2821 通过、1 跳过、0 失败；Studio E2E 为 26/26，打包态 E2E 为 6/6。
+- 包内 SDK、模型设置和三脚猫页面均通过检查，未使用真实 Claude 密钥做模型获取或对话验收。

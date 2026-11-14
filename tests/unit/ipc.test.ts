@@ -22,6 +22,8 @@ import {
 import { JobCoordinator } from '../../src/main/jobs';
 import { LlmService } from '../../src/main/llm';
 import { FileLlmConfigStore } from '../../src/main/llm-config';
+import { FileSanmaoConfigStore } from '../../src/main/sanmao-config';
+import { SanmaoService } from '../../src/main/sanmao-service';
 import { SkillsService } from '../../src/main/skills';
 import { Store } from '../../src/main/store';
 import { MediaRegistry } from '../../src/main/media';
@@ -162,6 +164,7 @@ const speechComponentState = {
 
 class TestIpcRegistry implements IpcHandlerRegistry {
   readonly handlers = new Map<string, IpcHandler>();
+  readonly events: Array<[string, unknown]> = [];
 
   handle(channel: string, handler: IpcHandler): void {
     if (this.handlers.has(channel)) {
@@ -175,7 +178,9 @@ class TestIpcRegistry implements IpcHandlerRegistry {
     if (!handler) {
       throw new Error(`No test handler registered for ${channel}`);
     }
-    return Promise.resolve(handler(payload));
+    return Promise.resolve(handler(payload, {
+      emit: (channel, event) => this.events.push([channel, event]),
+    }));
   }
 }
 
@@ -197,6 +202,22 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
     join(directory, 'llm-config.json'),
     cipher,
   );
+  const sanmaoConfig = new FileSanmaoConfigStore(
+    join(directory, 'sanmao-config.json'),
+    cipher,
+  );
+  const sanmao = new SanmaoService({
+    store: sanmaoConfig,
+    queryImpl: async function* () {
+      yield {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'OK',
+      };
+    },
+    claudeExecutablePath: join(directory, 'claude.exe'),
+  });
   const jobCoordinator = new JobCoordinator();
   const registry = new TestIpcRegistry();
   const showOpenDialog = vi.fn();
@@ -239,6 +260,8 @@ async function createHarness(overrides: Partial<IpcServices> = {}) {
       },
     },
     llmConfig,
+    sanmao,
+    sanmaoConfig,
     store,
     avatars: new AvatarService({
       avatarsDirectory: join(directory, 'avatars'),
@@ -494,6 +517,64 @@ describe('IPC input schema', () => {
     };
 
     expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('sanmao accepts a strict streaming chat request', () => {
+    const request = {
+      channel: 'sanmao:send',
+      payload: {
+        conversationId: '00000000-0000-4000-8000-000000000101',
+        replyId: '00000000-0000-4000-8000-000000000102',
+        text: '你好，三脚猫',
+      },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test.each([
+    {
+      conversationId: 'invalid',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '你好',
+    },
+    {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: ' ',
+    },
+    {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '好'.repeat(32_001),
+    },
+    {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '你好',
+      apiKey: 'must-not-be-accepted',
+    },
+  ])('sanmao rejects an invalid chat payload: %j', (payload) => {
+    expect(() => createIpcSchema().parse({
+      channel: 'sanmao:send',
+      payload,
+    })).toThrow();
+  });
+
+  test.each([
+    {},
+    { baseUrl: 'https://claude.test', apiKey: 'current-key' },
+  ])('sanmao accepts model discovery input: %j', (payload) => {
+    const request = { channel: 'sanmao:listModels', payload };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+  });
+
+  test('sanmao rejects extra model discovery fields', () => {
+    expect(() => createIpcSchema().parse({
+      channel: 'sanmao:listModels',
+      payload: { model: 'must-not-be-required', extra: true },
+    })).toThrow();
   });
 
   test('speech accepts a native speech rate', () => {
@@ -1171,6 +1252,66 @@ describe('main-process IPC handlers', () => {
     expect(install).toHaveBeenCalledWith('image');
     await harness.invoke('components:cancel', { id: 'speech' });
     expect(cancel).toHaveBeenCalledWith('speech');
+  });
+
+  test('dispatches Sanmao config, connection, stream, and cancellation', async () => {
+    const harness = await createHarness();
+    const send = vi.fn(async (input) => {
+      input.onText('你好');
+      input.onText('，我是三脚猫');
+      return { replyId: input.replyId, text: '你好，我是三脚猫' };
+    });
+    const testConnection = vi.fn(async () => ({ ok: true as const, latencyMs: 12 }));
+    const cancel = vi.fn();
+    harness.services.sanmao = {
+      send,
+      testConnection,
+      listModels: vi.fn(async () => ['claude-a']),
+      cancel,
+      close: vi.fn(),
+    };
+    const profile = {
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-test',
+      apiKey: 'sanmao-secret',
+    };
+
+    await harness.invoke('sanmao:saveProfile', profile);
+    const view = await harness.invoke('sanmao:getProfile', {});
+    expect(view).toMatchObject({ baseUrl: profile.baseUrl, model: profile.model });
+    expect(view).not.toHaveProperty('apiKey');
+    await harness.invoke('sanmao:testConnection', profile);
+    expect(testConnection).toHaveBeenCalledWith(expect.objectContaining({
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      apiKey: profile.apiKey,
+    }));
+
+    const request = {
+      conversationId: '00000000-0000-4000-8000-000000000101',
+      replyId: '00000000-0000-4000-8000-000000000102',
+      text: '你好',
+    };
+    await expect(harness.invoke('sanmao:send', request)).resolves.toEqual({ ok: true });
+    expect(harness.registry.events).toEqual([
+      ['sanmao:stream', { ...request, kind: 'delta', text: '你好' }],
+      ['sanmao:stream', { ...request, kind: 'delta', text: '，我是三脚猫' }],
+      ['sanmao:stream', { ...request, kind: 'done', text: '你好，我是三脚猫' }],
+    ]);
+
+    await harness.invoke('sanmao:cancel', { replyId: request.replyId });
+    expect(cancel).toHaveBeenCalledWith(request.replyId);
+
+    const listModels = vi.fn(async () => ['claude-a']);
+    harness.services.sanmao.listModels = listModels;
+    await expect(harness.invoke('sanmao:listModels', {
+      baseUrl: 'https://claude.test',
+      apiKey: 'override-key',
+    })).resolves.toEqual(['claude-a']);
+    expect(listModels).toHaveBeenCalledWith({
+      baseUrl: 'https://claude.test',
+      apiKey: 'override-key',
+    });
   });
 
   test('speech refuses a new component runtime install while any generation is active', async () => {
@@ -2118,6 +2259,7 @@ describe('preload API', () => {
       'jobs',
       'llm',
       'recordings',
+      'sanmao',
       'speech',
       'window',
       'works',

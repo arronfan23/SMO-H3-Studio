@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SmoApi } from '../shared/ipc';
+import { parseSanmaoStreamEvent } from '../shared/sanmao';
 
 const api: SmoApi = {
   app: {
@@ -62,6 +63,21 @@ const api: SmoApi = {
     listModels: (input) => ipcRenderer.invoke('llm:listModels', input),
     testModel: (input) => ipcRenderer.invoke('llm:testModel', input),
     polish: (request) => ipcRenderer.invoke('llm:polish', request),
+  },
+  sanmao: {
+    getProfile: () => ipcRenderer.invoke('sanmao:getProfile', {}),
+    saveProfile: (input) => ipcRenderer.invoke('sanmao:saveProfile', input),
+    testConnection: (input) => ipcRenderer.invoke('sanmao:testConnection', input),
+    listModels: (input) => ipcRenderer.invoke('sanmao:listModels', input),
+    send: (input) => ipcRenderer.invoke('sanmao:send', input),
+    cancel: (replyId) => ipcRenderer.invoke('sanmao:cancel', { replyId }),
+    subscribe: (listener) => {
+      const receive = (_event: unknown, payload: unknown) => {
+        listener(parseSanmaoStreamEvent(payload));
+      };
+      ipcRenderer.on('sanmao:stream', receive);
+      return () => ipcRenderer.off('sanmao:stream', receive);
+    },
   },
   comfy: {
     health: () => ipcRenderer.invoke('comfy:health', {}),

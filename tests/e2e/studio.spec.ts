@@ -571,7 +571,7 @@ async function saveLlmProfile(page: Page, baseUrl: string): Promise<void> {
   await page.fill('#llm-base-url', `${baseUrl}/v1`);
   await page.fill('#llm-model', 'model-a');
   await page.fill('#llm-api-key', TEST_LLM_API_KEY);
-  await page.click('button:has-text("保存设置")');
+  await page.click('#llm-save-profile');
   await expect(page.locator('h3:has-text("已配置 LLM")')).toBeVisible();
   await expect(page.locator('#llm-api-key')).toHaveValue('');
 }
@@ -762,7 +762,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     app.on('window', (windowPage) =>
       attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
     );
-    page = await app.firstWindow();
+    page = await app.firstWindow().catch((error: unknown) => {
+      console.error(
+        mainProcessRaw.map((chunk) => typeof chunk === 'string' ? chunk : chunk.toString()).join(''),
+      );
+      throw error;
+    });
     await expect(page).toHaveTitle('SMO.H3 Studio');
   });
 
@@ -2350,7 +2355,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
           message: `scrollWidth ${document.documentElement.scrollWidth} > innerWidth ${viewport.width}`,
         });
       }
-      document.querySelectorAll('.settings-section').forEach((element, index) => {
+      document.querySelectorAll('.settings-section:not([hidden])').forEach((element, index) => {
         const rect = element.getBoundingClientRect();
         if (rect.width < 100) {
           results.push({ type: 'too-narrow', index, width: rect.width, message: `section ${index} width ${rect.width}` });

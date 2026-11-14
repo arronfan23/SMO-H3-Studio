@@ -29,6 +29,12 @@ import type {
   LlmDiscoveryInput,
   Work,
 } from './types';
+import type {
+  SanmaoProfile,
+  SanmaoProfileView,
+  SanmaoStreamEvent,
+  SanmaoTestResult,
+} from './sanmao';
 
 export { SKILL_NAMES } from './skills';
 
@@ -74,6 +80,12 @@ export const IPC_CHANNELS = [
   'llm:listModels',
   'llm:testModel',
   'llm:polish',
+  'sanmao:getProfile',
+  'sanmao:saveProfile',
+  'sanmao:testConnection',
+  'sanmao:listModels',
+  'sanmao:send',
+  'sanmao:cancel',
   'avatars:list',
   'avatars:create',
   'avatars:update',
@@ -109,6 +121,12 @@ const positiveFiniteNumber = z.number().finite().positive();
 const nonNegativeFiniteNumber = z.number().finite().nonnegative();
 const emptyPayload = z.object({}).strict();
 
+const sanmaoSendSchema = z.object({
+  conversationId: z.string().uuid(),
+  replyId: z.string().uuid(),
+  text: z.string().trim().min(1).max(32_000),
+}).strict();
+
 const httpUrlSchema = z.string().superRefine((value, context) => {
   let url: URL;
   try {
@@ -132,6 +150,17 @@ const httpUrlSchema = z.string().superRefine((value, context) => {
     });
   }
 });
+
+const sanmaoProfileSchema = z.object({
+  baseUrl: httpUrlSchema,
+  model: nonEmptyString,
+  apiKey: z.string().optional(),
+}).strict();
+
+const sanmaoModelDiscoverySchema = z.object({
+  baseUrl: httpUrlSchema.optional(),
+  apiKey: z.string().optional(),
+}).strict();
 
 const videoGenerationRequestSchema = z
   .object({
@@ -416,6 +445,15 @@ export function createIpcSchema() {
     requestSchema('llm:listModels', llmDiscoveryInputSchema),
     requestSchema('llm:testModel', llmProfileInputSchema),
     requestSchema('llm:polish', polishRequestSchema),
+    requestSchema('sanmao:getProfile', emptyPayload),
+    requestSchema('sanmao:saveProfile', sanmaoProfileSchema),
+    requestSchema('sanmao:testConnection', sanmaoProfileSchema),
+    requestSchema('sanmao:listModels', sanmaoModelDiscoverySchema),
+    requestSchema('sanmao:send', sanmaoSendSchema),
+    requestSchema(
+      'sanmao:cancel',
+      z.object({ replyId: z.string().uuid() }).strict(),
+    ),
     requestSchema('avatars:list', emptyPayload),
     requestSchema(
       'avatars:create',
@@ -534,6 +572,21 @@ export interface SmoApi {
     listModels(input: LlmDiscoveryInput): Promise<string[]>;
     testModel(input: LlmProfile & { apiKey?: string }): Promise<LlmTestResult>;
     polish(request: LlmPolishInput): Promise<PolishResult>;
+  };
+  readonly sanmao: {
+    getProfile(): Promise<SanmaoProfileView | null>;
+    saveProfile(input: SanmaoProfile & { apiKey?: string }): Promise<void>;
+    testConnection(
+      input: SanmaoProfile & { apiKey?: string },
+    ): Promise<SanmaoTestResult>;
+    listModels(input: { baseUrl?: string; apiKey?: string }): Promise<string[]>;
+    send(input: {
+      conversationId: string;
+      replyId: string;
+      text: string;
+    }): Promise<{ ok: true }>;
+    cancel(replyId: string): Promise<void>;
+    subscribe(listener: (event: SanmaoStreamEvent) => void): () => void;
   };
   readonly comfy: {
     health(): Promise<ComfyHealth>;

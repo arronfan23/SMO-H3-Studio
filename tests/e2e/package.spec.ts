@@ -730,6 +730,43 @@ test.describe('SMO.H3 Studio portable package', () => {
       expect((await stat(join(speechDirectory, file))).size).toBeGreaterThan(0);
     }
 
+    const claudeExecutable = join(
+      packagedResourcesPath,
+      'app.asar.unpacked',
+      'node_modules',
+      '@anthropic-ai',
+      'claude-agent-sdk-win32-x64',
+      'claude.exe',
+    );
+    expect((await stat(claudeExecutable)).size).toBeGreaterThan(0);
+
+    const claudeConnectionError = await page!.evaluate(async (apiKey) => {
+      const api = (window as unknown as {
+        smo: {
+          sanmao: {
+            testConnection(input: {
+              baseUrl: string;
+              model: string;
+              apiKey: string;
+            }): Promise<unknown>;
+          };
+        };
+      }).smo;
+      try {
+        await api.sanmao.testConnection({
+          baseUrl: 'http://127.0.0.1:1/v1',
+          model: 'claude-e2e-test',
+          apiKey,
+        });
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, TEST_LLM_API_KEY);
+    expect(claudeConnectionError).not.toBeNull();
+    expect(claudeConnectionError).toMatch(/三脚猫|Claude|fetch|connect|ECONN|连接|请求/i);
+    expect(claudeConnectionError).not.toContain(TEST_LLM_API_KEY);
+
     const violations = await scanSensitiveFiles(packagedResourcesPath);
     expect(violations).toEqual([]);
   });

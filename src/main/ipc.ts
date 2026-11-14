@@ -7,6 +7,8 @@ import type { LlmService } from './llm';
 import type { LlmConfigStore } from './llm-config';
 import type { SkillsService } from './skills';
 import type { RecordingService } from './recordings';
+import type { SanmaoService } from './sanmao-service';
+import type { FileSanmaoConfigStore } from './sanmao-config';
 import type { Store } from './store';
 import type { MediaComponentService } from './media-components';
 import {
@@ -16,6 +18,7 @@ import {
   type HardwareWorkflowResult,
   type IpcRequest,
 } from '../shared/ipc';
+import { parseSanmaoStreamEvent, type SanmaoStreamEvent } from '../shared/sanmao';
 import type { GenerationHandler } from './generation';
 import type {
   EnvironmentImportInput,
@@ -33,7 +36,14 @@ import type {
   VideoMode,
 } from '../shared/types';
 
-export type IpcHandler = (payload: unknown) => Promise<unknown>;
+export interface IpcHandlerContext {
+  emit(channel: 'sanmao:stream', event: SanmaoStreamEvent): void;
+}
+
+export type IpcHandler = (
+  payload: unknown,
+  context?: IpcHandlerContext,
+) => Promise<unknown>;
 
 export interface IpcHandlerRegistry {
   handle(channel: string, handler: IpcHandler): void;
@@ -56,6 +66,8 @@ export interface IpcServices {
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
+  sanmao: Pick<SanmaoService, 'send' | 'testConnection' | 'listModels' | 'cancel' | 'close'>;
+  sanmaoConfig: FileSanmaoConfigStore;
   store: Pick<Store, 'listAvatars' | 'listWorks' | 'renameWork'>;
   avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
   files: Pick<
@@ -91,13 +103,23 @@ export interface IpcServices {
 
 const electronIpcRegistry: IpcHandlerRegistry = {
   handle(channel, handler) {
-    ipcMain.handle(channel, (_event, payload: unknown) => handler(payload));
+    ipcMain.handle(channel, (event, payload: unknown) =>
+      handler(payload, {
+        emit: (streamChannel, streamEvent) => {
+          event.sender.send(
+            streamChannel,
+            parseSanmaoStreamEvent(streamEvent),
+          );
+        },
+      }),
+    );
   },
 };
 
 async function dispatch(
   request: IpcRequest,
   services: IpcServices,
+  context: IpcHandlerContext = { emit: () => undefined },
 ): Promise<unknown> {
   switch (request.channel) {
     case 'app:getVersion':
@@ -168,6 +190,53 @@ async function dispatch(
       }
       return services.skills.polish(credentials, request.payload);
     }
+    case 'sanmao:getProfile':
+      return services.sanmaoConfig.getProfile();
+    case 'sanmao:saveProfile':
+      await services.sanmaoConfig.saveProfile(request.payload);
+      return undefined;
+    case 'sanmao:testConnection':
+      return services.sanmao.testConnection(
+        await services.sanmaoConfig.resolveCredentials(request.payload),
+      );
+    case 'sanmao:listModels':
+      return services.sanmao.listModels(
+        await services.sanmaoConfig.resolveConnection(request.payload),
+      );
+    case 'sanmao:send': {
+      const { conversationId, replyId, text } = request.payload;
+      try {
+        const result = await services.sanmao.send({
+          conversationId,
+          replyId,
+          text,
+          onText: (delta) => context.emit('sanmao:stream', {
+            conversationId,
+            replyId,
+            kind: 'delta',
+            text: delta,
+          }),
+        });
+        context.emit('sanmao:stream', {
+          conversationId,
+          replyId,
+          kind: 'done',
+          text: result.text,
+        });
+        return { ok: true };
+      } catch (error) {
+        context.emit('sanmao:stream', {
+          conversationId,
+          replyId,
+          kind: 'error',
+          text: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    }
+    case 'sanmao:cancel':
+      services.sanmao.cancel(request.payload.replyId);
+      return undefined;
     case 'avatars:list':
       return services.store.listAvatars();
     case 'avatars:create':
@@ -227,9 +296,12 @@ export function registerIpc(
   const schema = createIpcSchema();
 
   for (const channel of IPC_CHANNELS) {
-    registry.handle(channel, async (payload: unknown) => {
+    registry.handle(channel, async (
+      payload: unknown,
+      context?: IpcHandlerContext,
+    ) => {
       const request = schema.parse({ channel, payload });
-      return dispatch(request, services);
+      return dispatch(request, services, context);
     });
   }
 }

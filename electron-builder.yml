@@ -5,6 +5,9 @@ directories:
 npmRebuild: false
 files:
   - dist/**
+asarUnpack:
+  - node_modules/@anthropic-ai/claude-agent-sdk/**/*
+  - node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**/*
 extraResources:
   - from: resources/brand
     to: resources/brand
