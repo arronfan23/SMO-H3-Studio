@@ -23,25 +23,25 @@
 
 ### 任务 1：共享结果预览
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 创建 `tests/unit/generation-result-preview.test.tsx`，为 speech/image/text 三种完成作品分别断言出现 `audio`、`img`、`video`，保持 `controls` 和图片 `object-fit: contain`。未完成作品不渲染。点击“打开目录”调用 `files.openFolder(parentPath(outputPath))`，点击“进入我的作品”调用传入的 `onOpenWorks`。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/generation-result-preview.test.tsx`
 
 预期：找不到 `GenerationResultPreview` 和 `useWorkResult`。
 
-- [ ] **步骤 3：实现 hook 与预览**
+- [x] **步骤 3：实现 hook 与预览**
 
 `useWorkResult(jobId)` 在 jobId 非空时读取 `works.list()`，找到对应记录；每 500ms 轮询直到 done/failed 后停止，空 jobId 和卸载时取消。`GenerationResultPreview({ work, onOpenWorks })` 仅在 `work.status === 'done' && work.outputPath` 时渲染，使用 `useMediaUrl(work.outputPath)`，并按 mode 输出对应原生媒体。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/generation-result-preview.test.tsx && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/renderer/GenerationResultPreview.tsx src/renderer/useWorkResult.ts tests/unit/generation-result-preview.test.tsx
