@@ -104,7 +104,7 @@ function createSanmaoEnvironment(
     ...environment,
     ANTHROPIC_BASE_URL: credentials.baseUrl,
     ANTHROPIC_API_KEY: credentials.apiKey,
-    CLAUDE_AGENT_SDK_CLIENT_APP: 'smo-h3-studio/0.5.0',
+    CLAUDE_AGENT_SDK_CLIENT_APP: 'smo-h3-studio/0.5.1',
   };
 }
 
