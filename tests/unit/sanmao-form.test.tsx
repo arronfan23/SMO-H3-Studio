@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { SanmaoPage } from '../../src/renderer/SanmaoPage';
@@ -16,6 +16,10 @@ const sanmao = {
   saveProfile: vi.fn(),
   testConnection: vi.fn(),
   listModels: vi.fn(),
+  listConversations: vi.fn(),
+  getConversation: vi.fn(),
+  saveDraft: vi.fn(),
+  deleteConversation: vi.fn(),
   send: vi.fn(),
   cancel: vi.fn(),
   subscribe: vi.fn(),
@@ -30,6 +34,20 @@ beforeEach(() => {
   sanmao.saveProfile.mockResolvedValue(undefined);
   sanmao.testConnection.mockResolvedValue({ ok: true, latencyMs: 8 });
   sanmao.listModels.mockResolvedValue(['claude-a', 'claude-b']);
+  sanmao.listConversations.mockResolvedValue([]);
+  sanmao.getConversation.mockResolvedValue(null);
+  sanmao.saveDraft.mockImplementation(async (input) => ({
+    id: input.conversationId,
+    title: '新会话',
+    model: input.model,
+    effort: input.effort ?? 'medium',
+    draft: input.draft,
+    createdAt: '2026-11-15T08:00:00.000Z',
+    updatedAt: '2026-11-15T08:00:00.000Z',
+    messages: [],
+    draftAttachments: [],
+  }));
+  sanmao.deleteConversation.mockResolvedValue(undefined);
   sanmao.cancel.mockResolvedValue(undefined);
   sanmao.subscribe.mockImplementation((listener) => {
     receive = listener;
@@ -113,5 +131,96 @@ describe('SanmaoPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: '前往设置' }));
 
     expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  test('opens and deletes an old conversation with its messages and draft restored', async () => {
+    const summary = {
+      id: '00000000-0000-4000-8000-000000000301',
+      title: '旧口播讨论',
+      model: 'claude-a',
+      effort: 'high' as const,
+      draft: '恢复未发送草稿',
+      createdAt: '2026-11-15T08:00:00.000Z',
+      updatedAt: '2026-11-15T08:00:00.000Z',
+    };
+    sanmao.listConversations.mockResolvedValueOnce([summary]).mockResolvedValue([]);
+    sanmao.getConversation.mockResolvedValue({
+      ...summary,
+      messages: [{ id: 'old-message', role: 'assistant', text: '旧会话回复' }],
+      draftAttachments: [],
+    });
+    render(<SanmaoPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /^旧口播讨论/ }));
+    expect(await screen.findByText('旧会话回复')).toBeInTheDocument();
+    expect(screen.getByLabelText('发送给三脚猫的消息')).toHaveValue('恢复未发送草稿');
+    expect(screen.getByLabelText('思考深度')).toHaveValue('high');
+
+    fireEvent.click(screen.getByRole('button', { name: '删除会话 旧口播讨论' }));
+    const dialog = screen.getByRole('dialog', { name: '删除旧会话' });
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => expect(sanmao.deleteConversation).toHaveBeenCalledWith(summary.id));
+    expect(screen.queryByRole('button', { name: /^旧口播讨论/ })).not.toBeInTheDocument();
+  });
+
+  test('keeps the composer after a separate message log and places model and effort beside send', async () => {
+    render(<SanmaoPage />);
+    const input = await screen.findByLabelText('发送给三脚猫的消息');
+    const composer = input.closest('form') as HTMLFormElement;
+    const log = screen.getByRole('log');
+
+    expect(log).toHaveClass('sanmao-message-log');
+    expect(log.nextElementSibling).toBe(composer);
+    expect(within(composer).getByLabelText('当前模型')).toBeInTheDocument();
+    expect(within(composer).getByLabelText('思考深度')).toBeInTheDocument();
+    expect(within(composer).getByRole('button', { name: '添加附件' })).toBeInTheDocument();
+    expect(within(composer).getByRole('button', { name: '发送' })).toHaveClass(
+      'sanmao-send-button',
+    );
+
+    fireEvent.change(within(composer).getByLabelText('思考深度'), {
+      target: { value: 'high' },
+    });
+    await waitFor(() => expect(sanmao.saveDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ effort: 'high' }),
+    ));
+  });
+
+  test('shows distinct thinking and streaming states until the reply completes', async () => {
+    sanmao.send.mockImplementation(() => new Promise(() => undefined));
+    render(<SanmaoPage />);
+    const input = await screen.findByLabelText('发送给三脚猫的消息');
+    const sendInput = {
+      conversationId: '',
+      replyId: '',
+    };
+    sanmao.send.mockImplementation((input) => {
+      sendInput.conversationId = input.conversationId;
+      sendInput.replyId = input.replyId;
+      return new Promise(() => undefined);
+    });
+
+    fireEvent.change(input, { target: { value: '开始思考' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(await screen.findByRole('status', { name: '正在思考' })).toBeInTheDocument();
+
+    await act(async () => {
+      receive({
+        ...sendInput,
+        kind: 'delta',
+        text: '正在生成',
+      });
+    });
+    expect(screen.getByRole('status', { name: '正在生成回复' })).toBeInTheDocument();
+
+    await act(async () => {
+      receive({
+        ...sendInput,
+        kind: 'done',
+        text: '正在生成',
+      });
+    });
+    expect(screen.queryByRole('status', { name: '正在生成回复' })).not.toBeInTheDocument();
   });
 });

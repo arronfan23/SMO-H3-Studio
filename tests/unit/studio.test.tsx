@@ -78,6 +78,10 @@ function createSmoMock() {
       saveProfile: vi.fn(),
       testConnection: vi.fn(),
       listModels: vi.fn(),
+      listConversations: vi.fn(),
+      getConversation: vi.fn(),
+      saveDraft: vi.fn(),
+      deleteConversation: vi.fn(),
       send: vi.fn(),
       cancel: vi.fn(),
       subscribe: vi.fn(),
@@ -196,6 +200,20 @@ beforeEach(() => {
   smo.sanmao.saveProfile.mockResolvedValue(undefined);
   smo.sanmao.testConnection.mockResolvedValue({ ok: true, latencyMs: 1 });
   smo.sanmao.listModels.mockResolvedValue(['claude-a', 'claude-b']);
+  smo.sanmao.listConversations.mockResolvedValue([]);
+  smo.sanmao.getConversation.mockResolvedValue(null);
+  smo.sanmao.saveDraft.mockImplementation(async (input) => ({
+    id: input.conversationId,
+    title: '新会话',
+    model: input.model,
+    effort: input.effort ?? 'medium',
+    draft: input.draft,
+    createdAt: '2026-11-15T08:00:00.000Z',
+    updatedAt: '2026-11-15T08:00:00.000Z',
+    messages: [],
+    draftAttachments: [],
+  }));
+  smo.sanmao.deleteConversation.mockResolvedValue(undefined);
   smo.sanmao.send.mockResolvedValue({ ok: true });
   smo.sanmao.cancel.mockResolvedValue(undefined);
   smo.sanmao.subscribe.mockReturnValue(() => undefined);

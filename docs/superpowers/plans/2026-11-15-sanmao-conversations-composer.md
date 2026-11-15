@@ -76,23 +76,23 @@ git commit -m "Add Sanmao conversation service and IPC"
 
 ### 任务 3：旧会话列表、消息区和固定底部输入区
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/sanmao-form.test.tsx` 验证旧会话可打开、删除前确认、无消息时 composer 位于容器底部、消息区独立滚动、回复时显示 `role="status"` 的思考状态，切页恢复消息和草稿。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/sanmao-form.test.tsx -t "旧会话|底部|思考"`
 
-- [ ] **步骤 3：实现会话列表和布局**
+- [x] **步骤 3：实现会话列表和布局**
 
 `SanmaoConversationList` 显示标题、时间、模型和删除按钮；`SanmaoMessageLog` 使用独立滚动区；`SanmaoComposer` 固定底部，左下角加号，右下角模型、effort 和圆形 `ArrowUp` 发送按钮，回复中变为 `Square` 停止按钮。`SanmaoPage` 管理当前会话和加载状态，保留页面挂载。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/sanmao-form.test.tsx && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/renderer/SanmaoConversationList.tsx src/renderer/SanmaoMessageLog.tsx src/renderer/SanmaoComposer.tsx src/renderer/SanmaoPage.tsx src/renderer/styles.css tests/unit/sanmao-form.test.tsx

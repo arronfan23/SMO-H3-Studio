@@ -1,11 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Plus, RefreshCw, Send, Square } from 'lucide-react';
+import { Plus, Settings2, X } from 'lucide-react';
 import type {
+  SanmaoConversationSummary,
+  SanmaoEffort,
   SanmaoMessage,
   SanmaoProfileView,
   SanmaoStreamEvent,
 } from '../shared/sanmao';
+import { SanmaoComposer } from './SanmaoComposer';
+import { SanmaoConversationList } from './SanmaoConversationList';
+import { SanmaoMessageLog } from './SanmaoMessageLog';
 import { errorMessage } from './ui';
+
+function summaryOf(conversation: SanmaoConversationSummary): SanmaoConversationSummary {
+  return {
+    id: conversation.id,
+    title: conversation.title,
+    model: conversation.model,
+    effort: conversation.effort,
+    draft: conversation.draft,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+  };
+}
 
 export function SanmaoPage({
   active = true,
@@ -16,18 +33,21 @@ export function SanmaoPage({
 }) {
   const [profile, setProfile] = useState<SanmaoProfileView | null>(null);
   const [models, setModels] = useState<string[]>([]);
+  const [conversations, setConversations] = useState<SanmaoConversationSummary[]>([]);
   const [savingModel, setSavingModel] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<SanmaoMessage[]>([]);
   const [draft, setDraft] = useState('');
-  const [conversationId, setConversationId] = useState(() => crypto.randomUUID());
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [effort, setEffort] = useState<SanmaoEffort>('medium');
+  const [conversationId, setConversationId] = useState<string>(() => crypto.randomUUID());
   const [activeReplyId, setActiveReplyId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SanmaoConversationSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const conversationIdRef = useRef(conversationId);
   const activeReplyRef = useRef(activeReplyId);
-  const logRef = useRef<HTMLDivElement | null>(null);
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     activeReplyRef.current = activeReplyId;
@@ -36,8 +56,13 @@ export function SanmaoPage({
   useEffect(() => {
     if (!active) return;
     let current = true;
-    void window.smo.sanmao.getProfile().then((next) => {
-      if (current) setProfile(next);
+    void Promise.all([
+      window.smo.sanmao.getProfile(),
+      window.smo.sanmao.listConversations(),
+    ]).then(([nextProfile, nextConversations]) => {
+      if (!current) return;
+      setProfile(nextProfile);
+      setConversations(nextConversations);
     }).catch((loadError) => {
       if (current) setError(errorMessage(loadError));
     });
@@ -71,21 +96,42 @@ export function SanmaoPage({
     return unsubscribe;
   }, []);
 
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [messages]);
-
-  useEffect(() => {
-    const composer = composerRef.current;
-    if (!composer) return;
-    composer.style.height = '0px';
-    composer.style.height = `${Math.min(composer.scrollHeight, 160)}px`;
-  }, [draft]);
-
   const canChat = profile !== null && profile.keyStatus === 'valid';
   const modelOptions = profile
     ? [profile.model, ...models.filter((model) => model !== profile.model)]
     : [];
+
+  useEffect(() => {
+    if (!draftDirty || profile === null || !canChat) return;
+    const requestedConversationId = conversationId;
+    const timer = window.setTimeout(() => {
+      void window.smo.sanmao.saveDraft({
+        conversationId: requestedConversationId,
+        model: profile.model,
+        effort,
+        draft,
+      }).then((saved) => {
+        const summary = summaryOf(saved);
+        setConversations((current) => [
+          summary,
+          ...current.filter((conversation) => conversation.id !== summary.id),
+        ]);
+      }).catch((saveError) => {
+        if (conversationIdRef.current === requestedConversationId) {
+          setError(errorMessage(saveError));
+        }
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [canChat, conversationId, draft, draftDirty, effort, profile]);
+
+  const refreshConversations = async (): Promise<void> => {
+    try {
+      setConversations(await window.smo.sanmao.listConversations());
+    } catch (refreshError) {
+      setError(errorMessage(refreshError));
+    }
+  };
 
   const changeModel = async (model: string): Promise<void> => {
     if (!profile || activeReplyId || savingModel || !model) return;
@@ -127,31 +173,83 @@ export function SanmaoPage({
     const text = draft.trim();
     if (!text || activeReplyRef.current !== null || !canChat) return;
     const replyId = crypto.randomUUID();
+    const requestedConversationId = conversationIdRef.current;
     setMessages((current) => [
       ...current,
       { id: `${replyId}:user`, role: 'user', text },
     ]);
     setDraft('');
+    setDraftDirty(false);
     setError(null);
+    activeReplyRef.current = replyId;
     setActiveReplyId(replyId);
     try {
-      await window.smo.sanmao.send({ conversationId, replyId, text });
+      await window.smo.sanmao.send({
+        conversationId: requestedConversationId,
+        replyId,
+        text,
+      });
+      await refreshConversations();
     } catch (sendError) {
       setError(errorMessage(sendError));
     } finally {
-      if (activeReplyRef.current === replyId) setActiveReplyId(null);
+      if (activeReplyRef.current === replyId) {
+        activeReplyRef.current = null;
+        setActiveReplyId(null);
+      }
     }
+  };
+
+  const resetConversation = (): void => {
+    const next = crypto.randomUUID();
+    conversationIdRef.current = next;
+    setConversationId(next);
+    setMessages([]);
+    setDraft('');
+    setDraftDirty(false);
+    setEffort('medium');
+    setActiveReplyId(null);
+    activeReplyRef.current = null;
+    setError(null);
   };
 
   const newConversation = async (): Promise<void> => {
     const replyId = activeReplyRef.current;
     if (replyId) await window.smo.sanmao.cancel(replyId);
-    const next = crypto.randomUUID();
-    conversationIdRef.current = next;
-    setConversationId(next);
-    setMessages([]);
-    setActiveReplyId(null);
+    resetConversation();
+  };
+
+  const openConversation = async (nextConversationId: string): Promise<void> => {
+    if (nextConversationId === conversationIdRef.current || activeReplyRef.current) return;
+    try {
+      const conversation = await window.smo.sanmao.getConversation(nextConversationId);
+      if (conversation === null) throw new Error('会话不存在或已删除');
+      conversationIdRef.current = nextConversationId;
+      setConversationId(nextConversationId);
+      setMessages(conversation.messages);
+      setDraft(conversation.draft);
+      setEffort(conversation.effort);
+      setDraftDirty(false);
+      setError(null);
+    } catch (openError) {
+      setError(errorMessage(openError));
+    }
+  };
+
+  const deleteConversation = async (): Promise<void> => {
+    if (deleteTarget === null || deleting) return;
+    setDeleting(true);
     setError(null);
+    try {
+      await window.smo.sanmao.deleteConversation(deleteTarget.id);
+      setConversations((current) => current.filter((item) => item.id !== deleteTarget.id));
+      if (conversationIdRef.current === deleteTarget.id) resetConversation();
+      setDeleteTarget(null);
+    } catch (deleteError) {
+      setError(errorMessage(deleteError));
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -165,36 +263,9 @@ export function SanmaoPage({
           {notice && <span className="sanmao-saved" role="status">{notice}</span>}
         </div>
         <div className="sanmao-header-actions">
-          {profile ? (
-            <>
-              <label htmlFor="sanmao-current-model">当前模型</label>
-              <select
-                id="sanmao-current-model"
-                value={profile.model}
-                disabled={!canChat || savingModel || activeReplyId !== null}
-                onChange={(event) => void changeModel(event.target.value)}
-              >
-                {modelOptions.map((model) => (
-                  <option key={model} value={model} title={model}>{model}</option>
-                ))}
-              </select>
-              <button
-                className="button button-secondary sanmao-icon-button"
-                type="button"
-                aria-label="刷新模型"
-                title="刷新模型"
-                disabled={refreshing || savingModel}
-                onClick={() => void refreshModels()}
-              >
-                <RefreshCw size={16} aria-hidden="true" />
-              </button>
-            </>
-          ) : (
-            <button
-              className="button button-secondary"
-              type="button"
-              onClick={onOpenSettings}
-            >
+          {!profile && (
+            <button className="button button-secondary" type="button" onClick={onOpenSettings}>
+              <Settings2 size={16} aria-hidden="true" />
               前往设置
             </button>
           )}
@@ -210,62 +281,70 @@ export function SanmaoPage({
       </header>
 
       {error && <p className="form-error sanmao-error" role="alert">{error}</p>}
-      <div className="sanmao-log" ref={logRef} role="log" aria-live="polite">
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`sanmao-message sanmao-message-${message.role}`}
-          >
-            <span className="sanmao-message-role">
-              {message.role === 'user' ? '你' : '三脚猫'}
-            </span>
-            <p>{message.text}</p>
-          </div>
-        ))}
-        {activeReplyId && !messages.some((message) => message.id === activeReplyId) && (
-          <p className="sanmao-waiting" role="status">三脚猫正在回复…</p>
-        )}
+      <div className="sanmao-workspace">
+        <SanmaoConversationList
+          conversations={conversations}
+          currentId={conversationId}
+          disabled={activeReplyId !== null}
+          onOpen={(nextConversationId) => void openConversation(nextConversationId)}
+          onDelete={setDeleteTarget}
+        />
+        <div className="sanmao-chat">
+          <SanmaoMessageLog messages={messages} activeReplyId={activeReplyId} />
+          <SanmaoComposer
+            draft={draft}
+            canChat={canChat}
+            activeReplyId={activeReplyId}
+            model={profile?.model ?? ''}
+            models={modelOptions}
+            effort={effort}
+            savingModel={savingModel}
+            refreshing={refreshing}
+            onDraftChange={(next) => {
+              setDraft(next);
+              setDraftDirty(true);
+            }}
+            onEffortChange={(next) => {
+              setEffort(next);
+              setDraftDirty(true);
+            }}
+            onModelChange={(next) => void changeModel(next)}
+            onRefreshModels={() => void refreshModels()}
+            onSend={() => void send()}
+            onStop={() => {
+              if (activeReplyId) void window.smo.sanmao.cancel(activeReplyId);
+            }}
+          />
+        </div>
       </div>
 
-      <form
-        className="sanmao-composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void send();
-        }}
-      >
-        <label htmlFor="sanmao-message">发送给三脚猫的消息</label>
-        <div className="sanmao-composer-row">
-          <textarea
-            ref={composerRef}
-            id="sanmao-message"
-            rows={1}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-          />
-          {activeReplyId ? (
-            <button
-              className="button button-secondary sanmao-send-button"
-              type="button"
-              aria-label="停止"
-              title="停止"
-              onClick={() => void window.smo.sanmao.cancel(activeReplyId)}
-            >
-              <Square size={17} aria-hidden="true" />
-            </button>
-          ) : (
-            <button
-              className="button button-primary sanmao-send-button"
-              type="submit"
-              aria-label="发送"
-              title="发送"
-              disabled={!draft.trim() || !canChat}
-            >
-              <Send size={17} aria-hidden="true" />
-            </button>
-          )}
+      {deleteTarget !== null && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="删除旧会话">
+          <div className="modal-card">
+            <h3>删除旧会话</h3>
+            <p>确定要删除“{deleteTarget.title}”吗？其中的消息和草稿也会删除。</p>
+            <div className="modal-actions">
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+              >
+                <X size={16} aria-hidden="true" />
+                取消
+              </button>
+              <button
+                className="button button-danger"
+                type="button"
+                disabled={deleting}
+                onClick={() => void deleteConversation()}
+              >
+                {deleting ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </div>
         </div>
-      </form>
+      )}
     </section>
   );
 }
