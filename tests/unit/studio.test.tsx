@@ -1639,6 +1639,23 @@ describe('text-to-video studio', () => {
     expect(screen.getByText('这是三脚猫的回复')).toBeInTheDocument();
   });
 
+  test('三脚猫首次访问时才挂载，之后切页仍保持订阅', async () => {
+    await renderStudio();
+
+    expect(smo.sanmao.subscribe).not.toHaveBeenCalled();
+    expect(smo.sanmao.getProfile).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '三脚猫' }));
+    expect(await screen.findByLabelText('发送给三脚猫的消息')).toBeInTheDocument();
+    expect(smo.sanmao.subscribe).toHaveBeenCalledTimes(1);
+    expect(smo.sanmao.getProfile).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '我的作品' }));
+    fireEvent.click(screen.getByRole('button', { name: '三脚猫' }));
+    expect(smo.sanmao.subscribe).toHaveBeenCalledTimes(1);
+    expect(smo.sanmao.getProfile).toHaveBeenCalledTimes(2);
+  });
+
   test('收起二级目录不卸载语音、图像和视频草稿', async () => {
     await renderStudio();
     const videoDraft = textVideoField('原始文字');

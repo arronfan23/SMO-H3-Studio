@@ -53,6 +53,7 @@ interface StudioApplicationProps {
 
 function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
   const [page, setPage] = useState<PageId>('studio');
+  const [sanmaoVisited, setSanmaoVisited] = useState(false);
   const [settingsService, setSettingsService] = useState<'polish' | 'sanmao'>('polish');
   const [studioMode, setStudioMode] = useState<StudioMode>('video');
   const [studioExpanded, setStudioExpanded] = useState(true);
@@ -64,6 +65,10 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
   const [studioIntent, setStudioIntent] = useState<StudioIntent | null>(null);
   const studioIntentTokenRef = useRef(0);
   const mountedRef = useRef(true);
+
+  useEffect(() => {
+    if (page === 'sanmao') setSanmaoVisited(true);
+  }, [page]);
 
   const refreshAvatars = useCallback(async (preferredId?: string): Promise<void> => {
     try {
@@ -225,15 +230,17 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
               onModeChange={setStudioMode}
             />
           </div>
-          <div className="sanmao-page-host" hidden={page !== 'sanmao'}>
-            <SanmaoPage
-              active={page === 'sanmao'}
-              onOpenSettings={() => {
-                setSettingsService('sanmao');
-                setPage('settings');
-              }}
-            />
-          </div>
+          {sanmaoVisited && (
+            <div className="sanmao-page-host" hidden={page !== 'sanmao'}>
+              <SanmaoPage
+                active={page === 'sanmao'}
+                onOpenSettings={() => {
+                  setSettingsService('sanmao');
+                  setPage('settings');
+                }}
+              />
+            </div>
+          )}
           {page === 'avatars' && (
             <AvatarsPage
               avatars={avatars}
