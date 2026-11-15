@@ -29,6 +29,8 @@ function makeWork(status: WorkStatus, metadata: Work['metadata'] = null): Work {
     outputPath: null,
     status,
     createdAt: '2026-10-26T08:00:00.000Z',
+    title: null,
+    completedAt: null,
     promptId: null,
     metadata,
     error: status === 'failed' ? '任务失败详情' : null,

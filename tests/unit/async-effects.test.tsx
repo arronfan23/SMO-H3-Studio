@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
@@ -71,14 +71,14 @@ function useHardwareApi(overrides: Partial<SmoApi["hardware"]> = {}): void {
 async function renderDetectedHardware() {
   const view = render(<SettingsPage />);
   fireEvent.click(await screen.findByRole("button", { name: "检测硬件" }));
-  await screen.findByText(hardwareInfo.gpu);
+  await within(screen.getByRole('region', { name: '生成环境' }))
+    .findByText(hardwareInfo.gpu);
   return view;
 }
 
 async function renderRecommendedHardware() {
   const view = await renderDetectedHardware();
-  fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
-  await screen.findByText(hardwareProfile.preset);
+  await screen.findByText("均衡模式");
   return view;
 }
 
@@ -176,7 +176,6 @@ describe('async effects on unmounted components', () => {
     const request = deferred<HardwareProfile>();
     useHardwareApi({ recommend: () => request.promise });
     const view = await renderDetectedHardware();
-    fireEvent.click(screen.getByRole("button", { name: "获取推荐" }));
 
     view.unmount();
     const updateCount = stateUpdates.mock.calls.length;

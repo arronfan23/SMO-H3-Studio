@@ -50,6 +50,7 @@ const generationRequest = {
   prompt: 'A quiet studio shot.',
   duration: 8,
   seed: 42,
+  steps: 8,
 } as const;
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -128,7 +129,7 @@ describe('production application services', () => {
     expect(services.startGeneration).toBe(generationHandler);
   });
 
-  test('writes queued, running, completed, and failed job states to the Store', async () => {
+  test('writes running, completed, and failed job states without queueing a second work', async () => {
     const dataDirectory = await useDataDirectory();
     const services = await createAppServices({
       dataDirectory,
@@ -158,10 +159,12 @@ describe('production application services', () => {
       id: firstWork.id,
       run: () => firstGate,
     });
-    const second = services.jobCoordinator.enqueue({
-      id: secondWork.id,
-      run: async () => undefined,
-    });
+    expect(() =>
+      services.jobCoordinator.enqueue({
+        id: secondWork.id,
+        run: async () => undefined,
+      }),
+    ).toThrow('Another generation is already running');
 
     expect(services.store.listWorks().find((work) => work.id === firstWork.id)?.status).toBe(
       'running',
@@ -171,7 +174,14 @@ describe('production application services', () => {
     );
 
     finishFirst();
-    await Promise.all([first, second]);
+    await first;
+    expect(services.store.listWorks().find((work) => work.id === secondWork.id)?.status).toBe(
+      'pending',
+    );
+    await services.jobCoordinator.enqueue({
+      id: secondWork.id,
+      run: async () => undefined,
+    });
     expect(services.store.listWorks().find((work) => work.id === firstWork.id)?.status).toBe(
       'done',
     );
@@ -230,7 +240,6 @@ describe('production application services', () => {
     updateWork.mockRestore();
 
     expect(reports).toEqual([
-      { error: writeFailure, event: { id: work.id, status: 'pending' } },
       { error: writeFailure, event: { id: work.id, status: 'running' } },
       { error: writeFailure, event: { id: work.id, status: 'done' } },
     ]);

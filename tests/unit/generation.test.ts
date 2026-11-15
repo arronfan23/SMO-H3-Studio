@@ -1,6 +1,7 @@
 // @vitest-environment node
 
-import { mkdtemp, readFile, readdir, rm, writeFile, type copyFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -14,12 +15,19 @@ import type {
   ComfySubmitResult,
 } from '../../src/main/comfy';
 import { FileService } from '../../src/main/files';
-import { createGenerationHandler, createRetryHandler } from '../../src/main/generation';
+import {
+  createGenerationHandler,
+  createRetryHandler,
+  type GenerationHandlerOptions,
+} from '../../src/main/generation';
 import { JobCoordinator, type JobEvent } from '../../src/main/jobs';
 import { MediaRegistry } from '../../src/main/media';
+import type { SparkAccelerationEnvironment } from '../../src/main/spark-acceleration';
 import { Store } from '../../src/main/store';
+import { createNoReferenceTextWorkflow } from '../../src/shared/workflow-nodes';
 import type {
   GenerationRequest,
+  VideoGenerationRequest,
   Work,
   WorkExecutionState,
   WorkProgress,
@@ -56,6 +64,7 @@ function outputFile(overrides: Partial<ComfyOutputFile> = {}): ComfyOutputFile {
 class FakeComfyClient {
   readonly uploads: Parameters<ComfyClient['uploadFile']>[0][] = [];
   readonly uploadedAudioContents: string[] = [];
+  readonly uploadedImageContents: string[] = [];
   readonly submissions: unknown[] = [];
   readonly waits: string[] = [];
   readonly histories: string[] = [];
@@ -67,6 +76,7 @@ class FakeComfyClient {
   historyError?: Error;
   completionGate?: Deferred<void>;
   uploadGate?: Deferred<void>;
+  imageUploadNameFactory?: (index: number) => string;
   submitGate?: Deferred<ComfySubmitResult>;
   historyGate?: Deferred<void>;
   cancellations = 0;
@@ -94,8 +104,11 @@ class FakeComfyClient {
     }
     if (input.kind === 'audio') {
       this.uploadedAudioContents.push(await readFile(input.filePath, 'utf8'));
+      return 'uploaded/voice.mp3';
     }
-    return input.kind === 'image' ? 'uploaded/avatar.png' : 'uploaded/voice.mp3';
+    const imageIndex = this.uploadedImageContents.length;
+    this.uploadedImageContents.push(await readFile(input.filePath, 'utf8'));
+    return this.imageUploadNameFactory?.(imageIndex) ?? 'uploaded/avatar.png';
   }
 
   async submit(prompt: unknown): Promise<ComfySubmitResult> {
@@ -174,6 +187,8 @@ async function createHarness(
     progressErrorReporter?: (error: unknown) => void;
     workflowResolver?: (mode: GenerationRequest["mode"]) => string;
     ensureReady?: () => Promise<unknown>;
+    acceleration?: SparkAccelerationEnvironment;
+    mediaRegistry?: GenerationHandlerOptions['mediaRegistry'];
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'smo-h3-generation-'));
@@ -218,28 +233,35 @@ async function createHarness(
       });
     },
   });
-  const startGeneration = createGenerationHandler({
-    store,
-    comfy,
-    jobCoordinator,
-    workflowsDirectory: options.workflowsDirectory ?? workflowsDirectory,
-    workflowResolver: options.workflowResolver,
-    outputDirectory,
-    mediaRegistry,
-    uploadsDirectory,
-    ensureReady: options.ensureReady,
-    copyFile: options.copyFile,
-    durationReader: options.durationReader ?? (async () => 60),
-    removeFile: options.removeFile,
-    cleanupErrorReporter: options.cleanupErrorReporter,
-    progressErrorReporter: options.progressErrorReporter,
-  });
+  const startWithRegistry = (
+    registry: GenerationHandlerOptions['mediaRegistry'],
+  ) =>
+    createGenerationHandler({
+      store,
+      comfy,
+      jobCoordinator,
+      workflowsDirectory: options.workflowsDirectory ?? workflowsDirectory,
+      workflowResolver: options.workflowResolver,
+      outputDirectory,
+      mediaRegistry: registry,
+      uploadsDirectory,
+      ensureReady: options.ensureReady,
+      acceleration: options.acceleration,
+      copyFile: options.copyFile,
+      durationReader: options.durationReader ?? (async () => 60),
+      removeFile: options.removeFile,
+      cleanupErrorReporter: options.cleanupErrorReporter,
+      progressErrorReporter: options.progressErrorReporter,
+    });
+  const startGeneration = startWithRegistry(options.mediaRegistry ?? mediaRegistry);
   const textRequest: GenerationRequest = {
     mode: 'text',
     avatarId: avatar.id,
     prompt: 'A quiet studio shot.',
     duration: 8,
     seed: 42,
+    steps: 12,
+    referenceImagePaths: [],
   };
   const audioRequest: GenerationRequest = {
     ...textRequest,
@@ -247,6 +269,7 @@ async function createHarness(
     prompt: 'Natural lip movement and a steady camera.',
     duration: 6.5,
     seed: 99,
+    steps: 9,
     audioPath,
   };
 
@@ -260,11 +283,26 @@ async function createHarness(
     mediaRegistry,
     startGeneration,
   });
+  const createRestartedRetry = () => {
+    const restartedRegistry = new MediaRegistry({
+      avatarsDirectory: join(directory, 'avatars'),
+      outputDirectory,
+    });
+    return {
+      mediaRegistry: restartedRegistry,
+      retryWork: createRetryHandler({
+        store,
+        mediaRegistry: restartedRegistry,
+        startGeneration: startWithRegistry(restartedRegistry),
+      }),
+    };
+  };
 
   return {
     audioRequest,
     avatar,
     comfy,
+    createRestartedRetry,
     directory,
     events,
     jobCoordinator,
@@ -306,60 +344,43 @@ async function waitForJobEvent(
   });
 }
 
+function submittedPrompt(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  submissionIndex = 0,
+): string {
+  const submitted = harness.comfy.submissions[submissionIndex] as Record<
+    string,
+    { inputs: Record<string, unknown> }
+  >;
+  return String(submitted['136'].inputs.prompt);
+}
+
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) {
     await cleanup();
   }
 });
 
-describe('GenerationHandler subtitle preference', () => {
-  function submittedPrompt(harness: Awaited<ReturnType<typeof createHarness>>): string {
-    const submitted = harness.comfy.submissions[0] as Record<
-      string,
-      { inputs: Record<string, unknown> }
-    >;
-    return String(submitted['136'].inputs.prompt);
-  }
-
-  test('appends subtitle guidance once while metadata keeps the original prompt and flag', async () => {
+describe('GenerationHandler prompt submission', () => {
+  test('submits the original prompt without injecting subtitle guidance', async () => {
     const harness = await createHarness();
-    const request = { ...harness.textRequest, prompt: '主播在摄影棚微笑', subtitles: true };
+    const request = {
+      ...harness.textRequest,
+      prompt: '主播在摄影棚微笑',
+      subtitles: true,
+    } as GenerationRequest;
 
     const result = await harness.startGeneration(request);
     await waitForWork(harness.store, result.id, 'done');
 
-    const finalPrompt = submittedPrompt(harness);
-    expect(finalPrompt).toContain('主播在摄影棚微笑');
-    expect(finalPrompt).toContain('旁白/对白');
-    expect(finalPrompt.match(/同步显示/g)).toHaveLength(1);
+    expect(submittedPrompt(harness)).toBe('主播在摄影棚微笑');
 
     const work = harness.store.listWorks().find((candidate) => candidate.id === result.id);
-    expect(work?.metadata).toMatchObject({
-      request: { prompt: '主播在摄影棚微笑', subtitles: true },
+    expect(work?.metadata?.request).toEqual({
+      ...harness.textRequest,
+      prompt: '主播在摄影棚微笑',
     });
-  });
-
-  test('keeps the submitted prompt unchanged when it already requests subtitles', async () => {
-    const harness = await createHarness();
-    const request = { ...harness.textRequest, prompt: '画面下方显示字幕', subtitles: true };
-
-    const result = await harness.startGeneration(request);
-    await waitForWork(harness.store, result.id, 'done');
-
-    expect(submittedPrompt(harness)).toBe('画面下方显示字幕');
-  });
-
-  test('submits the original prompt when subtitles are not requested', async () => {
-    const harness = await createHarness();
-
-    const result = await harness.startGeneration(harness.textRequest);
-    await waitForWork(harness.store, result.id, 'done');
-
-    expect(submittedPrompt(harness)).toBe(harness.textRequest.prompt);
-    const work = harness.store.listWorks().find((candidate) => candidate.id === result.id);
-    expect(work?.metadata).toMatchObject({
-      request: { prompt: harness.textRequest.prompt },
-    });
+    expect(work?.metadata?.request).not.toHaveProperty('subtitles');
   });
 });
 
@@ -604,11 +625,24 @@ describe('GenerationHandler execution state metadata', () => {
 
     expect(work.error).toMatch(/timed out/i);
     expect(work.promptId).toBe('prompt-1');
+    expect(work.completedAt).toBeNull();
     expect(harness.comfy.cancelRequests).toEqual(['prompt-1']);
   });
 });
 
 describe('GenerationHandler workflows', () => {
+  test.each([0, 101, 1.5])(
+    'rejects invalid video steps %s before queueing',
+    async (steps) => {
+      const harness = await createHarness();
+
+      await expect(
+        harness.startGeneration({ ...harness.textRequest, steps }),
+      ).rejects.toThrow(/steps/i);
+      expect(harness.store.listWorks()).toEqual([]);
+    },
+  );
+
   test('runs the complete text workflow and records the real mp4 output', async () => {
     const harness = await createHarness();
     const workflowPath = join(workflowsDirectory, 'text-ref2va.json');
@@ -632,6 +666,7 @@ describe('GenerationHandler workflows', () => {
     expected['136'].inputs.prompt = request.prompt;
     expected['132'].inputs.value = 12;
     expected['269'].inputs.seed = 123;
+    expected['124'].inputs.steps = request.steps;
     expected['180'].inputs.filename_prefix = `SMO-H3/${result.id}`;
     expect(harness.comfy.submissions).toEqual([expected]);
     expect(harness.comfy.waits).toEqual(['prompt-1']);
@@ -642,12 +677,17 @@ describe('GenerationHandler workflows', () => {
       mode: 'text',
       status: 'done',
       outputPath: join(harness.outputDirectory, 'SMO-H3', 'result.mp4'),
+      title: null,
       promptId: 'prompt-1',
       error: null,
       metadata: { request, workflowVersion: 'text-ref2va.json' },
     });
+    expect(work.completedAt).not.toBeNull();
+    expect(new Date(work.completedAt!).toISOString()).toBe(work.completedAt);
+    expect(Date.parse(work.completedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(work.createdAt),
+    );
     expect(harness.events.map(({ id, status }) => ({ id, status }))).toEqual([
-      { id: result.id, status: 'pending' },
       { id: result.id, status: 'running' },
       { id: result.id, status: 'done' },
     ]);
@@ -693,6 +733,7 @@ describe('GenerationHandler workflows', () => {
       expected['85'].inputs.start_index = expectedStart;
       expected['85'].inputs.duration = request.duration;
       expected['86'].inputs.seed = request.seed;
+      expected['51'].inputs.steps = request.steps;
       expected['65'].inputs.filename_prefix = `SMO-H3/${result.id}`;
       expect(harness.comfy.submissions).toEqual([expected]);
       expect(work.status).toBe('done');
@@ -797,6 +838,30 @@ describe('GenerationHandler workflows', () => {
     await expect(readdir(harness.uploadsDirectory)).rejects.toThrow();
   });
 
+  test('submits audio from a managed speech output without explicit file selection', async () => {
+    const harness = await createHarness();
+    const speechDirectory = join(harness.outputDirectory, 'SMO-Speech');
+    const speechPath = join(speechDirectory, 'existing-speech.wav');
+    await mkdir(speechDirectory, { recursive: true });
+    await writeFile(speechPath, 'managed-speech-audio');
+    harness.comfy.outputs = [
+      outputFile({ nodeId: '65', filename: 'audio-result.mp4' }),
+    ];
+
+    const result = await harness.startGeneration({
+      ...harness.audioRequest,
+      audioPath: speechPath,
+    });
+    await waitForWork(harness.store, result.id, 'done');
+
+    expect(harness.comfy.uploadedAudioContents).toEqual(['managed-speech-audio']);
+    expect(harness.comfy.submissions).toHaveLength(1);
+    expect(harness.store.getWork(result.id)?.metadata?.request).toMatchObject({
+      mode: 'audio',
+      audioPath: speechPath,
+    });
+  });
+
   test('removes a partial audio copy when staging fails before pending work', async () => {
     const failure = Object.assign(new Error('Simulated copy failure'), { code: 'EIO' });
     const failingCopy: typeof copyFile = async (_source, destination) => {
@@ -848,10 +913,11 @@ describe('GenerationHandler workflows', () => {
     expect(earlyResult).toEqual(result);
   });
 
-  test('creates a unique work id for each request', async () => {
+  test('creates a unique work id for each sequential request', async () => {
     const harness = await createHarness();
 
     const first = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, first.id, 'done');
     const second = await harness.startGeneration(harness.textRequest);
     await Promise.all([
       waitForWork(harness.store, first.id, 'done'),
@@ -862,6 +928,91 @@ describe('GenerationHandler workflows', () => {
     expect(harness.store.listWorks().map((work) => work.id).sort()).toEqual(
       [first.id, second.id].sort(),
     );
+  });
+
+  test('rejects a second start while active without adding another work', async () => {
+    const harness = await createHarness();
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+    const addWork = vi.spyOn(harness.store, 'addWork');
+
+    const firstStart = harness.startGeneration(harness.textRequest);
+    try {
+      const secondStart = harness.startGeneration(harness.textRequest);
+      await expect(secondStart).rejects.toThrow(
+        'Another generation is already running',
+      );
+      const first = await firstStart;
+      expect(addWork).toHaveBeenCalledTimes(1);
+      expect(harness.store.listWorks().map((work) => work.id)).toEqual([first.id]);
+      expect(harness.jobCoordinator.activeId).toBe(first.id);
+      expect(harness.events.map((event) => event.status)).not.toContain('pending');
+    } finally {
+      completionGate.resolve();
+      await vi.waitFor(() => expect(harness.jobCoordinator.activeCount).toBe(0));
+    }
+  });
+
+  test('rejects audio before staging when another generation is already active', async () => {
+    const copy = vi.fn<typeof copyFile>();
+    const durationReader = vi.fn(async () => 60);
+    const harness = await createHarness({ copyFile: copy, durationReader });
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+    const addWork = vi.spyOn(harness.store, 'addWork');
+    const first = await harness.startGeneration(harness.textRequest);
+
+    try {
+      await expect(harness.startGeneration(harness.audioRequest)).rejects.toThrow(
+        'Another generation is already running',
+      );
+
+      expect(copy).not.toHaveBeenCalled();
+      expect(durationReader).not.toHaveBeenCalled();
+      expect(addWork).toHaveBeenCalledTimes(1);
+      expect(harness.store.listWorks().map((work) => work.id)).toEqual([first.id]);
+    } finally {
+      completionGate.resolve();
+      await vi.waitFor(() => expect(harness.jobCoordinator.activeCount).toBe(0));
+    }
+  });
+
+  test('cleans staged audio when another generation becomes active during staging', async () => {
+    const copyStarted = deferred();
+    const copyGate = deferred();
+    const gatedCopy: typeof copyFile = async (source, destination, mode) => {
+      await copyFile(source, destination, mode);
+      copyStarted.resolve();
+      await copyGate.promise;
+    };
+    const harness = await createHarness({ copyFile: gatedCopy });
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+    const addWork = vi.spyOn(harness.store, 'addWork');
+    const audioStart = Promise.resolve(harness.startGeneration(harness.audioRequest));
+    audioStart.catch(() => undefined);
+
+    try {
+      await copyStarted.promise;
+      const stagedFiles = await readdir(harness.uploadsDirectory);
+      expect(stagedFiles).toHaveLength(1);
+      const stagedPath = join(harness.uploadsDirectory, stagedFiles[0]!);
+
+      const occupying = await harness.startGeneration(harness.textRequest);
+      expect(harness.jobCoordinator.activeId).toBe(occupying.id);
+      copyGate.resolve();
+
+      await expect(audioStart).rejects.toThrow('Another generation is already running');
+      expect(addWork).toHaveBeenCalledTimes(1);
+      expect(harness.store.listWorks().map((work) => work.id)).toEqual([occupying.id]);
+      await expect(readFile(stagedPath, 'utf8')).rejects.toThrow();
+      expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+      expect(harness.jobCoordinator.activeId).toBe(occupying.id);
+    } finally {
+      copyGate.resolve();
+      completionGate.resolve();
+      await vi.waitFor(() => expect(harness.jobCoordinator.activeCount).toBe(0));
+    }
   });
 
   test('stores only declared request fields in work metadata', async () => {
@@ -875,9 +1026,969 @@ describe('GenerationHandler workflows', () => {
     expect(work.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      acceleration: 'none',
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     expect(JSON.stringify(work.metadata)).not.toContain(apiKey);
+  });
+});
+
+describe('GenerationHandler no reference text to video', () => {
+  function noReferenceRequest(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+  ): VideoGenerationRequest {
+    return {
+      ...harness.textRequest,
+      mode: 'text',
+      avatarId: null,
+      referenceImagePaths: [],
+    } as VideoGenerationRequest;
+  }
+
+  test('submits T2VA without avatar lookup or image upload and records the output', async () => {
+    const harness = await createHarness();
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    const workflowPath = join(workflowsDirectory, 'text-ref2va.json');
+    const frozenSource = await readFile(workflowPath, 'utf8');
+    const request = noReferenceRequest(harness);
+
+    const result = await harness.startGeneration(request);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    const expected = JSON.parse(frozenSource) as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    delete expected['226'];
+    expected['136'].class_type = 'MiniMaxH3ImageToVideo';
+    expected['136'].inputs = {
+      clip: expected['136'].inputs.clip,
+      vae: expected['136'].inputs.vae,
+      prompt: request.prompt,
+      width: expected['136'].inputs.width,
+      height: expected['136'].inputs.height,
+      length: expected['136'].inputs.length,
+    };
+    expected['132'].inputs.value = request.duration;
+    expected['269'].inputs.seed = request.seed;
+    expected['124'].inputs.steps = request.steps;
+    expected['180'].inputs.filename_prefix = `SMO-H3/${result.id}`;
+    expect(harness.comfy.submissions).toEqual([expected]);
+    expect(work).toMatchObject({
+      id: result.id,
+      avatarId: null,
+      mode: 'text',
+      status: 'done',
+      outputPath: join(harness.outputDirectory, 'SMO-H3', 'result.mp4'),
+      promptId: 'prompt-1',
+      metadata: { request, workflowVersion: 'text-ref2va.json' },
+    });
+    expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
+  });
+
+  test('creates an immutable T2VA graph without flat or nested reference inputs', () => {
+    const source = {
+      '136': {
+        class_type: 'MiniMaxH3ReferenceToVideo',
+        inputs: {
+          clip: ['128', 0],
+          vae: ['194', 0],
+          prompt: 'prompt',
+          width: ['115', 0],
+          height: ['115', 1],
+          length: ['131', 1],
+          audio_vae: ['184', 0],
+          ref_image_size: 'match',
+          'ref_images.ref_image_0': ['226', 0],
+          ref_images: { ref_image_1: ['227', 0] },
+        },
+      },
+      '226': { class_type: 'LoadImage', inputs: { image: 'avatar.png' } },
+      '180': { class_type: 'SaveVideo', inputs: { filename_prefix: 'SMO-H3' } },
+    };
+    const snapshot = structuredClone(source);
+
+    const converted = createNoReferenceTextWorkflow(source);
+
+    expect(source).toEqual(snapshot);
+    expect(converted).not.toBe(source);
+    expect(converted['136']).toMatchObject({
+      class_type: 'MiniMaxH3ImageToVideo',
+      inputs: {
+        clip: ['128', 0],
+        vae: ['194', 0],
+        prompt: 'prompt',
+        width: ['115', 0],
+        height: ['115', 1],
+        length: ['131', 1],
+      },
+    });
+    expect(converted['136'].inputs).not.toHaveProperty('image');
+    expect(converted).not.toHaveProperty('226');
+    expect(converted['180']).toBe(source['180']);
+  });
+
+  test.each([
+    null,
+    'G:\\refs\\not-an-array.png',
+    [''],
+    ['   '],
+    ['G:\\refs\\valid.png', 42],
+    Array.from({ length: 10 }, (_, index) => `G:\\refs\\${index}.png`),
+  ])('rejects invalid no reference paths before creating a work: %j', async (
+    referenceImagePaths,
+  ) => {
+    const harness = await createHarness();
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    const request = {
+      ...noReferenceRequest(harness),
+      referenceImagePaths,
+    } as unknown as GenerationRequest;
+
+    await expect(harness.startGeneration(request)).rejects.toThrow(
+      /referenceImagePaths/i,
+    );
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test.each([
+    { avatarId: null, referenceImagePaths: [] },
+    { avatarId: 'avatar-1', referenceImagePaths: ['G:\\refs\\one.png'] },
+  ])('keeps direct audio avatar and reference validation: %j', async (override) => {
+    const harness = await createHarness();
+    const request = {
+      ...harness.audioRequest,
+      ...override,
+    } as GenerationRequest;
+
+    await expect(harness.startGeneration(request)).rejects.toThrow(
+      /avatarId|reference images/i,
+    );
+    expect(harness.store.listWorks()).toEqual([]);
+    expect(harness.comfy.uploads).toEqual([]);
+  });
+
+  test('keeps the legacy avatar Ref2VA workflow when reference paths are omitted', async () => {
+    const harness = await createHarness();
+    const {
+      referenceImagePaths: _referenceImagePaths,
+      ...legacyRequest
+    } = harness.textRequest;
+
+    const result = await harness.startGeneration(legacyRequest);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(work.avatarId).toBe(harness.avatar.id);
+    expect(work.metadata?.request).toEqual({
+      ...legacyRequest,
+      referenceImagePaths: [],
+    });
+    expect(harness.comfy.uploads).toEqual([
+      { filePath: harness.avatar.photoPath, kind: 'image' },
+    ]);
+    const graph = harness.comfy.submissions[0] as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(graph['136'].class_type).toBe('MiniMaxH3ReferenceToVideo');
+    expect(graph['226'].inputs.image).toBe('uploaded/avatar.png');
+  });
+
+  test('cancels no reference execution by prompt id without an image upload', async () => {
+    const harness = await createHarness();
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    harness.comfy.completionGate = deferred();
+
+    const result = await harness.startGeneration(noReferenceRequest(harness));
+    await vi.waitFor(() => expect(harness.comfy.waits).toEqual(['prompt-1']));
+    await harness.jobCoordinator.cancelActive();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('Generation cancelled');
+    expect(harness.comfy.cancelRequests).toEqual(['prompt-1']);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(listAvatars).not.toHaveBeenCalled();
+  });
+
+  test('retries a new no reference work without avatar lookup or upload', async () => {
+    const harness = await createHarness();
+    const original = await harness.startGeneration(noReferenceRequest(harness));
+    await waitForWork(harness.store, original.id, 'done');
+    harness.store.updateWork(original.id, { status: 'failed', error: 'forced failure' });
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    await rm(harness.avatar.photoPath);
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(retryWork).toMatchObject({
+      avatarId: null,
+      metadata: {
+        request: noReferenceRequest(harness),
+        retryOf: original.id,
+      },
+    });
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toHaveLength(2);
+  });
+
+  test('retries legacy no reference metadata without steps or reference paths', async () => {
+    const harness = await createHarness();
+    const legacyRequest = {
+      mode: 'text',
+      avatarId: null,
+      prompt: 'Legacy no reference prompt',
+      duration: 8,
+      seed: 7,
+    } as unknown as GenerationRequest;
+    const original = harness.store.addWork({
+      id: 'legacy-no-reference',
+      avatarId: null,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+      metadata: { request: legacyRequest, workflowVersion: 'text-ref2va.json' },
+    });
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    await rm(harness.avatar.photoPath);
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(retryWork.metadata?.request).toEqual({
+      ...legacyRequest,
+      steps: 8,
+      referenceImagePaths: [],
+    });
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(harness.comfy.uploads).toEqual([]);
+    const graph = harness.comfy.submissions[0] as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+    expect(graph['124'].inputs.steps).toBe(8);
+    expect(graph['136'].class_type).toBe('MiniMaxH3ImageToVideo');
+  });
+});
+
+describe('GenerationHandler reference images', () => {
+  test('uploads one reference image and wires flat ref_images.ref_image_0', async () => {
+    const harness = await createHarness();
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const request: VideoGenerationRequest = {
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: [referencePath],
+    };
+
+    const result = await harness.startGeneration(request);
+    const work = await waitForWork(harness.store, result.id, 'done');
+    const graph = harness.comfy.submissions[0] as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+
+    expect(harness.comfy.uploads).toEqual([
+      {
+        filePath: join(harness.uploadsDirectory, `${result.id}-0.png`),
+        kind: 'image',
+      },
+    ]);
+    expect(graph['226'].inputs.image).toBe('uploaded/avatar.png');
+    expect(graph['136'].class_type).toBe('MiniMaxH3ReferenceToVideo');
+    expect(graph['136'].inputs['ref_images.ref_image_0']).toEqual(['226', 0]);
+    expect(graph['136'].inputs).not.toHaveProperty('ref_images');
+    expect(work.metadata?.request).toEqual(request);
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
+  test('keeps Spark acceleration, transition, and output unchanged with reference images', async () => {
+    const harness = await createHarness({
+      acceleration: {
+        runtimeId: 'sm120',
+        hardwareFingerprint: { cudaComputeCapability: '12.0' },
+      },
+    });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+
+    const result = await harness.startGeneration({
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'done');
+    const graph = harness.comfy.submissions[0] as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+
+    expect(graph.smo_spark).toMatchObject({
+      class_type: 'MiniMaxH3SparkAttentionSM120',
+      inputs: { enabled: true, steps: harness.textRequest.steps },
+    });
+    expect(graph['124'].inputs.model).toEqual(['smo_spark', 0]);
+    expect(graph['269'].inputs.low_res_model).toEqual(['smo_spark', 0]);
+    expect(graph['269'].inputs.transition_step).toBe(6);
+    expect(graph['136'].inputs['ref_images.ref_image_0']).toEqual(['226', 0]);
+    expect(graph['180'].inputs.filename_prefix).toBe(`SMO-H3/${result.id}`);
+    expect(work.metadata).toMatchObject({ acceleration: 'spark-sm120' });
+  });
+
+  test('uploads nine reference images in order and wires flat ref_image_0 through ref_image_8', async () => {
+    const copy = vi.fn<typeof copyFile>(async (source, destination, mode) => {
+      await copyFile(source, destination, mode);
+    });
+    const harness = await createHarness({ copyFile: copy });
+    const extensions = [
+      '.PNG',
+      '.jpg',
+      '.jpeg',
+      '.webp',
+      '.png',
+      '.jpg',
+      '.jpeg',
+      '.webp',
+      '.png',
+    ];
+    const referencePaths: string[] = [];
+    for (const [index, extension] of extensions.entries()) {
+      const referencePath = join(
+        harness.directory,
+        `reference-${index}${extension}`,
+      );
+      await writeFile(referencePath, `reference-${index}-bytes`);
+      await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+      referencePaths.push(referencePath);
+    }
+    harness.comfy.imageUploadNameFactory = (index) => `uploaded/ref-${index}.png`;
+    const request: VideoGenerationRequest = {
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: referencePaths,
+    };
+    const workflowPath = join(workflowsDirectory, 'text-ref2va.json');
+    const frozenSource = await readFile(workflowPath, 'utf8');
+
+    const result = await harness.startGeneration(request);
+    const work = await waitForWork(harness.store, result.id, 'done');
+    const graph = harness.comfy.submissions[0] as Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    >;
+
+    expect(copy.mock.calls.map(([source]) => source)).toEqual(referencePaths);
+    expect(copy.mock.calls.map(([, , mode]) => mode)).toEqual(
+      Array.from({ length: 9 }, () => constants.COPYFILE_EXCL),
+    );
+    expect(harness.comfy.uploads).toEqual(
+      extensions.map((extension, index) => ({
+        filePath: join(
+          harness.uploadsDirectory,
+          `${result.id}-${index}${extension.toLowerCase()}`,
+        ),
+        kind: 'image',
+      })),
+    );
+    expect(harness.comfy.uploadedImageContents).toEqual(
+      extensions.map((_, index) => `reference-${index}-bytes`),
+    );
+    expect(graph['226']).toEqual({
+      class_type: 'LoadImage',
+      inputs: { image: 'uploaded/ref-0.png' },
+    });
+    for (let index = 1; index < 9; index += 1) {
+      expect(graph[`ref${index + 1}`]).toEqual({
+        class_type: 'LoadImage',
+        inputs: { image: `uploaded/ref-${index}.png` },
+      });
+    }
+    expect(graph.ref1).toBeUndefined();
+    expect(graph.ref10).toBeUndefined();
+    expect(graph['136'].class_type).toBe('MiniMaxH3ReferenceToVideo');
+    expect(graph['136'].inputs).toMatchObject({
+      ref_image_size: 'match',
+      audio_vae: ['184', 0],
+    });
+    expect(graph['136'].inputs).not.toHaveProperty('ref_images');
+    expect(
+      Object.keys(graph['136'].inputs).filter((key) =>
+        key.startsWith('ref_images.'),
+      ),
+    ).toEqual(
+      Array.from({ length: 9 }, (_, index) => `ref_images.ref_image_${index}`),
+    );
+    for (let index = 0; index < 9; index += 1) {
+      expect(graph['136'].inputs[`ref_images.ref_image_${index}`]).toEqual([
+        index === 0 ? '226' : `ref${index + 1}`,
+        0,
+      ]);
+    }
+    expect(graph['124'].inputs.steps).toBe(request.steps);
+    expect(graph['269'].inputs.transition_step).toBe(6);
+    expect(graph['180'].inputs.filename_prefix).toBe(`SMO-H3/${result.id}`);
+    expect(work).toMatchObject({
+      status: 'done',
+      outputPath: join(harness.outputDirectory, 'SMO-H3', 'result.mp4'),
+      metadata: { request, workflowVersion: 'text-ref2va.json' },
+    });
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+    for (const [index, referencePath] of referencePaths.entries()) {
+      expect(await readFile(referencePath, 'utf8')).toBe(
+        `reference-${index}-bytes`,
+      );
+    }
+    expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
+  });
+
+  test('creates an immutable Ref2VA graph and clears stale flat and nested reference inputs', async () => {
+    const { createReferenceTextWorkflow } = await import(
+      '../../src/shared/workflow-nodes'
+    );
+    const source = {
+      '136': {
+        class_type: 'MiniMaxH3ReferenceToVideo',
+        inputs: {
+          clip: ['128', 0],
+          vae: ['194', 0],
+          audio_vae: ['184', 0],
+          prompt: 'prompt',
+          ref_image_size: 'match',
+          'ref_images.ref_image_0': ['old-first', 0],
+          'ref_images.ref_image_8': ['old-ninth', 0],
+          ref_images: { ref_image_1: ['old-nested', 0] },
+        },
+      },
+      '226': { class_type: 'LoadImage', inputs: { image: 'avatar.png' } },
+      '180': { class_type: 'SaveVideo', inputs: { filename_prefix: 'SMO-H3' } },
+    };
+    const snapshot = structuredClone(source);
+
+    const converted: Record<
+      string,
+      { class_type: string; inputs: Record<string, unknown> }
+    > = createReferenceTextWorkflow(source, [
+      'uploaded/first.png',
+      'uploaded/second.png',
+    ]);
+
+    expect(source).toEqual(snapshot);
+    expect(converted).not.toBe(source);
+    expect(converted['226'].inputs.image).toBe('uploaded/first.png');
+    expect(converted.ref2).toEqual({
+      class_type: 'LoadImage',
+      inputs: { image: 'uploaded/second.png' },
+    });
+    expect(converted.ref3).toBeUndefined();
+    expect(converted['136']).toMatchObject({
+      class_type: 'MiniMaxH3ReferenceToVideo',
+      inputs: {
+        clip: ['128', 0],
+        vae: ['194', 0],
+        audio_vae: ['184', 0],
+        ref_image_size: 'match',
+        'ref_images.ref_image_0': ['226', 0],
+        'ref_images.ref_image_1': ['ref2', 0],
+      },
+    });
+    expect(converted['136'].inputs).not.toHaveProperty('ref_images');
+    expect(
+      Object.keys(converted['136'].inputs).filter((key) =>
+        key.startsWith('ref_images.'),
+      ),
+    ).toEqual(['ref_images.ref_image_0', 'ref_images.ref_image_1']);
+    expect(converted['180']).toEqual(source['180']);
+  });
+
+  test('rejects invalid uploaded names and reference node conflicts without mutating the source', async () => {
+    const { createReferenceTextWorkflow } = await import(
+      '../../src/shared/workflow-nodes'
+    );
+    const source = {
+      '136': {
+        class_type: 'MiniMaxH3ReferenceToVideo',
+        inputs: { prompt: 'prompt', 'ref_images.ref_image_0': ['226', 0] },
+      },
+      '226': { class_type: 'LoadImage', inputs: { image: 'avatar.png' } },
+    };
+    const snapshot = structuredClone(source);
+
+    for (const uploadedNames of [
+      [],
+      Array.from({ length: 10 }, (_, index) => `${index}.png`),
+      ['first.png', '   '],
+    ]) {
+      expect(() => createReferenceTextWorkflow(source, uploadedNames)).toThrow(
+        /uploaded.*1.*9|non-empty/i,
+      );
+    }
+    const conflicting = {
+      ...source,
+      ref2: { class_type: 'LoadImage', inputs: { image: 'existing.png' } },
+    };
+    const conflictingSnapshot = structuredClone(conflicting);
+    expect(() =>
+      createReferenceTextWorkflow(conflicting, ['first.png', 'second.png']),
+    ).toThrow(/ref2|conflict/i);
+    expect(source).toEqual(snapshot);
+    expect(conflicting).toEqual(conflictingSnapshot);
+  });
+
+  test.each(['unauthorized', 'missing'] as const)(
+    'rejects a %s reference image before creating work or staging',
+    async (scenario) => {
+      const harness = await createHarness();
+      const referencePath = join(harness.directory, `${scenario}.png`);
+      if (scenario === 'unauthorized') {
+        await writeFile(referencePath, 'unauthorized-reference');
+      }
+
+      await expect(
+        harness.startGeneration({
+          ...harness.textRequest,
+          avatarId: null,
+          referenceImagePaths: [referencePath],
+        }),
+      ).rejects.toThrow(/selected.*files\.selectImage/i);
+
+      expect(harness.store.listWorks()).toEqual([]);
+      expect(harness.comfy.uploads).toEqual([]);
+      expect(harness.comfy.submissions).toEqual([]);
+      await expect(readdir(harness.uploadsDirectory)).rejects.toThrow();
+    },
+  );
+
+  test('cleans only the current staged reference when upload fails', async () => {
+    const harness = await createHarness();
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    await mkdir(harness.uploadsDirectory, { recursive: true });
+    const otherTaskPath = join(harness.uploadsDirectory, 'other-task.png');
+    await writeFile(otherTaskPath, 'other-task-bytes');
+    harness.comfy.uploadErrors.image = new Error('reference upload failed');
+
+    const result = await harness.startGeneration({
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('reference upload failed');
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(await readdir(harness.uploadsDirectory)).toEqual(['other-task.png']);
+    expect(await readFile(otherTaskPath, 'utf8')).toBe('other-task-bytes');
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
+  test('removes a partial staged reference when copying fails', async () => {
+    const copyFailure = Object.assign(new Error('reference copy failed'), {
+      code: 'EIO',
+    });
+    const failingCopy: typeof copyFile = async (_source, destination) => {
+      await writeFile(destination, 'partial-reference');
+      throw copyFailure;
+    };
+    const harness = await createHarness({ copyFile: failingCopy });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+
+    const result = await harness.startGeneration({
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('reference copy failed');
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
+  test('does not delete an existing staged path on an exclusive copy collision', async () => {
+    const collision = Object.assign(new Error('staged reference exists'), {
+      code: 'EEXIST',
+    });
+    let stagedPath = '';
+    const collidingCopy: typeof copyFile = async (_source, destination) => {
+      stagedPath = destination.toString();
+      await writeFile(destination, 'existing-staged-file');
+      throw collision;
+    };
+    const harness = await createHarness({ copyFile: collidingCopy });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+
+    const result = await harness.startGeneration({
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: [referencePath],
+    });
+    const work = await waitForWork(harness.store, result.id, 'failed');
+
+    expect(work.error).toBe('staged reference exists');
+    expect(await readFile(stagedPath, 'utf8')).toBe('existing-staged-file');
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.comfy.submissions).toEqual([]);
+  });
+
+  test('cancels during reference upload, cleans staging, and does not submit', async () => {
+    const removeFile = vi.fn<typeof rm>(async (...args) => rm(...args));
+    const harness = await createHarness({ removeFile });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const uploadGate = deferred();
+    harness.comfy.uploadGate = uploadGate;
+
+    const result = await harness.startGeneration({
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: [referencePath],
+    });
+    await vi.waitFor(() => expect(harness.comfy.uploads).toHaveLength(1));
+    await harness.jobCoordinator.cancelActive();
+    uploadGate.resolve();
+    const work = await waitForWork(harness.store, result.id, 'failed');
+    const stagedPath = join(harness.uploadsDirectory, `${result.id}-0.png`);
+
+    expect(work.error).toBe('Generation cancelled');
+    expect(harness.comfy.submissions).toEqual([]);
+    expect(harness.comfy.cancelRequests).toEqual([]);
+    expect(removeFile).toHaveBeenCalledWith(stagedPath, { force: true });
+    expect(removeFile).not.toHaveBeenCalledWith(referencePath, { force: true });
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+    expect(await readFile(referencePath, 'utf8')).toBe('reference-image-bytes');
+  });
+
+  test('rechecks activeCount after asynchronous reference authorization', async () => {
+    const authorizationStarted = deferred();
+    const authorizationGate = deferred();
+    let harness: Awaited<ReturnType<typeof createHarness>>;
+    const isSelectedImage = vi.fn(async (path: string) => {
+      authorizationStarted.resolve();
+      await authorizationGate.promise;
+      return harness.mediaRegistry.isSelectedImage(path);
+    });
+    harness = await createHarness({
+      mediaRegistry: {
+        isSelectedFile: async () => false,
+        isSelectedImage,
+      },
+    });
+    const referencePath = join(harness.directory, 'reference.png');
+    await writeFile(referencePath, 'reference-image-bytes');
+    await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    const completionGate = deferred();
+    harness.comfy.completionGate = completionGate;
+
+    const referenceStart = Promise.resolve(
+      harness.startGeneration({
+        ...harness.textRequest,
+        avatarId: null,
+        referenceImagePaths: [referencePath],
+      }),
+    );
+    const earlyFailure = deferred<unknown>();
+    void referenceStart.catch((error) => earlyFailure.resolve(error));
+    const authorizationOrFailure = await Promise.race([
+      authorizationStarted.promise.then(() => null),
+      earlyFailure.promise,
+    ]);
+    if (authorizationOrFailure !== null) {
+      expect(authorizationOrFailure).toEqual(
+        expect.objectContaining({
+          message: expect.stringMatching(/another generation/i),
+        }),
+      );
+      return;
+    }
+    const occupying = await harness.startGeneration({
+      ...harness.textRequest,
+      avatarId: null,
+      referenceImagePaths: [],
+    });
+    const referenceRejection = expect(referenceStart).rejects.toThrow(
+      /another generation/i,
+    );
+    authorizationGate.resolve();
+    await referenceRejection;
+
+    expect(harness.store.listWorks().map((work) => work.id)).toEqual([
+      occupying.id,
+    ]);
+    expect(harness.comfy.uploads).toEqual([]);
+    expect(harness.jobCoordinator.activeId).toBe(occupying.id);
+
+    completionGate.resolve();
+    await waitForWork(harness.store, occupying.id, 'done');
+  });
+
+  test('retries ordered references with a fresh registry and deleted avatar without accumulating nodes', async () => {
+    const harness = await createHarness();
+    const referencePaths = [
+      join(harness.directory, 'reference-0.png'),
+      join(harness.directory, 'reference-1.png'),
+    ];
+    for (const [index, referencePath] of referencePaths.entries()) {
+      await writeFile(referencePath, `reference-${index}-bytes`);
+      await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+    }
+    harness.comfy.imageUploadNameFactory = (index) => `uploaded/ref-${index}.png`;
+    const deletedAvatarId = harness.avatar.id;
+    const listAvatars = vi.spyOn(harness.store, 'listAvatars');
+    const request: VideoGenerationRequest = {
+      ...harness.textRequest,
+      avatarId: deletedAvatarId,
+      referenceImagePaths: referencePaths,
+    };
+    const workflowPath = join(workflowsDirectory, 'text-ref2va.json');
+    const frozenSource = await readFile(workflowPath, 'utf8');
+
+    const original = await harness.startGeneration(request);
+    const originalWork = await waitForWork(harness.store, original.id, 'done');
+    expect(originalWork.avatarId).toBeNull();
+    harness.store.updateWork(original.id, { status: 'failed', error: 'retry refs' });
+    harness.store.deleteAvatar(deletedAvatarId);
+    const restarted = harness.createRestartedRetry();
+    const authorize = vi.spyOn(restarted.mediaRegistry, 'authorizeSelectedImage');
+    for (const referencePath of referencePaths) {
+      await expect(
+        restarted.mediaRegistry.isSelectedImage(referencePath),
+      ).resolves.toBe(false);
+    }
+
+    const retried = await restarted.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retried.id, 'done');
+
+    expect(harness.comfy.submissions).toHaveLength(2);
+    for (const [submissionIndex, value] of harness.comfy.submissions.entries()) {
+      const graph = value as Record<
+        string,
+        { class_type: string; inputs: Record<string, unknown> }
+      >;
+      const uploadOffset = submissionIndex * 2;
+      expect(graph['226'].inputs.image).toBe(`uploaded/ref-${uploadOffset}.png`);
+      expect(graph.ref2).toEqual({
+        class_type: 'LoadImage',
+        inputs: { image: `uploaded/ref-${uploadOffset + 1}.png` },
+      });
+      expect(graph.ref3).toBeUndefined();
+      expect(graph['136'].inputs['ref_images.ref_image_0']).toEqual(['226', 0]);
+      expect(graph['136'].inputs['ref_images.ref_image_1']).toEqual(['ref2', 0]);
+      expect(graph['136'].inputs).not.toHaveProperty('ref_images');
+      expect(
+        Object.keys(graph['136'].inputs).filter((key) =>
+          key.startsWith('ref_images.'),
+        ),
+      ).toEqual(['ref_images.ref_image_0', 'ref_images.ref_image_1']);
+    }
+    expect(harness.comfy.uploads.map(({ filePath }) => filePath)).toEqual([
+      join(harness.uploadsDirectory, `${original.id}-0.png`),
+      join(harness.uploadsDirectory, `${original.id}-1.png`),
+      join(harness.uploadsDirectory, `${retried.id}-0.png`),
+      join(harness.uploadsDirectory, `${retried.id}-1.png`),
+    ]);
+    expect(harness.comfy.uploadedImageContents).toEqual([
+      'reference-0-bytes',
+      'reference-1-bytes',
+      'reference-0-bytes',
+      'reference-1-bytes',
+    ]);
+    expect(authorize.mock.calls.map(([path]) => path)).toEqual(referencePaths);
+    expect(retryWork.metadata).toMatchObject({
+      request,
+      workflowVersion: 'text-ref2va.json',
+      retryOf: original.id,
+    });
+    expect(listAvatars).not.toHaveBeenCalled();
+    expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
+    expect(await readdir(harness.uploadsDirectory)).toEqual([]);
+  });
+
+  test.each([
+    { scenario: 'missing', expectedError: 'Original reference image missing' },
+    { scenario: 'directory', expectedError: 'Original reference image is not a file' },
+  ] as const)(
+    'rejects a $scenario reference retry source without starting generation',
+    async ({ scenario, expectedError }) => {
+      const harness = await createHarness();
+      const referencePath = join(harness.directory, 'reference.png');
+      await writeFile(referencePath, 'reference-image-bytes');
+      await harness.mediaRegistry.authorizeSelectedImage(referencePath);
+      const original = await harness.startGeneration({
+        ...harness.textRequest,
+        avatarId: null,
+        referenceImagePaths: [referencePath],
+      });
+      await waitForWork(harness.store, original.id, 'done');
+      harness.store.updateWork(original.id, { status: 'failed', error: 'retry refs' });
+      const uploadCount = harness.comfy.uploads.length;
+      const submissionCount = harness.comfy.submissions.length;
+      await rm(referencePath);
+      if (scenario === 'directory') await mkdir(referencePath);
+      const restarted = harness.createRestartedRetry();
+
+      await expect(restarted.retryWork(original.id)).rejects.toThrow(expectedError);
+
+      expect(harness.store.listWorks()).toHaveLength(1);
+      expect(harness.comfy.uploads).toHaveLength(uploadCount);
+      expect(harness.comfy.submissions).toHaveLength(submissionCount);
+    },
+  );
+});
+
+
+describe('GenerationHandler Spark acceleration', () => {
+  const sm120: SparkAccelerationEnvironment = {
+    runtimeId: 'sm120',
+    hardwareFingerprint: { cudaComputeCapability: '12.0' },
+  };
+
+  test.each(
+    (['text', 'audio'] as const).flatMap((mode) =>
+      [1, 2, 3, mode === 'text' ? 8 : 6, 100].map((steps) => ({ mode, steps })),
+    ),
+  )(
+    'keeps Scheduler, Spark, and SelfLift transitions valid for $mode steps=$steps',
+    async ({ mode, steps }) => {
+      const harness = await createHarness({ acceleration: sm120 });
+      const filename = mode === 'text' ? 'text-ref2va.json' : 'audio-digital-human.json';
+      const workflowPath = join(workflowsDirectory, filename);
+      const frozenSource = await readFile(workflowPath, 'utf8');
+      if (mode === 'audio') {
+        harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'low-steps.mp4' })];
+      }
+      const source = mode === 'text' ? harness.textRequest : harness.audioRequest;
+
+      const result = await harness.startGeneration({ ...source, steps });
+      await waitForWork(harness.store, result.id, 'done');
+
+      const graph = harness.comfy.submissions[0] as Record<
+        string,
+        { class_type: string; inputs: Record<string, unknown> }
+      >;
+      const schedulerId = mode === 'text' ? '124' : '51';
+      const samplerId = mode === 'text' ? '269' : '86';
+      const defaultTransition = mode === 'text' ? 6 : 4;
+      const expectedTransition = Math.min(defaultTransition, Math.max(1, steps - 1));
+      const transition = graph[samplerId].inputs.transition_step;
+
+      expect(graph[schedulerId].inputs.steps).toBe(steps);
+      expect(graph.smo_spark.inputs.steps).toBe(steps);
+      expect(transition).toBe(expectedTransition);
+      // selflift-Avatar/nodes.py:_validate_schedule requires
+      // 1 <= transition_step <= len(sigmas) - 2. For steps >= 2 the
+      // unrefined BasicScheduler already provides this bound; steps=1 needs
+      // one explicit refiner step so low- and high-resolution each get one NFE.
+      expect(transition).toBeGreaterThanOrEqual(1);
+      expect(transition).toBeLessThanOrEqual(Math.max(1, steps - 1));
+
+      if (steps === 1 && mode === 'text') {
+        expect(graph['147'].inputs).toMatchObject({
+          extra_steps: 1,
+          start_at_sigma: 20,
+        });
+        expect(graph[samplerId].inputs.sigmas).toEqual(['147', 0]);
+      } else if (steps === 1) {
+        const refiner = Object.entries(graph).find(
+          ([, node]) => node.class_type === 'H3SigmaRefiner',
+        );
+        expect(refiner?.[1].inputs).toMatchObject({
+          extra_steps: 1,
+          start_at_sigma: 20,
+          end_at_sigma: 0,
+          sigmas: ['51', 0],
+        });
+        expect(graph[samplerId].inputs.sigmas).toEqual([refiner?.[0], 0]);
+      } else {
+        if (mode === 'text') {
+          expect(graph['147'].inputs.start_at_sigma).toBe(0.7);
+        } else {
+          expect(
+            Object.values(graph).some((node) => node.class_type === 'H3SigmaRefiner'),
+          ).toBe(false);
+        }
+      }
+      expect(await readFile(workflowPath, 'utf8')).toBe(frozenSource);
+    },
+  );
+
+  test('submits the accelerated text graph with twelve scheduler steps and records Spark metadata', async () => {
+    const harness = await createHarness({ acceleration: sm120 });
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    const graph = harness.comfy.submissions[0] as Record<string, any>;
+    expect(graph['124'].inputs.steps).toBe(12);
+    expect(graph.smo_spark).toMatchObject({
+      class_type: 'MiniMaxH3SparkAttentionSM120',
+      inputs: { model: ['153', 0], steps: 12 },
+    });
+    expect(graph['269'].inputs.low_res_model).toEqual(['smo_spark', 0]);
+    expect(work.metadata?.acceleration).toBe('spark-sm120');
+  });
+
+  test('submits the accelerated audio graph with nine scheduler steps', async () => {
+    const harness = await createHarness({ acceleration: sm120 });
+    harness.comfy.outputs = [outputFile({ nodeId: '65', filename: 'audio.mp4' })];
+
+    const result = await harness.startGeneration(harness.audioRequest);
+    await waitForWork(harness.store, result.id, 'done');
+
+    const graph = harness.comfy.submissions[0] as Record<string, any>;
+    expect(graph['51'].inputs.steps).toBe(9);
+    expect(graph.smo_spark).toMatchObject({
+      class_type: 'MiniMaxH3SparkAttentionSM120',
+      inputs: { model: ['62', 0], steps: 9 },
+    });
+    expect(graph['86'].inputs.low_res_model).toEqual(['smo_spark', 0]);
+  });
+
+  test('uses the same Spark acceleration when retrying a failed work', async () => {
+    const harness = await createHarness({ acceleration: sm120 });
+    const original = await harness.startGeneration(harness.textRequest);
+    await waitForWork(harness.store, original.id, 'done');
+    harness.store.updateWork(original.id, { status: 'failed', error: 'retry test' });
+
+    const retry = await harness.retryWork(original.id);
+    await waitForWork(harness.store, retry.id, 'done');
+
+    expect(harness.comfy.submissions).toHaveLength(2);
+    for (const submission of harness.comfy.submissions) {
+      expect((submission as Record<string, any>).smo_spark).toBeDefined();
+    }
+  });
+
+  test('keeps RTX 30 on the compatible graph without Spark', async () => {
+    const harness = await createHarness({
+      acceleration: {
+        runtimeId: 'sm89',
+        hardwareFingerprint: { cudaComputeCapability: '8.6' },
+      },
+    });
+
+    const result = await harness.startGeneration(harness.textRequest);
+    const work = await waitForWork(harness.store, result.id, 'done');
+
+    expect(harness.comfy.submissions[0]).not.toHaveProperty('smo_spark');
+    expect(work.metadata?.acceleration).toBe('none');
   });
 });
 
@@ -903,6 +2014,7 @@ describe("GenerationHandler workflow selection", () => {
     expect(work.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: activePath,
+      acceleration: 'none',
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
     expect(harness.comfy.submissions[0]).toMatchObject({
@@ -929,6 +2041,7 @@ describe("GenerationHandler workflow selection", () => {
     expect(retryWork.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: originalCopy,
+      acceleration: 'none',
       retryOf: original.id,
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
@@ -1448,6 +2561,80 @@ describe('GenerationHandler failures and cancellation', () => {
 
 
 describe('GenerationHandler retry', () => {
+  test.each([
+    { mode: 'text', expectedSteps: 8, schedulerId: '124' },
+    { mode: 'audio', expectedSteps: 6, schedulerId: '51' },
+  ] as const)(
+    'retries legacy $mode request metadata with $expectedSteps steps',
+    async ({ mode, expectedSteps, schedulerId }) => {
+      const harness = await createHarness();
+      const source = mode === 'text' ? harness.textRequest : harness.audioRequest;
+      const legacyRequest: Partial<GenerationRequest> = { ...source };
+      delete legacyRequest.steps;
+      delete legacyRequest.referenceImagePaths;
+      if (mode === 'audio') {
+        harness.comfy.outputs = [
+          outputFile({ nodeId: '65', filename: 'legacy-audio.mp4' }),
+        ];
+      }
+      const original = harness.store.addWork({
+        id: `legacy-${mode}-steps`,
+        avatarId: harness.avatar.id,
+        mode,
+        outputPath: null,
+        status: 'failed',
+        metadata: {
+          request: legacyRequest as GenerationRequest,
+          workflowVersion:
+            mode === 'text' ? 'text-ref2va.json' : 'audio-digital-human.json',
+        },
+      });
+
+      const retry = await harness.retryWork(original.id);
+      const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+      const graph = harness.comfy.submissions[0] as Record<
+        string,
+        { inputs: Record<string, unknown> }
+      >;
+      expect(graph[schedulerId].inputs.steps).toBe(expectedSteps);
+      expect(retryWork.metadata?.request?.steps).toBe(expectedSteps);
+      expect(harness.store.getWork(original.id)?.metadata?.request).not.toHaveProperty(
+        'steps',
+      );
+    },
+  );
+
+  test('retries legacy subtitle metadata without injecting subtitle guidance', async () => {
+    const harness = await createHarness();
+    const legacyRequest = {
+      ...harness.textRequest,
+      prompt: '旧作品原始提示词',
+      subtitles: true,
+    } as GenerationRequest;
+    const original = harness.store.addWork({
+      id: 'legacy-subtitle-work',
+      avatarId: harness.avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+      metadata: {
+        request: legacyRequest,
+        workflowVersion: 'text-ref2va.json',
+      },
+    });
+
+    const retry = await harness.retryWork(original.id);
+    const retryWork = await waitForWork(harness.store, retry.id, 'done');
+
+    expect(submittedPrompt(harness)).toBe('旧作品原始提示词');
+    expect(retryWork.metadata?.request).not.toHaveProperty('subtitles');
+    expect(harness.store.getWork(original.id)?.metadata?.request).toHaveProperty(
+      'subtitles',
+      true,
+    );
+  });
+
   test('creates a new work with retryOf and leaves the original unchanged', async () => {
     const harness = await createHarness();
     const original = await harness.startGeneration(harness.textRequest);
@@ -1461,6 +2648,7 @@ describe('GenerationHandler retry', () => {
     expect(retryWork.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      acceleration: 'none',
       retryOf: original.id,
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
@@ -1469,6 +2657,7 @@ describe('GenerationHandler retry', () => {
     expect(originalAfterRetry?.metadata).toEqual({
       request: harness.textRequest,
       workflowVersion: 'text-ref2va.json',
+      acceleration: 'none',
       execution: expect.objectContaining({ stage: 'finalizing' }),
     });
   });
@@ -1546,9 +2735,17 @@ describe('GenerationHandler retry', () => {
     { scenario: 'empty prompt', request: { mode: 'text', avatarId: 'avatar-1', prompt: '  ', duration: 8, seed: 1 } },
     { scenario: 'invalid duration', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: -1, seed: 1 } },
     { scenario: 'invalid seed', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1.5 } },
+    { scenario: 'zero steps', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, steps: 0 } },
+    { scenario: 'too many steps', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, steps: 101 } },
+    { scenario: 'fractional steps', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, steps: 1.5 } },
     { scenario: 'invalid audioPath type', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 123 } },
     { scenario: 'invalid trimStart', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', trimStart: -1 } },
     { scenario: 'invalid subtitles type', request: { mode: 'text', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, subtitles: 'yes' } },
+    { scenario: 'null reference paths', request: { mode: 'text', avatarId: null, prompt: 'p', duration: 8, seed: 1, referenceImagePaths: null } },
+    { scenario: 'blank reference path', request: { mode: 'text', avatarId: null, prompt: 'p', duration: 8, seed: 1, referenceImagePaths: [' '] } },
+    { scenario: 'too many reference paths', request: { mode: 'text', avatarId: null, prompt: 'p', duration: 8, seed: 1, referenceImagePaths: Array.from({ length: 10 }, (_, index) => `${index}.png`) } },
+    { scenario: 'audio null avatar', request: { mode: 'audio', avatarId: null, prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', referenceImagePaths: [] } },
+    { scenario: 'audio reference image', request: { mode: 'audio', avatarId: 'avatar-1', prompt: 'p', duration: 8, seed: 1, audioPath: 'a.mp3', referenceImagePaths: ['a.png'] } },
   ])('rejects a work with $scenario in metadata', async ({ request }) => {
     const harness = await createHarness();
     const work = harness.store.addWork({
@@ -1590,6 +2787,23 @@ describe('GenerationHandler retry', () => {
 });
 
 describe('GenerationHandler ComfyUI startup', () => {
+  test('marks a new work failed when the coordinator is already closed', async () => {
+    const harness = await createHarness();
+    await harness.jobCoordinator.close();
+
+    await expect(harness.startGeneration(harness.textRequest)).rejects.toThrow(
+      /closed/i,
+    );
+
+    const works = harness.store.listWorks();
+    expect(works).toHaveLength(1);
+    expect(works[0]).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/closed/i),
+      outputPath: null,
+    });
+  });
+
   test('fails the queued work without uploading when ComfyUI startup fails', async () => {
     const ensureReady = vi
       .fn()

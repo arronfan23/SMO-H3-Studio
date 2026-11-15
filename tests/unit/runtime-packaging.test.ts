@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import rawManifest from '../../resources/environment/selflift-spark.json';
 import { parseEnvironmentManifest } from '../../src/main/environment-manifest';
 
@@ -34,6 +35,7 @@ interface RuntimeMetadata {
   estimatedExtractedBytes: number;
   pythonPath: string;
   launchScript: string;
+  ffmpegPath: string;
   ffprobePath: string;
 }
 
@@ -51,6 +53,15 @@ interface BuilderModule {
     sourceManifest: unknown;
     fetchImpl?: typeof fetch;
   }): Promise<unknown>;
+}
+
+interface ElectronBuilderConfig {
+  asarUnpack?: string[];
+  extraResources?: Array<{
+    from: string;
+    to: string;
+    filter?: string[];
+  }>;
 }
 
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'smo-runtime-packaging-'));
@@ -81,7 +92,12 @@ function runPowerShell(script: string, args: string[]): void {
   );
 }
 
-function createSampleZip(path: string, root: string, marker: string): void {
+function createSampleZip(
+  path: string,
+  root: string,
+  marker: string,
+  options: { omitFfmpeg?: boolean } = {},
+): void {
   runPowerShell(
     `
 Add-Type -AssemblyName System.IO.Compression
@@ -95,8 +111,12 @@ try {
   $entries = [ordered]@{
     "$root/python_embeded/python.exe" = "python-$($args[2])"
     "$root/tools/launch.py" = "launch-$($args[2])"
+    "$root/tools/ffmpeg/ffmpeg.exe" = "ffmpeg-$($args[2])"
     "$root/tools/ffmpeg/ffprobe.exe" = "ffprobe-$($args[2])"
     "$root/payload.bin" = [string]::new([char]65, 2048)
+  }
+  if ($args[3] -eq 'omit-ffmpeg') {
+    $entries.Remove("$root/tools/ffmpeg/ffmpeg.exe")
   }
   foreach ($entry in $entries.GetEnumerator()) {
     $zipEntry = $archive.CreateEntry($entry.Key)
@@ -113,7 +133,7 @@ try {
   $stream.Dispose()
 }
 `,
-    [path, root, marker],
+    [path, root, marker, options.omitFfmpeg ? 'omit-ffmpeg' : 'include-ffmpeg'],
   );
 }
 
@@ -226,6 +246,53 @@ afterAll(() => {
   rmSync(temporaryRoot, { recursive: true, force: true });
 });
 
+describe('electron-builder.yml', () => {
+  test('declares the Claude SDK peer dependencies explicitly for packaging', async () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(projectRoot, 'package.json'), 'utf8'),
+    );
+
+    expect(packageJson.dependencies).toMatchObject({
+      '@modelcontextprotocol/sdk': expect.any(String),
+      '@anthropic-ai/sdk': expect.any(String),
+    });
+  });
+
+  test('unpacks the Claude Agent SDK and its Windows executable', () => {
+    const config = parseYaml(
+      readFileSync(join(projectRoot, 'electron-builder.yml'), 'utf8'),
+    ) as ElectronBuilderConfig;
+
+    expect(config.asarUnpack).toEqual(expect.arrayContaining([
+      'node_modules/@anthropic-ai/claude-agent-sdk/**/*',
+      'node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**/*',
+    ]));
+  });
+
+  test('packages the complete speech runtime project without environment artifacts', () => {
+    const config = parseYaml(
+      readFileSync(join(projectRoot, 'electron-builder.yml'), 'utf8'),
+    ) as ElectronBuilderConfig;
+    const speech = config.extraResources?.find(
+      (resource) => resource.from === 'resources/speech',
+    );
+    const projectFiles = [
+      'pyproject.toml',
+      'index_tts_service.py',
+      'uv.lock',
+    ];
+
+    expect(speech).toMatchObject({
+      from: 'resources/speech',
+      to: 'resources/speech',
+    });
+    expect([...(speech?.filter ?? [])].sort()).toEqual([...projectFiles].sort());
+    for (const file of projectFiles) {
+      expect(statSync(join(projectRoot, 'resources', 'speech', file)).isFile()).toBe(true);
+    }
+  });
+});
+
 describe('package-runtime.ps1', () => {
   test.each(['sm89', 'sm120'] as const)(
     'streams %s into ordered bounded chunks with whole and part hashes',
@@ -266,6 +333,7 @@ describe('package-runtime.ps1', () => {
       expect(runtime.estimatedExtractedBytes).toBeGreaterThan(2048);
       expect(runtime.pythonPath).toBe(`${root}/python_embeded/python.exe`);
       expect(runtime.launchScript).toBe(`${root}/tools/launch.py`);
+      expect(runtime.ffmpegPath).toBe(`${root}/tools/ffmpeg/ffmpeg.exe`);
       expect(runtime.ffprobePath).toBe(`${root}/tools/ffmpeg/ffprobe.exe`);
       expect(JSON.parse(readFileSync(metadataPath(id), 'utf8'))).toEqual(runtime);
     }
@@ -308,6 +376,32 @@ describe('package-runtime.ps1', () => {
       ),
     ).toThrow();
   });
+
+  test('rejects a runtime archive without ffmpeg', () => {
+    const missingFfmpegZip = join(temporaryRoot, 'MissingFfmpeg.zip');
+    createSampleZip(missingFfmpegZip, 'MissingFfmpeg', 'missing', {
+      omitFfmpeg: true,
+    });
+
+    expect(() =>
+      execFileSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-File',
+          packageScript,
+          '-SM89Zip',
+          missingFfmpegZip,
+          '-SM120Zip',
+          sm120Zip,
+          '-OutputRoot',
+          join(temporaryRoot, 'missing-ffmpeg-output'),
+        ],
+        { stdio: 'pipe' },
+      ),
+    ).toThrow(/ffmpeg/i);
+  });
 });
 
 describe('build-environment-manifest.mjs', () => {
@@ -337,6 +431,7 @@ describe('build-environment-manifest.mjs', () => {
         estimatedExtractedBytes: runtime.estimatedExtractedBytes,
         pythonPath: runtime.pythonPath,
         launchScript: runtime.launchScript,
+        ffmpegPath: runtime.ffmpegPath,
         ffprobePath: runtime.ffprobePath,
       });
     }
@@ -408,6 +503,22 @@ describe('build-environment-manifest.mjs', () => {
         fetchImpl: huggingFace.fetchImpl,
       }),
     ).rejects.toThrow(/network|failed|unavailable/i);
+  });
+
+  test('fails when package metadata is missing an ffmpeg path', async () => {
+    const { buildEnvironmentManifest } = await loadBuilder();
+    const incomplete = structuredClone(packageMetadata);
+    incomplete.runtimes.sm89.ffmpegPath = 'SampleSM89/tools/ffmpeg/ffmpeg.exe';
+    incomplete.runtimes.sm120.ffmpegPath = 'SampleSM120/tools/ffmpeg/ffmpeg.exe';
+    delete (incomplete.runtimes.sm89 as Partial<RuntimeMetadata>).ffmpegPath;
+
+    await expect(
+      buildEnvironmentManifest({
+        packageMetadata: incomplete,
+        sourceManifest: rawManifest,
+        fetchImpl: makeHuggingFaceFetch().fetchImpl,
+      }),
+    ).rejects.toThrow(/ffmpegPath/i);
   });
 });
 

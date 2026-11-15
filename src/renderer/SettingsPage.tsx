@@ -4,6 +4,9 @@ import type { ComfyHealth } from '../shared/ipc';
 import { DEFAULT_MODEL_DIRECTORY } from '../shared/generation-options';
 import type { HardwareInfo, HardwareProfile, LlmProfileView, VideoMode } from '../shared/types';
 import { errorMessage } from './ui';
+import { SanmaoSettings } from './SanmaoSettings';
+
+type AiService = 'polish' | 'sanmao';
 
 type LlmStatus =
   | { kind: 'idle' }
@@ -12,21 +15,59 @@ type LlmStatus =
   | { kind: 'test'; latencyMs: number; summary: string }
   | { kind: 'error'; message: string };
 
+const HARDWARE_PRESET_TEXT = {
+  conservative: {
+    label: "稳妥模式",
+    scenario: "适用场景：显存不足 12 GiB，或内存不足 32 GiB；优先降低资源占用。",
+  },
+  "balanced-16gb": {
+    label: "均衡模式",
+    scenario: "适用场景：显存至少 12 GiB 且不足 20 GiB，内存至少 32 GiB；兼顾画质与稳定性。",
+  },
+  "high-memory-candidate": {
+    label: "高显存候选模式",
+    scenario: "适用场景：显存至少 20 GiB 且内存至少 32 GiB；优先利用充足显存。",
+  },
+} as const;
+
+const HARDWARE_MODEL_POLICY_TEXT = {
+  int8: "使用 INT8 模型，减少显存占用",
+  "bf16-if-present": "优先使用 BF16 模型；未安装时自动改用 INT8 模型",
+} as const;
+
 function formatGiB(value: number): string {
   return value.toFixed(1) + " GiB";
+}
+
+function formatResolution(megapixels: number): string {
+  if (megapixels === 0.4) return "0.4 MP，较低清晰度，优先减少显存占用";
+  if (megapixels === 0.7) return "0.7 MP，兼顾清晰度与显存占用";
+  if (megapixels === 1) return "1.0 MP，较高清晰度，适合显存充足的设备";
+  return megapixels.toFixed(1) + " MP";
+}
+
+function formatTiling(tiling: HardwareProfile["tiling"]): string {
+  return tiling === "auto"
+    ? "自动分块处理画面，降低单次生成的显存压力"
+    : `手动分为 ${tiling} 块处理画面，降低显存峰值`;
 }
 
 export function SettingsPage({
   modelDirectory: controlledDirectory,
   onModelDirectoryChange,
+  service,
 }: {
   modelDirectory?: string;
   onModelDirectoryChange?: (directory: string) => void;
+  service?: AiService;
 } = {}) {
+  const [aiService, setAiService] = useState<AiService>(service ?? 'polish');
+  const [sanmaoMounted, setSanmaoMounted] = useState(service === 'sanmao');
   const [localDirectory, setLocalDirectory] = useState(DEFAULT_MODEL_DIRECTORY);
   const modelDirectory = controlledDirectory ?? localDirectory;
   const setModelDirectory = onModelDirectoryChange ?? setLocalDirectory;
   const [loading, setLoading] = useState(true);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [health, setHealth] = useState<ComfyHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [startingComfy, setStartingComfy] = useState(false);
@@ -42,7 +83,7 @@ export function SettingsPage({
   const [recommendation, setRecommendation] = useState<HardwareProfile | null>(null);
   const [hardwareMode, setHardwareMode] = useState<VideoMode>("text");
   const [hardwareAction, setHardwareAction] = useState<
-    "detect" | "recommend" | "apply" | "reset" | null
+    "detect" | "apply" | "reset" | null
   >(null);
   const [hardwareError, setHardwareError] = useState<string | null>(null);
   const [hardwareResult, setHardwareResult] = useState<{
@@ -57,9 +98,10 @@ export function SettingsPage({
     }
     setLoading(true);
     setLlmStatus({ kind: 'idle' });
-    const [healthResult, profileResult] = await Promise.allSettled([
+    const [healthResult, profileResult, versionResult] = await Promise.allSettled([
       window.smo.comfy.health(),
       window.smo.llm.getProfile(),
+      window.smo.app?.getVersion() ?? Promise.resolve(null),
     ]);
     if (!mountedRef.current) {
       return;
@@ -70,6 +112,11 @@ export function SettingsPage({
     const loadedProfile = profileResult.status === 'fulfilled' ? profileResult.value : null;
     setProfile(loadedProfile);
     setProfileError(profileResult.status === 'rejected' ? errorMessage(profileResult.reason) : null);
+    setAppVersion(
+      versionResult.status === 'fulfilled' && typeof versionResult.value === 'string'
+        ? versionResult.value
+        : null,
+    );
     setBaseUrl(loadedProfile?.baseUrl ?? '');
     setModel(loadedProfile?.model ?? '');
     setApiKey('');
@@ -83,6 +130,14 @@ export function SettingsPage({
       mountedRef.current = false;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (service) setAiService(service);
+  }, [service]);
+
+  useEffect(() => {
+    if (aiService === 'sanmao') setSanmaoMounted(true);
+  }, [aiService]);
 
   const reenterRequired =
     profile !== null && profile.keyStatus === 'reenter-required';
@@ -204,28 +259,12 @@ export function SettingsPage({
     setHardwareAction("detect");
     setHardwareError(null);
     setHardwareResult(null);
+    setHardwareInfo(null);
+    setRecommendation(null);
     try {
       const info = await window.smo.hardware.detect();
       if (!mountedRef.current) return;
       setHardwareInfo(info);
-      setRecommendation(null);
-    } catch (error) {
-      if (!mountedRef.current) return;
-      setHardwareInfo(null);
-      setRecommendation(null);
-      setHardwareError(errorMessage(error));
-    } finally {
-      if (mountedRef.current) setHardwareAction(null);
-    }
-  };
-
-  const recommendHardware = async (): Promise<void> => {
-    const info = hardwareInfo;
-    if (!mountedRef.current || info === null || hardwareAction !== null) return;
-    setHardwareAction("recommend");
-    setHardwareError(null);
-    setHardwareResult(null);
-    try {
       const profile = await window.smo.hardware.recommend({
         gpu: info.gpu,
         vramGiB: info.vramGiB,
@@ -254,7 +293,7 @@ export function SettingsPage({
     }
     const mode = hardwareMode;
     const confirmed = window.confirm(
-      "确认将 " + profile.preset + " 应用到 " + mode + " 工作流？原工作流不会被修改。",
+      "确认将“" + HARDWARE_PRESET_TEXT[profile.preset].label + "”应用到 " + mode + " 工作流？原工作流不会被修改。",
     );
     if (!confirmed || !mountedRef.current) return;
     setHardwareAction("apply");
@@ -324,8 +363,35 @@ export function SettingsPage({
       {loading ? (
         <div className="page-state">正在检测服务与配置…</div>
       ) : (
-        <div className="settings-grid">
-          <section className="settings-section">
+        <>
+          <section className="settings-overview" aria-label="设置概览">
+            <div className="settings-overview-item">
+              <span>ComfyUI</span>
+              <strong>{health ? '已连接' : '未连接'}</strong>
+              <small>{health ? `${health.devices.length} 个可用设备` : '需要启动或检查服务'}</small>
+            </div>
+            <div className="settings-overview-item">
+              <span>硬件</span>
+              <strong>{hardwareInfo?.gpu ?? '尚未检测'}</strong>
+              <small>
+                {hardwareInfo
+                  ? `${formatGiB(hardwareInfo.vramGiB)} 显存 · ${formatGiB(hardwareInfo.ramGiB)} 内存`
+                  : '检测后可查看推荐工作流'}
+              </small>
+            </div>
+            <div className="settings-overview-item">
+              <span>应用版本</span>
+              <strong>{appVersion ?? '版本未知'}</strong>
+              <small>SMO.H3 Studio</small>
+            </div>
+          </section>
+          <div className="settings-workspace">
+            <section className="settings-environment" aria-label="生成环境">
+              <div className="settings-group-heading">
+                <span className="page-kicker">本地运行</span>
+                <h3>生成环境</h3>
+              </div>
+              <section className="settings-section">
             <span className="page-kicker">硬件与工作流</span>
             <h3>硬件配置</h3>
             <div className="settings-actions">
@@ -338,25 +404,10 @@ export function SettingsPage({
                 <Cpu size={16} aria-hidden="true" />
                 {hardwareAction === "detect" ? "正在检测…" : "检测硬件"}
               </button>
-              <button
-                className="button button-secondary"
-                type="button"
-                disabled={hardwareInfo === null || hardwareAction !== null}
-                onClick={() => void recommendHardware()}
-              >
-                <Search size={16} aria-hidden="true" />
-                {hardwareAction === "recommend" ? "正在推荐…" : "获取推荐"}
-              </button>
-              <button
-                className="button button-secondary"
-                type="button"
-                disabled={hardwareAction !== null}
-                onClick={() => void resetHardware()}
-              >
-                <RotateCcw size={16} aria-hidden="true" />
-                {hardwareAction === "reset" ? "正在恢复…" : "恢复默认"}
-              </button>
             </div>
+            <p className="form-notice">
+              应用推荐或恢复默认后，将在下一次生成时生效，不影响正在运行的任务和已有作品。
+            </p>
             {hardwareError && <p className="form-error" role="alert">{hardwareError}</p>}
             {hardwareInfo && (
               <dl className="status-details">
@@ -369,36 +420,25 @@ export function SettingsPage({
                 <dt>空闲磁盘</dt><dd>{formatGiB(hardwareInfo.freeDiskGiB)}</dd>
               </dl>
             )}
-            <div className="field">
-              <label htmlFor="hardware-mode">应用模式</label>
-              <select
-                id="hardware-mode"
-                value={hardwareMode}
-                disabled={hardwareAction !== null}
-                onChange={(event) => {
-                  setHardwareMode(event.target.value as VideoMode);
-                  setRecommendation(null);
-                  setHardwareResult(null);
-                  setHardwareError(null);
-                }}
-              >
-                <option value="text">文本生视频</option>
-                <option value="audio">音频数字人</option>
-              </select>
-            </div>
-            {recommendation && (
-              <div>
-                <dl className="status-details">
-                  <dt>preset</dt><dd>{recommendation.preset}</dd>
-                  <dt>modelPolicy</dt><dd>{recommendation.modelPolicy}</dd>
-                  <dt>megapixels</dt><dd>{recommendation.megapixels}</dd>
-                  <dt>lowvram</dt><dd>{recommendation.lowvram ? "开启" : "关闭"}</dd>
-                  <dt>tiling</dt><dd>{recommendation.tiling}</dd>
-                  <dt>确认</dt><dd>{recommendation.requiresConfirmation ? "需要确认" : "无需确认"}</dd>
-                </dl>
-                {recommendation.preset === "high-memory-candidate" && (
-                  <p className="form-notice">高显存候选配置，尚未实测。</p>
-                )}
+            <details className="settings-advanced">
+              <summary>高级工作流设置</summary>
+              <div className="settings-advanced-content">
+                <div className="field">
+                  <label htmlFor="hardware-mode">应用模式</label>
+                  <select
+                    id="hardware-mode"
+                    value={hardwareMode}
+                    disabled={hardwareAction !== null}
+                    onChange={(event) => {
+                      setHardwareMode(event.target.value as VideoMode);
+                      setHardwareResult(null);
+                      setHardwareError(null);
+                    }}
+                  >
+                    <option value="text">文本生视频</option>
+                    <option value="audio">音频数字人</option>
+                  </select>
+                </div>
                 <div className="field">
                   <label htmlFor="hardware-model-directory">模型目录</label>
                   <input
@@ -408,6 +448,21 @@ export function SettingsPage({
                     onChange={(event) => setModelDirectory(event.target.value)}
                   />
                 </div>
+            {recommendation && (
+              <div>
+                <dl className="status-details">
+                  <dt>配置方案</dt><dd>{HARDWARE_PRESET_TEXT[recommendation.preset].label}</dd>
+                  <dt>模型策略</dt><dd>{HARDWARE_MODEL_POLICY_TEXT[recommendation.modelPolicy]}</dd>
+                  <dt>显存策略</dt><dd>{recommendation.lowvram ? "节省显存模式，降低占用但可能稍慢" : "标准显存模式，适合显存充足的设备"}</dd>
+                  <dt>分辨率</dt><dd>{formatResolution(recommendation.megapixels)}</dd>
+                  <dt>平铺方式</dt><dd>{formatTiling(recommendation.tiling)}</dd>
+                </dl>
+                <p className="form-notice">
+                  {HARDWARE_PRESET_TEXT[recommendation.preset].scenario}
+                </p>
+                {recommendation.preset === "high-memory-candidate" && (
+                  <p className="form-notice">高显存候选配置，尚未实测。</p>
+                )}
                 <div className="settings-actions">
                   <button
                     className="button button-primary"
@@ -421,14 +476,27 @@ export function SettingsPage({
                 </div>
               </div>
             )}
+                <div className="settings-actions settings-advanced-reset">
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    disabled={hardwareAction !== null}
+                    onClick={() => void resetHardware()}
+                  >
+                    <RotateCcw size={16} aria-hidden="true" />
+                    {hardwareAction === "reset" ? "正在恢复…" : "恢复默认"}
+                  </button>
+                </div>
+              </div>
+            </details>
             {hardwareResult && (
               <p className="form-notice" role="status">
                 {hardwareResult.kind === "applied" ? "已应用工作流副本：" : "已恢复默认工作流："}
                 {hardwareResult.path}
               </p>
             )}
-          </section>
-          <section className="settings-section">
+              </section>
+              <section className="settings-section">
             <span className="page-kicker">生成服务</span>
             <h3>{health ? 'ComfyUI 连接正常' : 'ComfyUI 不可用'}</h3>
             {healthError && <p className="form-error" role="alert">{healthError}</p>}
@@ -465,8 +533,53 @@ export function SettingsPage({
                 {startingComfy ? '正在启动…' : '启动 ComfyUI'}
               </button>
             )}
+              </section>
+            </section>
+            <section className="settings-ai-services" aria-label="AI 服务">
+              <div className="settings-group-heading">
+                <span className="page-kicker">云端能力</span>
+                <h3>AI 服务</h3>
+              </div>
+              <div className="settings-ai-tabs">
+            <div className="tab-list" role="tablist" aria-label="AI 服务">
+              <button
+                id="ai-polish-tab"
+                type="button"
+                role="tab"
+                aria-selected={aiService === 'polish'}
+                aria-controls="ai-polish-panel"
+                onClick={() => setAiService('polish')}
+              >
+                文字润色
+              </button>
+              <button
+                id="ai-sanmao-tab"
+                type="button"
+                role="tab"
+                aria-selected={aiService === 'sanmao'}
+                aria-controls="ai-sanmao-panel"
+                onClick={() => setAiService('sanmao')}
+              >
+                三脚猫
+              </button>
+            </div>
+              </div>
+          <section
+            id="ai-sanmao-panel"
+            className="settings-section"
+            role="tabpanel"
+            aria-labelledby="ai-sanmao-tab"
+            hidden={aiService !== 'sanmao'}
+          >
+            {sanmaoMounted && <SanmaoSettings />}
           </section>
-          <section className="settings-section">
+          <section
+            id="ai-polish-panel"
+            className="settings-section"
+            role="tabpanel"
+            aria-labelledby="ai-polish-tab"
+            hidden={aiService !== 'polish'}
+          >
             <span className="page-kicker">文字润色</span>
             <h3>{profile ? '已配置 LLM' : '未配置 LLM'}</h3>
             {profileError && <p className="form-error" role="alert">{profileError}</p>}
@@ -511,6 +624,7 @@ export function SettingsPage({
             )}
             <div className="settings-actions">
               <button
+                id="llm-save-profile"
                 className="button button-primary"
                 type="button"
                 disabled={!canSave || saving}
@@ -585,8 +699,13 @@ export function SettingsPage({
             )}
             {llmStatus.kind === 'error' && <p className="form-error" role="alert">{llmStatus.message}</p>}
           </section>
-        </div>
+            </section>
+          </div>
+        </>
       )}
+      <footer className="settings-version">
+        SMO.H3 Studio · {appVersion === null ? '版本未知' : `版本 ${appVersion}`}
+      </footer>
     </div>
   );
 }

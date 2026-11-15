@@ -78,6 +78,14 @@ function attachRendererLogs(
   });
 }
 
+async function openStudioVideo(page: Page): Promise<void> {
+  const parent = page.getByRole('button', { name: '制作台', exact: true });
+  if (await parent.getAttribute('aria-expanded') !== 'true') {
+    await parent.click();
+  }
+  await page.getByRole('button', { name: '视频', exact: true }).click();
+}
+
 test.describe('real LLM acceptance', () => {
   test.skip(!REAL_RUN_ENABLED, 'Set SMO_REAL_LLM=1 to run the real LLM suite.');
 
@@ -189,7 +197,7 @@ test.describe('real LLM acceptance', () => {
       console.log(`[real-llm] testModel ok in ${Math.round(testResult.latencyMs)}ms`);
 
       // 4. Full polish path from the studio workbench (no video generation).
-      await page.click('nav[aria-label="主导航"] button:has-text("制作台")');
+      await openStudioVideo(page);
       await expect(
         page.locator(`.person-preview h2:has-text("${AVATAR_NAME}")`),
       ).toBeVisible();

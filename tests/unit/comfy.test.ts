@@ -635,7 +635,7 @@ describe('ComfyClient WebSocket completion', () => {
 });
 
 describe('ComfyClient and JobCoordinator cancellation', () => {
-  test('fails promptly on interruption and starts the next job after the cancellation barrier', async () => {
+  test('fails promptly on interruption and accepts a rejected job after the cancellation barrier', async () => {
     let socket: WebSocket | undefined;
     let markConnected!: () => void;
     const connected = new Promise<void>((resolve) => {
@@ -669,10 +669,18 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
     const cancellationBarrier = new Promise<void>((resolve) => {
       releaseCancellation = resolve;
     });
+    const runSecond = async (): Promise<void> => {
+      calls.push('second started');
+    };
+    const completion = client.waitForCompletion('prompt-1');
+    const completionRejection = expectRejection(
+      completion,
+      /execution interrupted.*node-cancel/i,
+    );
 
     const first = coordinator.enqueue({
       id: 'first',
-      run: () => client.waitForCompletion('prompt-1'),
+      run: () => completion,
       cancel: async () => {
         calls.push('cancel started');
         await client.cancel();
@@ -680,18 +688,22 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
         calls.push('cancel finished');
       },
     });
-    const second = coordinator.enqueue({
-      id: 'second',
-      run: async () => {
-        calls.push('second started');
-      },
-    });
+    expect(() =>
+      coordinator.enqueue({
+        id: 'second',
+        run: runSecond,
+      }),
+    ).toThrow('Another generation is already running');
 
     await connected;
     const cancellation = coordinator.cancelActive();
+    const firstRejection = expectRejection(
+      first,
+      /execution interrupted.*node-cancel/i,
+    );
     let assertionFailure: unknown;
     try {
-      await expectRejection(first, /execution interrupted.*node-cancel/i);
+      await completionRejection;
       expect(calls).toEqual(['cancel started']);
       expect(coordinator.activeCount).toBe(1);
     } catch (error) {
@@ -701,7 +713,8 @@ describe('ComfyClient and JobCoordinator cancellation', () => {
     }
 
     await cancellation;
-    await second;
+    await firstRejection;
+    await coordinator.enqueue({ id: 'second', run: runSecond });
     if (assertionFailure !== undefined) {
       throw assertionFailure;
     }

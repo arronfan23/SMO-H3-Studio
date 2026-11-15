@@ -41,6 +41,33 @@ describe('responsive studio CSS contracts', () => {
     expect(mediaRule).not.toContain('var(--radius-control)');
   });
 
+  test('keeps work audio within the available width', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+    const audioRule = css.match(/\.work-item audio\s*\{([^}]*)\}/)?.[1];
+
+    expect(audioRule).toBeDefined();
+    expect(audioRule).toContain('width: 100%');
+    expect(audioRule).toContain('max-width: 100%');
+  });
+
+  test('contains high-resolution and tall work images without overflow', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+    const imageRule = css.match(/\.work-item img\s*\{([^}]*)\}/)?.[1];
+
+    expect(imageRule).toBeDefined();
+    for (const declaration of [
+      'display: block',
+      'width: auto',
+      'max-width: 100%',
+      'height: auto',
+      'max-height: 70vh',
+      'object-fit: contain',
+      'margin-inline: auto',
+    ]) {
+      expect(imageRule).toContain(declaration);
+    }
+  });
+
   test('insets the main-content scrollbar clear of the east resize hot zone', async () => {
     const css = await readFile(stylesUrl, 'utf8');
 
@@ -61,5 +88,35 @@ describe('responsive studio CSS contracts', () => {
     expect(mainRule).toBeDefined();
     const inset = Number(mainRule!.match(/margin-right:\s*(\d+)px/)?.[1]);
     expect(inset).toBeGreaterThanOrEqual(eastWidth);
+  });
+
+  test('制作台模特参考图保持原始比例，数字模特卡片继续裁切', async () => {
+    const css = await readFile(stylesUrl, 'utf8');
+    const previewRule = css.match(/\.person-preview \.avatar-image\s*\{([^}]*)\}/)?.[1];
+    const previewImageRule = css.match(
+      /\.person-preview \.avatar-image img\s*\{([^}]*)\}/,
+    )?.[1];
+    const cardRule = css.match(/\.avatar-item \.avatar-image\s*\{([^}]*)\}/)?.[1];
+
+    expect(previewRule).toBeDefined();
+    expect(previewRule).toContain('aspect-ratio: auto');
+    expect(previewRule).toContain('min-height: 180px');
+    expect(previewRule).toContain('overflow: visible');
+    expect(previewRule).toContain('max-height: none');
+
+    expect(previewImageRule).toBeDefined();
+    for (const declaration of [
+      'width: 100%',
+      'max-width: fit-content',
+      'height: auto',
+      'max-height: 65vh',
+      'object-fit: contain',
+    ]) {
+      expect(previewImageRule).toContain(declaration);
+    }
+
+    expect(cardRule).toBeDefined();
+    expect(cardRule).toContain('aspect-ratio: 1');
+    expect(css).toMatch(/\.avatar-image img\s*\{[^}]*object-fit:\s*cover/);
   });
 });

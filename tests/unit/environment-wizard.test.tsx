@@ -68,6 +68,7 @@ function environmentState(overrides: Partial<EnvironmentState> = {}): Environmen
         estimatedExtractedBytes: 2 * GIB,
         pythonPath: 'runtime/python.exe',
         launchScript: 'runtime/launch.py',
+        ffmpegPath: 'runtime/ffmpeg.exe',
         ffprobePath: 'runtime/ffprobe.exe',
       },
       profile: 'balanced-16gb',
@@ -393,6 +394,22 @@ describe('first-launch environment wizard', () => {
     const progress = await screen.findByRole('progressbar', { name: '安装进度' });
     expect(progress).not.toHaveAttribute('value');
     expect(progress).toHaveClass('environment-progress-indeterminate');
+    expect(screen.getByText('正在检测硬件，暂未开始下载')).toBeInTheDocument();
+  });
+
+  test('shows an idle selection prompt instead of a download wait before start', async () => {
+    smo.environment.getState.mockResolvedValue(environmentState({
+      active: false,
+      stage: 'select',
+      progress: { downloadedBytes: 0, totalBytes: 0 },
+    }));
+    render(<App />);
+
+    const progress = await screen.findByRole('progressbar', { name: '安装进度' });
+    expect(screen.getByText('检测完成，点击“开始安装”后开始下载')).toBeInTheDocument();
+    expect(screen.queryByText('等待可计算的下载进度')).not.toBeInTheDocument();
+    expect(progress).toHaveAttribute('value', '0');
+    expect(progress).not.toHaveClass('environment-progress-indeterminate');
   });
 
   test('polls active state every 750 ms and stops when installation becomes inactive', async () => {
@@ -499,7 +516,7 @@ describe('ready environment entry', () => {
       requiresConfirmation: true,
     });
     fireEvent.click(await screen.findByRole('button', { name: '检测硬件' }));
-    fireEvent.click(await screen.findByRole('button', { name: '获取推荐' }));
+    expect(await screen.findByText('均衡模式')).toBeInTheDocument();
     expect(await screen.findByLabelText('模型目录')).toHaveValue(readyConfig.modelDirectory);
   });
 
@@ -585,7 +602,8 @@ describe('ready environment entry', () => {
 
     for (const name of ['数字模特', '我的作品', '设置']) {
       fireEvent.click(screen.getByRole('button', { name }));
-      fireEvent.click(screen.getByRole('button', { name: '制作台' }));
+      fireEvent.click(screen.getByRole('button', { name: '视频', exact: true }));
+      expect(document.getElementById('video-main-panel')).toBeVisible();
       expect(screen.getByLabelText('原始文字')).toHaveValue('环境检查后仍保留草稿');
     }
   });

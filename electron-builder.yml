@@ -5,6 +5,9 @@ directories:
 npmRebuild: false
 files:
   - dist/**
+asarUnpack:
+  - node_modules/@anthropic-ai/claude-agent-sdk/**/*
+  - node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**/*
 extraResources:
   - from: resources/brand
     to: resources/brand
@@ -14,8 +17,25 @@ extraResources:
     to: resources/workflows
   - from: resources/skills
     to: resources/skills
+  - from: resources/speech
+    to: resources/speech
+    filter:
+      - pyproject.toml
+      - uv.lock
+      - index_tts_service.py
 win:
-  target: portable
+  target:
+    - nsis
+    - portable
   icon: resources/brand/icon.ico
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  artifactName: SMO.H3-Studio-Setup-${version}.${ext}
 portable:
   artifactName: SMO.H3-Studio-${version}.${ext}

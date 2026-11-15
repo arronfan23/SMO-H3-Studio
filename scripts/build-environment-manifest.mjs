@@ -143,7 +143,7 @@ function buildRuntime(id, runtime, reviewedRuntime) {
     throw new Error(`${id} archive-part sizes do not add up to archiveSize`);
   }
 
-  for (const field of ['pythonPath', 'launchScript', 'ffprobePath']) {
+  for (const field of ['pythonPath', 'launchScript', 'ffmpegPath', 'ffprobePath']) {
     if (typeof runtime[field] !== 'string' || !runtime[field]) {
       throw new Error(`${id} is missing ${field}`);
     }
@@ -158,6 +158,7 @@ function buildRuntime(id, runtime, reviewedRuntime) {
     estimatedExtractedBytes: runtime.estimatedExtractedBytes,
     pythonPath: runtime.pythonPath,
     launchScript: runtime.launchScript,
+    ffmpegPath: runtime.ffmpegPath,
     ffprobePath: runtime.ffprobePath,
   };
 }

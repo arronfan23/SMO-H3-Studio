@@ -216,6 +216,43 @@ describe('ComfyProcessManager', () => {
     expect(openCalls).toHaveLength(1);
   });
 
+  test('default startup allows first-time CUDA initialization to finish after three minutes', async () => {
+    vi.useFakeTimers();
+    try {
+      let healthy = false;
+      let markLaunched!: () => void;
+      const launched = new Promise<void>((resolve) => {
+        markLaunched = resolve;
+      });
+      const health = vi.fn(async (): Promise<ComfySystemStats> => {
+        if (!healthy) throw new Error('ComfyUI is offline');
+        return STATS;
+      });
+      const { manager } = createManager({
+        client: { health },
+        startupTimeoutMs: undefined,
+        pollIntervalMs: 2_000,
+        openLauncher: async () => {
+          markLaunched();
+          return '';
+        },
+      });
+      const outcome = manager.ensureReady().then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+
+      await launched;
+      await vi.advanceTimersByTimeAsync(181_000);
+      healthy = true;
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await expect(outcome).resolves.toEqual({ value: STATS });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test('discards a stale startup with no exit record and relaunches', async () => {
     const health = offlineHealth();
     const { manager, openCalls } = createManager({

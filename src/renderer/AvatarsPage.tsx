@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { ImagePlus, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import { AvatarImage } from './AvatarImage';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage, fileName } from './ui';
+
+const DROPPED_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp']);
 
 type DialogState =
   | { kind: 'rename'; avatar: Avatar }
@@ -28,15 +30,20 @@ export function AvatarsPage({
   const [name, setName] = useState('');
   const [photoPath, setPhotoPath] = useState<string | null>(null);
   const [selecting, setSelecting] = useState(false);
+  const [authorizing, setAuthorizing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [renameValue, setRenameValue] = useState('');
   const [mutationLoading, setMutationLoading] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const { url: photoUrl, error: photoUrlError } = useMediaUrl(photoPath);
   const mountedRef = useRef(true);
+  // Monotonic id for photo-selection operations (dialog select, drag-drop,
+  // remove); only the latest request may update photoPath or pending flags.
+  const photoRequestRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -46,36 +53,52 @@ export function AvatarsPage({
   }, []);
 
   const selectPhoto = async (): Promise<void> => {
+    if (saving) {
+      return;
+    }
+    const requestId = ++photoRequestRef.current;
+    setAuthorizing(false);
     setSelecting(true);
     setError(null);
     try {
       const selected = await window.smo.files.selectImage();
-      if (mountedRef.current && selected !== null) {
+      if (
+        mountedRef.current &&
+        photoRequestRef.current === requestId &&
+        selected !== null
+      ) {
         setPhotoPath(selected);
       }
     } catch (selectError) {
-      if (mountedRef.current) {
+      if (mountedRef.current && photoRequestRef.current === requestId) {
         setError(errorMessage(selectError));
       }
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && photoRequestRef.current === requestId) {
         setSelecting(false);
       }
     }
   };
 
   const save = async (): Promise<void> => {
+    if (selecting || authorizing || saving) {
+      return;
+    }
     if (name.trim().length === 0 || photoPath === null) {
       setError('请填写模特名称并选择照片。');
       return;
     }
+    const requestId = photoRequestRef.current;
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
       const avatar = await window.smo.avatars.create({ name: name.trim(), photoPath });
       await onCreated(avatar);
-      if (mountedRef.current) {
+      // Only clear the form when no newer photo-selection request started
+      // while the save was in flight; otherwise the cleanup would wipe a
+      // fresh selection.
+      if (mountedRef.current && photoRequestRef.current === requestId) {
         setName('');
         setPhotoPath(null);
         setNotice(`已保存并选择 ${avatar.name}`);
@@ -92,8 +115,56 @@ export function AvatarsPage({
   };
 
   const removePhoto = (): void => {
+    photoRequestRef.current += 1;
+    setSelecting(false);
+    setAuthorizing(false);
     setPhotoPath(null);
     setError(null);
+  };
+
+  const handlePhotoDrop = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    setDropActive(false);
+    if (saving) {
+      return;
+    }
+    const requestId = ++photoRequestRef.current;
+    setSelecting(false);
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length !== 1) {
+      setAuthorizing(false);
+      setError('一次只能拖入一张照片。');
+      return;
+    }
+    const file = files[0];
+    const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+    if (!DROPPED_IMAGE_EXTENSIONS.has(extension)) {
+      setAuthorizing(false);
+      setError('仅支持 PNG、JPG、JPEG 或 WebP 图片。');
+      return;
+    }
+    setError(null);
+    setAuthorizing(true);
+    void (async () => {
+      try {
+        // The renderer hands over the dropped File itself; the preload
+        // resolves its path and the main process must authorize it before it
+        // becomes the photo path.
+        const authorized = await window.smo.files.authorizeDroppedImage(file);
+        if (mountedRef.current && photoRequestRef.current === requestId) {
+          setPhotoPath(authorized);
+          setNotice(null);
+        }
+      } catch (dropError) {
+        if (mountedRef.current && photoRequestRef.current === requestId) {
+          setError(errorMessage(dropError));
+        }
+      } finally {
+        if (mountedRef.current && photoRequestRef.current === requestId) {
+          setAuthorizing(false);
+        }
+      }
+    })();
   };
 
   const openRename = (avatar: Avatar): void => {
@@ -196,7 +267,32 @@ export function AvatarsPage({
             <ImagePlus size={16} aria-hidden="true" />
             {selecting ? '正在选择…' : '选择照片'}
           </button>
-          <div className="avatar-preview">
+          <div
+            className="avatar-preview"
+            role="group"
+            aria-label="模特照片拖放区"
+            data-drop-active={dropActive ? 'true' : undefined}
+            style={
+              dropActive
+                ? { outline: '2px dashed #258665', outlineOffset: '4px' }
+                : undefined
+            }
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (!saving) {
+                setDropActive(true);
+              }
+            }}
+            onDragLeave={(event) => {
+              // Moving into a child element fires dragleave on the zone; only
+              // clear the highlight when the pointer truly leaves it.
+              const next = event.relatedTarget;
+              if (!(next instanceof Node && event.currentTarget.contains(next))) {
+                setDropActive(false);
+              }
+            }}
+            onDrop={handlePhotoDrop}
+          >
             {photoPath === null ? (
               <div className="avatar-preview-empty">尚未选择照片</div>
             ) : (
@@ -232,7 +328,11 @@ export function AvatarsPage({
           </div>
           {error && <p className="form-error" role="alert">{error}</p>}
           {notice && <p className="form-notice" role="status">{notice}</p>}
-          <button className="button button-primary" type="submit" disabled={saving}>
+          <button
+            className="button button-primary"
+            type="submit"
+            disabled={saving || selecting || authorizing}
+          >
             <Plus size={16} aria-hidden="true" />
             {saving ? '正在保存…' : '保存模特'}
           </button>

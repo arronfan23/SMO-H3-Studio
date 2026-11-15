@@ -16,12 +16,71 @@ export function GenerationOptions({
   value,
   onChange,
   disabled = false,
+  showModel = true,
+  aspectLabel = '视频比例',
 }: {
   idPrefix: string;
   value: GenerationOptionsValue;
   onChange: (value: GenerationOptionsValue) => void;
   disabled?: boolean;
+  showModel?: boolean;
+  aspectLabel?: string;
 }) {
+  const aspectField = (
+    <div className="field">
+      <label htmlFor={`${idPrefix}-aspect`}>{aspectLabel}</label>
+      <select
+        id={`${idPrefix}-aspect`}
+        value={value.aspectRatio}
+        disabled={disabled}
+        onChange={(event) =>
+          onChange({
+            ...value,
+            aspectRatio: event.target.value as AspectRatio,
+          })
+        }
+      >
+        {ASPECT_RATIO_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+  const resolutionField = (
+    <div className="field">
+      <label htmlFor={`${idPrefix}-resolution`}>分辨率</label>
+      <select
+        id={`${idPrefix}-resolution`}
+        value={String(value.megapixels)}
+        disabled={disabled}
+        onChange={(event) =>
+          onChange({
+            ...value,
+            megapixels: Number(event.target.value) as ResolutionMegapixels,
+          })
+        }
+      >
+        {RESOLUTION_OPTIONS.map((option) => {
+          const { width, height } = resolveH3Resolution(
+            value.aspectRatio,
+            option.value,
+          );
+          return (
+            <option key={option.value} value={String(option.value)}>
+              {width} × {height} px
+            </option>
+          );
+        })}
+      </select>
+    </div>
+  );
+
+  if (!showModel) {
+    return <div className="form-row image-option-row">{aspectField}{resolutionField}</div>;
+  }
+
   return (
     <>
       <div className="form-row">
@@ -45,70 +104,9 @@ export function GenerationOptions({
             ))}
           </select>
         </div>
-        <div className="field">
-          <label htmlFor={`${idPrefix}-aspect`}>视频比例</label>
-          <select
-            id={`${idPrefix}-aspect`}
-            value={value.aspectRatio}
-            disabled={disabled}
-            onChange={(event) =>
-              onChange({
-                ...value,
-                aspectRatio: event.target.value as AspectRatio,
-              })
-            }
-          >
-            {ASPECT_RATIO_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        {aspectField}
       </div>
-      <div className="form-row">
-        <div className="field">
-          <label htmlFor={`${idPrefix}-resolution`}>分辨率</label>
-          <select
-            id={`${idPrefix}-resolution`}
-            value={String(value.megapixels)}
-            disabled={disabled}
-            onChange={(event) =>
-              onChange({
-                ...value,
-                megapixels: Number(event.target.value) as ResolutionMegapixels,
-              })
-            }
-          >
-            {RESOLUTION_OPTIONS.map((option) => {
-              const { width, height } = resolveH3Resolution(
-                value.aspectRatio,
-                option.value,
-              );
-              return (
-                <option key={option.value} value={String(option.value)}>
-                  {width} × {height} px
-                </option>
-              );
-            })}
-          </select>
-        </div>
-        <div className="field">
-          <label htmlFor={`${idPrefix}-subtitles`}>生成画面内字幕</label>
-          <label className="checkbox-field">
-            <input
-              id={`${idPrefix}-subtitles`}
-              type="checkbox"
-              checked={value.subtitles}
-              disabled={disabled}
-              onChange={(event) =>
-                onChange({ ...value, subtitles: event.target.checked })
-              }
-            />
-            <span>在画面安全区内显示字幕</span>
-          </label>
-        </div>
-      </div>
+      <div className="form-row">{resolutionField}</div>
     </>
   );
 }

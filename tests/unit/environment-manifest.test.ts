@@ -5,6 +5,7 @@ import rawManifest from '../../resources/environment/selflift-spark.json';
 import {
   parseEnvironmentManifest,
   selectEnvironmentProfile,
+  selectEnvironmentRecommendation,
 } from '../../src/main/environment-manifest';
 import type { HardwareInfo } from '../../src/shared/types';
 
@@ -55,6 +56,34 @@ describe('environment manifest', () => {
         runtime.archiveParts.reduce((total, part) => total + part.size, 0),
       ).toBe(runtime.archiveSize);
     }
+    expect(manifest.runtimes.sm89.ffmpegPath).toBe(
+      'ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/ffmpeg/ffmpeg.exe',
+    );
+    expect(manifest.runtimes.sm120.ffmpegPath).toBe(
+      'ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffmpeg.exe',
+    );
+  });
+
+  test('requires ffmpeg paths in every runtime', () => {
+    const manifest = makeManifest();
+    manifest.runtimes.sm89.ffmpegPath =
+      'ComfyUI_SelfLift_Spark_SM89_CUDA130/tools/ffmpeg/ffmpeg.exe';
+    manifest.runtimes.sm120.ffmpegPath =
+      'ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffmpeg.exe';
+
+    expect(() => parseEnvironmentManifest(manifest)).not.toThrow();
+
+    delete manifest.runtimes.sm89.ffmpegPath;
+    expect(() => parseEnvironmentManifest(manifest)).toThrow(/ffmpegPath/i);
+  });
+
+  test('uses safe relative path validation for ffmpeg paths', () => {
+    const manifest = makeManifest();
+    manifest.runtimes.sm89.ffmpegPath = '../ffmpeg.exe';
+    manifest.runtimes.sm120.ffmpegPath =
+      'ComfyUI_SelfLift_Spark_SM120_CUDA130/tools/ffmpeg/ffmpeg.exe';
+
+    expect(() => parseEnvironmentManifest(manifest)).toThrow(/safe relative path/i);
   });
 
   test.each([
@@ -176,6 +205,12 @@ describe('environment manifest', () => {
         manifest.runtimes.sm89.ffprobePath = value;
       },
     },
+    {
+      name: 'ZIP ffmpeg path',
+      mutate: (manifest, value) => {
+        manifest.runtimes.sm89.ffmpegPath = value;
+      },
+    },
   ];
   const unsafePaths = [
     '/absolute/path',
@@ -282,6 +317,60 @@ describe('environment manifest', () => {
 });
 
 describe('hardware-aware environment selection', () => {
+  test('recommends runtime, profile, models, and bytes despite low free disk space', () => {
+    const selection = selectEnvironmentRecommendation(
+      makeHardware({ freeDiskGiB: 0 }),
+      rawManifest,
+    );
+    const modelBytes = rawManifest.modelFiles.reduce(
+      (total, model) => total + model.size,
+      0,
+    );
+
+    expect(selection.runtime).toEqual(rawManifest.runtimes.sm89);
+    expect(selection.profile).toBe('high-memory-candidate');
+    expect(selection.modelFiles).toEqual(rawManifest.modelFiles);
+    expect(selection.requiredBytes).toBe(
+      rawManifest.runtimes.sm89.archiveSize +
+        rawManifest.runtimes.sm89.estimatedExtractedBytes +
+        modelBytes +
+        VERIFICATION_TEMP_BYTES,
+    );
+  });
+
+  test.each([
+    {
+      scenario: 'a non-NVIDIA GPU',
+      hardware: { gpu: 'AMD Radeon RX 7900' },
+      error: /unsupported GPU/i,
+    },
+    {
+      scenario: 'an unsupported CUDA architecture',
+      hardware: { cudaComputeCapability: '12.1' },
+      error: /unsupported CUDA/i,
+    },
+    {
+      scenario: 'less than 8 GiB VRAM',
+      hardware: { vramGiB: 7.99 },
+      error: /8 GiB VRAM/i,
+    },
+    {
+      scenario: 'less than 32 GiB RAM',
+      hardware: { ramGiB: 31.99 },
+      error: /32 GiB RAM/i,
+    },
+  ])('recommendation still rejects $scenario', ({ hardware, error }) => {
+    expect(() =>
+      selectEnvironmentRecommendation(makeHardware(hardware), rawManifest),
+    ).toThrow(error);
+  });
+
+  test('selectEnvironmentProfile retains the download disk-space check', () => {
+    expect(() =>
+      selectEnvironmentProfile(makeHardware({ freeDiskGiB: 0 }), rawManifest),
+    ).toThrow(/disk|空间/i);
+  });
+
   test.each([
     { gpu: 'NVIDIA GeForce RTX 3060', cc: '8.6', runtime: 'sm89' },
     { gpu: 'NVIDIA GeForce RTX 4090', cc: '8.9', runtime: 'sm89' },

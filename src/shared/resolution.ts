@@ -28,6 +28,18 @@ export function pythonRoundHalfEven(value: number): number {
   return floor % 2 === 0 ? floor : floor + 1;
 }
 
+/** Matches the Qwen reference encoder's geometric-mean resolution input. */
+export function resolveReferenceResolution(width: number, height: number): number {
+  if (!Number.isFinite(width) || width <= 0) {
+    throw new RangeError('width must be a finite positive number');
+  }
+  if (!Number.isFinite(height) || height <= 0) {
+    throw new RangeError('height must be a finite positive number');
+  }
+
+  return pythonRoundHalfEven(Math.sqrt(width * height) / 32) * 32;
+}
+
 /** Matches the H3 ResolutionSelector node's pixel math (multiple-of-32 grid). */
 export function resolveH3Resolution(
   aspectRatio: AspectRatio,
@@ -48,5 +60,34 @@ export function resolveH3Resolution(
   return {
     width: pythonRoundHalfEven((widthRatio * scale) / multiple) * multiple,
     height: pythonRoundHalfEven((heightRatio * scale) / multiple) * multiple,
+  };
+}
+
+/** Fits a reference image's aspect ratio to the requested pixel budget. */
+export function resolveResolutionForDimensions(
+  naturalWidth: number,
+  naturalHeight: number,
+  megapixels: number,
+  multiple = 32,
+): H3Resolution {
+  if (!Number.isFinite(naturalWidth) || naturalWidth <= 0) {
+    throw new RangeError('naturalWidth must be a finite positive number');
+  }
+  if (!Number.isFinite(naturalHeight) || naturalHeight <= 0) {
+    throw new RangeError('naturalHeight must be a finite positive number');
+  }
+  if (!Number.isFinite(megapixels) || megapixels <= 0) {
+    throw new RangeError('megapixels must be a finite positive number');
+  }
+  if (!Number.isInteger(multiple) || multiple <= 0) {
+    throw new RangeError('multiple must be a positive integer');
+  }
+
+  const totalPixels = megapixels * 1024 * 1024;
+  const scale = Math.sqrt(totalPixels / (naturalWidth * naturalHeight));
+
+  return {
+    width: pythonRoundHalfEven((naturalWidth * scale) / multiple) * multiple,
+    height: pythonRoundHalfEven((naturalHeight * scale) / multiple) * multiple,
   };
 }
