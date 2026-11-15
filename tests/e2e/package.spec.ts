@@ -767,6 +767,31 @@ test.describe('SMO.H3 Studio portable package', () => {
     expect(claudeConnectionError).toMatch(/三脚猫|Claude|fetch|connect|ECONN|连接|请求/i);
     expect(claudeConnectionError).not.toContain(TEST_LLM_API_KEY);
 
+    const conversationCheck = await page!.evaluate(async () => {
+      const conversationId = '00000000-0000-4000-8000-000000000701';
+      const api = (window as unknown as {
+        smo: { sanmao: {
+          saveDraft(input: unknown): Promise<unknown>;
+          getConversation(id: string): Promise<{ draft: string } | null>;
+          deleteConversation(id: string): Promise<void>;
+        } };
+      }).smo.sanmao;
+      await api.saveDraft({
+        conversationId,
+        model: 'claude-package-test',
+        effort: 'medium',
+        draft: 'packaged database write check',
+      });
+      const saved = await api.getConversation(conversationId);
+      await api.deleteConversation(conversationId);
+      const deleted = await api.getConversation(conversationId);
+      return { savedDraft: saved?.draft ?? null, deleted };
+    });
+    expect(conversationCheck).toEqual({
+      savedDraft: 'packaged database write check',
+      deleted: null,
+    });
+
     const violations = await scanSensitiveFiles(packagedResourcesPath);
     expect(violations).toEqual([]);
   });
@@ -789,8 +814,10 @@ test.describe('SMO.H3 Studio portable package', () => {
     // ComfyUI health against the local mock.
     await expect(page!.locator('h3:has-text("ComfyUI 连接正常")')).toBeVisible();
 
-    // Non-empty studio preview comes from the seeded avatar.
+    // Text/reference video has no avatar panel; audio digital human keeps it.
     await openStudioVideo(page!);
+    await expect(page!.locator('.person-preview')).toHaveCount(0);
+    await page!.click('#audio-mode-tab');
     await expect(
       page!.locator(`.person-preview h2:has-text("${AVATAR_NAME}")`),
     ).toBeVisible();
@@ -798,6 +825,8 @@ test.describe('SMO.H3 Studio portable package', () => {
       .locator('.person-preview img')
       .evaluate((img) => (img as HTMLImageElement).naturalWidth);
     expect(previewWidth).toBeGreaterThan(0);
+    await page!.click('#text-mode-tab');
+    await expect(page!.locator('.person-preview')).toHaveCount(0);
 
     await page!.fill('#original-text', 'A packaged app waves hello.');
     await page!.click('button:has-text("AI 润色")');
@@ -890,9 +919,10 @@ test.describe('SMO.H3 Studio portable package', () => {
 
       await openStudioVideo(page!);
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
+      await expect(page!.locator('.person-preview')).toHaveCount(0);
       await assertViewWithinViewport(page!, `package-studio-${width}`, [
         '.brand-lockup',
-        '.person-preview',
+        '#reference-mode-tab',
         '#original-text',
         '#text-mode-panel .button-generate',
       ]);
