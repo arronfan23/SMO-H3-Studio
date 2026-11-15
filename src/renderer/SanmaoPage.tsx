@@ -47,6 +47,7 @@ export function SanmaoPage({
   const [selectingAttachments, setSelectingAttachments] = useState(false);
   const [conversationId, setConversationId] = useState<string>(() => crypto.randomUUID());
   const [activeReplyId, setActiveReplyId] = useState<string | null>(null);
+  const [toolActivity, setToolActivity] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SanmaoConversationSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
   const conversationIdRef = useRef(conversationId);
@@ -79,7 +80,12 @@ export function SanmaoPage({
       if (event.conversationId !== conversationIdRef.current) return;
       if (event.kind === 'error') {
         setError(event.text);
+        setToolActivity(null);
         setActiveReplyId(null);
+        return;
+      }
+      if (event.kind === 'tool') {
+        setToolActivity(event.text);
         return;
       }
       setMessages((current) => {
@@ -94,7 +100,10 @@ export function SanmaoPage({
         }
         return [...current, { id: event.replyId, role: 'assistant', text }];
       });
-      if (event.kind === 'done') setActiveReplyId(null);
+      if (event.kind === 'done') {
+        setToolActivity(null);
+        setActiveReplyId(null);
+      }
     });
     return unsubscribe;
   }, []);
@@ -194,6 +203,7 @@ export function SanmaoPage({
     setError(null);
     activeReplyRef.current = replyId;
     setActiveReplyId(replyId);
+    setToolActivity(null);
     try {
       await window.smo.sanmao.send({
         conversationId: requestedConversationId,
@@ -223,6 +233,7 @@ export function SanmaoPage({
     setDraftDirty(false);
     setEffort('medium');
     setActiveReplyId(null);
+    setToolActivity(null);
     activeReplyRef.current = null;
     setError(null);
   };
@@ -342,7 +353,11 @@ export function SanmaoPage({
           onDelete={setDeleteTarget}
         />
         <div className="sanmao-chat">
-          <SanmaoMessageLog messages={messages} activeReplyId={activeReplyId} />
+          <SanmaoMessageLog
+            messages={messages}
+            activeReplyId={activeReplyId}
+            toolActivity={toolActivity}
+          />
           <SanmaoComposer
             draft={draft}
             canChat={canChat}

@@ -136,7 +136,9 @@ async function dispatch(
 ): Promise<unknown> {
   switch (request.channel) {
     case 'app:getVersion':
-      return electronApp.getVersion();
+      return electronApp.isPackaged === false
+        ? process.env.npm_package_version ?? electronApp.getVersion()
+        : electronApp.getVersion();
     case 'jobs:start':
       return services.startGeneration(request.payload);
     case 'jobs:retry':
@@ -250,6 +252,12 @@ async function dispatch(
             replyId,
             kind: 'delta',
             text: delta,
+          }),
+          onTool: (text) => context.emit('sanmao:stream', {
+            conversationId,
+            replyId,
+            kind: 'tool',
+            text,
           }),
         });
         context.emit('sanmao:stream', {

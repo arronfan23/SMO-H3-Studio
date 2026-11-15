@@ -602,6 +602,19 @@ test.describe('SMO.H3 Studio portable package', () => {
       attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
     );
     page = await app.firstWindow();
+    await page.evaluate(async () => {
+      const api = (window as unknown as {
+        smo: { app: { getVersion(): Promise<string> } };
+      }).smo;
+      window.localStorage.setItem(
+        'smo-h3-studio:seen-version',
+        await api.app.getVersion(),
+      );
+    });
+    const releaseNotes = page.getByRole('dialog', { name: '更新内容' });
+    if (await releaseNotes.isVisible()) {
+      await releaseNotes.getByRole('button', { name: '开始使用' }).click();
+    }
 
     const discoveredResourcesPath = await app.evaluate(() => process.resourcesPath);
     launchState.extractionRoot = dirname(discoveredResourcesPath);

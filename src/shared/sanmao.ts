@@ -43,6 +43,7 @@ export type SanmaoStreamEvent = {
   replyId: string;
 } & (
   | { kind: 'delta'; text: string }
+  | { kind: 'tool'; text: string }
   | { kind: 'done'; text: string }
   | { kind: 'error'; text: string }
 );
@@ -65,7 +66,7 @@ export function parseSanmaoStreamEvent(value: unknown): SanmaoStreamEvent {
     !UUID_PATTERN.test(event.conversationId) ||
     typeof event.replyId !== 'string' ||
     !UUID_PATTERN.test(event.replyId) ||
-    !['delta', 'done', 'error'].includes(String(event.kind)) ||
+    !['delta', 'tool', 'done', 'error'].includes(String(event.kind)) ||
     typeof event.text !== 'string' ||
     Object.keys(event).some((key) =>
       !['conversationId', 'replyId', 'kind', 'text'].includes(key),

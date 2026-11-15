@@ -769,6 +769,16 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       throw error;
     });
     await expect(page).toHaveTitle('SMO.H3 Studio');
+    await page.evaluate(async () => {
+      const api = (window as unknown as {
+        smo: { app: { getVersion(): Promise<string> } };
+      }).smo;
+      window.localStorage.setItem(
+        'smo-h3-studio:seen-version',
+        await api.app.getVersion(),
+      );
+    });
+    await page.reload();
   });
 
   test.afterEach(async () => {
@@ -804,6 +814,23 @@ test.describe('SMO.H3 Studio end-to-end', () => {
   test('creates and selects an avatar', async () => {
     await createAvatar(page!, 'E2E Avatar Create');
     await expect(page!.locator('.avatar-list article')).toHaveCount(1);
+  });
+
+  test('shows new release notes once and remembers dismissal', async () => {
+    await page!.evaluate(() => {
+      window.localStorage.removeItem('smo-h3-studio:seen-version');
+    });
+    await page!.reload();
+    const dialog = page!.getByRole('dialog', { name: '更新内容' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('版本 0.6.0');
+    await expect(dialog).toContainText('三脚猫支持多轮工具调用');
+    await dialog.getByRole('button', { name: '开始使用' }).click();
+    await expect(dialog).toHaveCount(0);
+
+    await page!.reload();
+    await expect(page!).toHaveTitle('SMO.H3 Studio');
+    await expect(page!.getByRole('dialog', { name: '更新内容' })).toHaveCount(0);
   });
 
   test('二级制作目录支持键盘导航、切页和收起草稿保留', async () => {
@@ -2019,7 +2046,14 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     page = await app.firstWindow();
     type QueryInput = {
       prompt: string | AsyncIterable<unknown>;
-      options: { effort?: string };
+      options: {
+        effort?: string;
+        maxTurns?: number;
+        persistSession?: boolean;
+        sessionId?: string;
+        resume?: string;
+        tools?: unknown;
+      };
     };
     await expect.poll(() => app!.evaluate(() =>
       Object.hasOwn(process, '__smoImageE2eServices'),
@@ -2098,6 +2132,25 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     ]));
     expect(JSON.stringify(query.content)).not.toContain(attachmentDirectory);
 
+    await messageInput.fill('继续检查这个文件');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await expect(page.locator('.sanmao-message-assistant')).toHaveCount(2);
+    const sdkOptions = await app.evaluate(() => {
+      const probe = process as unknown as { __smoSanmaoQueries?: QueryInput[] };
+      return probe.__smoSanmaoQueries?.map((input) => input.options);
+    });
+    expect(sdkOptions?.[0]).toMatchObject({
+      tools: { type: 'preset', preset: 'claude_code' },
+      maxTurns: 50,
+      persistSession: true,
+    });
+    expect(sdkOptions?.[0]?.sessionId).toBeTruthy();
+    expect(sdkOptions?.[1]).toMatchObject({
+      resume: sdkOptions?.[0]?.sessionId,
+      maxTurns: 50,
+      persistSession: true,
+    });
+
     await page.getByRole('button', { name: '添加附件' }).click();
     await expect(page.locator('.sanmao-attachment-list')).toContainText('brief.txt');
     await messageInput.fill('重启后保留这段草稿');
@@ -2135,7 +2188,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     page = await app.firstWindow();
     await page.click('nav[aria-label="主导航"] button:has-text("三脚猫")');
     await page.getByRole('button', { name: /^分析这张参考图/ }).click();
-    await expect(page.getByText('这是模拟三脚猫回复')).toBeVisible();
+    await expect(page.locator('.sanmao-message-assistant')).toHaveCount(2);
     await expect(page.getByLabel('发送给三脚猫的消息')).toHaveValue('重启后保留这段草稿');
     await expect(page.locator('.sanmao-attachment-list')).toContainText('brief.txt');
     const composerLayout = await page.evaluate(() => {

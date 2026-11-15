@@ -74,7 +74,7 @@ describe('SanmaoService', () => {
     )).toBe('C:\\app\\resources\\app.asar.unpacked\\node_modules\\claude.exe');
   });
 
-  test('streams text with tools disabled and keeps conversation context in memory', async () => {
+  test('runs an agent with persistent SDK conversation resume', async () => {
     const prompts: string[] = [];
     const options: Options[] = [];
     const service = createService((input: SanmaoQueryInput) => {
@@ -98,10 +98,11 @@ describe('SanmaoService', () => {
     expect(first.text).toBe('你好，我是三脚猫');
     expect(chunks.join('')).toBe(first.text);
     expect(options[0]).toMatchObject({
-      tools: [],
+      tools: { type: 'preset', preset: 'claude_code' },
       includePartialMessages: true,
-      persistSession: false,
-      maxTurns: 1,
+      persistSession: true,
+      maxTurns: 50,
+      sessionId: '00000000-0000-4000-8000-000000000001',
       model: 'claude-test',
       pathToClaudeCodeExecutable: 'G:\\claude-test\\claude.exe',
     });
@@ -116,8 +117,85 @@ describe('SanmaoService', () => {
       text: '再介绍一次',
       onText: () => undefined,
     });
-    expect(prompts[1]).toContain('你好，我是三脚猫');
-    expect(prompts[1]).toContain('再介绍一次');
+    expect(prompts[1]).toBe('再介绍一次');
+    expect(options[1]).toMatchObject({
+      resume: '00000000-0000-4000-8000-000000000001',
+      persistSession: true,
+      maxTurns: 50,
+    });
+  });
+
+  test('reports real SDK tool calls and tool progress', async () => {
+    const service = createService(() => successfulQuery([
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }],
+        },
+      },
+      {
+        type: 'tool_progress',
+        tool_name: 'Read',
+        elapsed_time_seconds: 2.8,
+      },
+      success('已读取文件'),
+    ])({ prompt: '', options: {} }));
+    const activities: string[] = [];
+
+    await service.send({
+      conversationId: '00000000-0000-4000-8000-000000000008',
+      replyId: '00000000-0000-4000-8000-000000000081',
+      text: '读取文件',
+      onText: () => undefined,
+      onTool: (text) => activities.push(text),
+    });
+
+    expect(activities).toEqual(['正在调用 Read', '正在执行 Read（2 秒）']);
+  });
+
+  test('auto-allows read tools and routes sensitive tools through permission UI', async () => {
+    let options: Options | undefined;
+    const requestPermission = vi.fn(async () => true);
+    const service = new SanmaoService({
+      store: { getCredentials: async () => credentials },
+      queryImpl: (input) => {
+        options = input.options;
+        return successfulQuery([success('OK')])(input);
+      },
+      claudeExecutablePath: 'G:\\claude-test\\claude.exe',
+      requestPermission,
+    });
+
+    await service.send({
+      conversationId: '00000000-0000-4000-8000-000000000009',
+      replyId: '00000000-0000-4000-8000-000000000091',
+      text: '检查目录',
+      onText: () => undefined,
+    });
+
+    const signal = new AbortController().signal;
+    await expect(options?.canUseTool?.('Read', {}, {
+      signal,
+      toolUseID: 'tool-read',
+      requestId: 'request-read',
+    })).resolves.toEqual({
+      behavior: 'allow',
+    });
+    await expect(options?.canUseTool?.(
+      'PowerShell',
+      { command: 'Get-ChildItem' },
+      {
+        signal,
+        title: '运行 Get-ChildItem',
+        toolUseID: 'tool-shell',
+        requestId: 'request-shell',
+      },
+    )).resolves.toEqual({ behavior: 'allow' });
+    expect(requestPermission).toHaveBeenCalledWith({
+      toolName: 'PowerShell',
+      input: { command: 'Get-ChildItem' },
+      title: '运行 Get-ChildItem',
+    });
   });
 
   test('cancels the active reply through its AbortController', async () => {

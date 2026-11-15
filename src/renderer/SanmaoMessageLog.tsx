@@ -4,9 +4,11 @@ import type { SanmaoMessage } from '../shared/sanmao';
 export function SanmaoMessageLog({
   messages,
   activeReplyId,
+  toolActivity,
 }: {
   messages: SanmaoMessage[];
   activeReplyId: string | null;
+  toolActivity?: string | null;
 }) {
   const logRef = useRef<HTMLDivElement | null>(null);
   const streaming = activeReplyId !== null &&
@@ -52,6 +54,12 @@ export function SanmaoMessageLog({
         <div className="sanmao-generating" role="status" aria-label="正在生成回复">
           <span className="sanmao-generating-mark" aria-hidden="true" />
           <span>正在生成回复…</span>
+        </div>
+      )}
+      {activeReplyId !== null && toolActivity && (
+        <div className="sanmao-generating" role="status" aria-label="正在执行工具">
+          <span className="sanmao-generating-mark" aria-hidden="true" />
+          <span>{toolActivity}</span>
         </div>
       )}
     </div>

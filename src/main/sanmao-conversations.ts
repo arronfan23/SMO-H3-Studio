@@ -53,6 +53,7 @@ export class SanmaoConversationStore {
         title TEXT NOT NULL,
         model TEXT NOT NULL,
         effort TEXT NOT NULL CHECK (effort IN ('low', 'medium', 'high')),
+        sdkSessionId TEXT,
         draft TEXT NOT NULL DEFAULT '',
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL
@@ -82,6 +83,10 @@ export class SanmaoConversationStore {
       CREATE INDEX IF NOT EXISTS sanmao_drafts_conversation
         ON sanmao_draft_attachments(conversationId, sortOrder);
     `);
+    const columns = this.db.prepare('PRAGMA table_info(sanmao_conversations)').all();
+    if (!columns.some((column) => column.name === 'sdkSessionId')) {
+      this.db.exec('ALTER TABLE sanmao_conversations ADD COLUMN sdkSessionId TEXT');
+    }
   }
 
   createConversation(input: ConversationInput): SanmaoConversation {
@@ -212,6 +217,19 @@ export class SanmaoConversationStore {
       size: attachment.size as number,
       sourcePath: attachment.sourcePath as string,
     }));
+  }
+
+  getSdkSessionId(conversationId: string): string | null {
+    const row = this.db.prepare(
+      'SELECT sdkSessionId FROM sanmao_conversations WHERE id = ?',
+    ).get(conversationId);
+    return typeof row?.sdkSessionId === 'string' ? row.sdkSessionId : null;
+  }
+
+  setSdkSessionId(conversationId: string, sdkSessionId: string): void {
+    this.db.prepare(
+      'UPDATE sanmao_conversations SET sdkSessionId = ? WHERE id = ?',
+    ).run(sdkSessionId, conversationId);
   }
 
   updateDraft(input: DraftInput): SanmaoConversation {

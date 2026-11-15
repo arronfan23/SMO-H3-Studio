@@ -574,6 +574,21 @@ export async function createAppServices(
       store: sanmaoConfig,
       conversations: new SanmaoConversationStore(join(dataDirectory, 'studio.sqlite')),
       attachments: new SanmaoAttachmentService({ dialog: fileDialog }),
+      workingDirectory: dataDirectory,
+      configurationDirectory: join(dataDirectory, 'sanmao-sdk'),
+      requestPermission: async ({ toolName, input, title }) => {
+        const result = await dialog.showMessageBox({
+          type: 'question',
+          title: '三脚猫权限请求',
+          message: title ?? `三脚猫请求使用 ${toolName}`,
+          detail: JSON.stringify(input, null, 2).slice(0, 6000),
+          buttons: ['允许一次', '拒绝'],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        return result.response === 0;
+      },
     });
     comfy = new ComfyClient(comfyBaseUrl);
     activeComfyProcess = new ComfyProcessManager(

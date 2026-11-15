@@ -149,6 +149,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   window.smo = smo as unknown as SmoApi;
   smo.app.getVersion.mockResolvedValue('0.3.15-test');
+  window.localStorage.setItem('smo-h3-studio:seen-version', '0.3.15-test');
   smo.avatars.list.mockResolvedValue([avatar]);
   smo.avatars.create.mockRejectedValue(new Error('Unexpected avatar creation'));
   smo.avatars.update.mockRejectedValue(new Error('Unexpected avatar rename'));

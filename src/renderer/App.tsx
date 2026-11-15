@@ -21,6 +21,7 @@ import { WindowResizeHandles } from './WindowResizeHandles';
 import { WindowTitlebar } from './WindowTitlebar';
 import { WorksPage } from './WorksPage';
 import { SanmaoPage } from './SanmaoPage';
+import { ReleaseNotesDialog } from './ReleaseNotesDialog';
 import { errorMessage } from './ui';
 
 const NAVIGATION = [
@@ -276,8 +277,18 @@ export function App() {
   const config = environment.state?.config;
 
   if (config?.status === 'ready' && environment.state?.healthy) {
-    return <StudioApplication initialModelDirectory={config.modelDirectory} />;
+    return (
+      <>
+        <StudioApplication initialModelDirectory={config.modelDirectory} />
+        <ReleaseNotesDialog />
+      </>
+    );
   }
 
-  return <EnvironmentWizard environment={environment} />;
+  return (
+    <>
+      <EnvironmentWizard environment={environment} />
+      <ReleaseNotesDialog />
+    </>
+  );
 }

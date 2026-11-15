@@ -36,6 +36,13 @@ export interface SanmaoSendInput {
   effort?: SanmaoEffort;
   attachments?: Array<Pick<SanmaoAttachmentMetadata, 'id'>>;
   onText: (text: string) => void;
+  onTool?: (text: string) => void;
+}
+
+export interface SanmaoToolPermissionRequest {
+  toolName: string;
+  input: Record<string, unknown>;
+  title?: string;
 }
 
 export interface SanmaoServiceOptions {
@@ -46,9 +53,19 @@ export interface SanmaoServiceOptions {
   timeoutMs?: number;
   claudeExecutablePath?: string;
   modelLister?: typeof listSanmaoModels;
+  workingDirectory?: string;
+  configurationDirectory?: string;
+  requestPermission?: (request: SanmaoToolPermissionRequest) => Promise<boolean>;
 }
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const SANMAO_SYSTEM_PROMPT =
+  '你是 SMO.H3 Studio 中的 AI 助手“三脚猫”。使用中文回答，表达清晰、简洁、可靠。需要检查或操作时应实际调用工具，不要只描述准备执行的动作。';
+const READ_ONLY_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'ListAgents',
+  'ListMcpResourcesTool', 'ReadMcpResourceDirTool', 'ReadMcpResourceTool',
+  'TaskGet', 'TaskList', 'TodoWrite', 'ToolSearch',
+]);
 const requireClaude = createRequire(import.meta.url);
 
 function attachmentMetadata(
@@ -88,6 +105,7 @@ const PRESERVED_CLAUDE_ENVIRONMENT_VARIABLES = new Set([
 
 function createSanmaoEnvironment(
   credentials: SanmaoCredentials,
+  configurationDirectory?: string,
 ): NodeJS.ProcessEnv {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([name]) => {
@@ -105,6 +123,9 @@ function createSanmaoEnvironment(
     ANTHROPIC_BASE_URL: credentials.baseUrl,
     ANTHROPIC_API_KEY: credentials.apiKey,
     CLAUDE_AGENT_SDK_CLIENT_APP: 'smo-h3-studio/0.5.1',
+    ...(configurationDirectory === undefined
+      ? {}
+      : { CLAUDE_CONFIG_DIR: configurationDirectory }),
   };
 }
 
@@ -139,6 +160,36 @@ function extractAssistantText(message: unknown): string | null {
     .filter((block) => block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text as string);
   return texts.length > 0 ? texts.join('') : null;
+}
+
+function extractToolUses(message: unknown): Array<{ id: string; name: string }> {
+  if (!isRecord(message) || message.type !== 'assistant') return [];
+  const content = isRecord(message.message) ? message.message.content : null;
+  if (!Array.isArray(content)) return [];
+  return content.filter(isRecord).flatMap((block) =>
+    block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string'
+      ? [{ id: block.id, name: block.name }]
+      : [],
+  );
+}
+
+function extractToolProgress(message: unknown): string | null {
+  if (
+    !isRecord(message) || message.type !== 'tool_progress' ||
+    typeof message.tool_name !== 'string'
+  ) return null;
+  const seconds = typeof message.elapsed_time_seconds === 'number'
+    ? Math.max(0, Math.floor(message.elapsed_time_seconds))
+    : 0;
+  return `正在执行 ${message.tool_name}（${seconds} 秒）`;
+}
+
+function extractSessionId(message: unknown): string | null {
+  if (
+    !isRecord(message) || message.type !== 'system' ||
+    message.subtype !== 'init' || typeof message.session_id !== 'string'
+  ) return null;
+  return message.session_id;
 }
 
 function resultText(message: unknown): { text: string; error: boolean } | null {
@@ -234,6 +285,7 @@ export class SanmaoService {
     const credentials = await this.requireCredentials();
     const attachments = this.resolveAttachments(input.conversationId, attachmentRefs);
     const history = this.conversations.getConversation(input.conversationId)?.messages ?? [];
+    const sdkSessionId = this.conversations.getSdkSessionId(input.conversationId);
     this.conversations.appendMessage({
       conversationId: input.conversationId,
       model: credentials.model,
@@ -245,7 +297,9 @@ export class SanmaoService {
         ...(attachments.length === 0 ? {} : { attachments: attachmentMetadata(attachments) }),
       },
     });
-    const historyPrompt = this.buildPrompt(history, text);
+    const historyPrompt = sdkSessionId === null
+      ? this.buildPrompt(history, text)
+      : text;
     const prompt = attachments.length === 0
       ? historyPrompt
       : attachmentPrompt(
@@ -258,6 +312,15 @@ export class SanmaoService {
       input.onText,
       credentials,
       effort,
+      {
+        conversationId: input.conversationId,
+        resumeSessionId: sdkSessionId,
+        onTool: input.onTool,
+      },
+    );
+    this.conversations.setSdkSessionId(
+      input.conversationId,
+      sdkSessionId ?? input.conversationId,
     );
     this.conversations.appendMessage({
       conversationId: input.conversationId,
@@ -292,14 +355,14 @@ export class SanmaoService {
   }
 
   private buildPrompt(history: readonly SanmaoMessage[], text: string): string {
+    if (history.length === 0) return text;
     const transcript = history.map((message) =>
       `${message.role === 'user' ? '用户' : '三脚猫'}：${message.text}`,
     );
     return [
-      '你是 SMO.H3 Studio 中的 AI 助手“三脚猫”。使用中文回答，表达清晰、简洁、可靠。',
+      '以下是本次会话此前的消息记录：',
       ...transcript,
       `用户：${text}`,
-      '三脚猫：',
     ].join('\n\n');
   }
 
@@ -309,6 +372,11 @@ export class SanmaoService {
     onText: (text: string) => void,
     credentialsOverride?: SanmaoCredentials,
     effort: SanmaoEffort = 'medium',
+    session?: {
+      conversationId: string;
+      resumeSessionId: string | null;
+      onTool?: (text: string) => void;
+    },
   ): Promise<string> {
     const credentials = credentialsOverride ?? await this.requireCredentials();
     const controller = new AbortController();
@@ -320,6 +388,8 @@ export class SanmaoService {
     }, this.timeoutMs);
     let streamed = '';
     let completedBlocks = '';
+    const announcedTools = new Set<string>();
+    const isChat = session !== undefined;
 
     try {
       const messages = this.queryImpl({
@@ -327,19 +397,60 @@ export class SanmaoService {
         options: {
           model: credentials.model,
           effort,
-          env: createSanmaoEnvironment(credentials),
-          tools: [],
-          mcpServers: {},
-          maxTurns: 1,
+          env: createSanmaoEnvironment(
+            credentials,
+            isChat ? this.options.configurationDirectory : undefined,
+          ),
           includePartialMessages: true,
-          persistSession: false,
-          verbatimPrompts: true,
-          settingSources: [],
           pathToClaudeCodeExecutable: this.claudeExecutablePath,
           abortController: controller,
+          ...(isChat ? {
+            tools: { type: 'preset', preset: 'claude_code' },
+            maxTurns: 50,
+            persistSession: true,
+            settingSources: ['user', 'project', 'local'],
+            systemPrompt: SANMAO_SYSTEM_PROMPT,
+            cwd: this.options.workingDirectory,
+            enableFileCheckpointing: true,
+            agentProgressSummaries: true,
+            permissionMode: 'default',
+            permissionPrompts: 'host',
+            canUseTool: async (toolName, toolInput, details) => {
+              if (READ_ONLY_TOOLS.has(toolName)) return { behavior: 'allow' as const };
+              const allowed = await this.options.requestPermission?.({
+                toolName,
+                input: toolInput,
+                ...(details.title === undefined ? {} : { title: details.title }),
+              }) ?? false;
+              return allowed
+                ? { behavior: 'allow' as const }
+                : { behavior: 'deny' as const, message: '用户拒绝了本次工具调用' };
+            },
+            ...(session.resumeSessionId === null
+              ? { sessionId: session.conversationId }
+              : { resume: session.resumeSessionId }),
+          } : {
+            tools: [],
+            mcpServers: {},
+            maxTurns: 1,
+            persistSession: false,
+            verbatimPrompts: true,
+            settingSources: [],
+          }),
         },
       });
       for await (const message of messages) {
+        const sessionId = extractSessionId(message);
+        if (session !== undefined && sessionId !== null) {
+          this.conversations.setSdkSessionId(session.conversationId, sessionId);
+        }
+        for (const tool of extractToolUses(message)) {
+          if (announcedTools.has(tool.id)) continue;
+          announcedTools.add(tool.id);
+          session?.onTool?.(`正在调用 ${tool.name}`);
+        }
+        const toolProgress = extractToolProgress(message);
+        if (toolProgress !== null) session?.onTool?.(toolProgress);
         const delta = extractTextDelta(message);
         if (delta !== null) {
           streamed += delta;

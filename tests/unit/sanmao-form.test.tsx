@@ -92,6 +92,26 @@ describe('SanmaoPage', () => {
     expect(screen.queryByText('这是三脚猫的回复')).not.toBeInTheDocument();
   });
 
+  test('shows SDK tool activity while the reply is running', async () => {
+    sanmao.send.mockImplementation((input) => {
+      receive({
+        conversationId: input.conversationId,
+        replyId: input.replyId,
+        kind: 'tool',
+        text: '正在调用 Read',
+      });
+      return new Promise(() => undefined);
+    });
+    render(<SanmaoPage />);
+    const input = await screen.findByLabelText('发送给三脚猫的消息');
+
+    fireEvent.change(input, { target: { value: '读取 Studio 配置' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByRole('status', { name: '正在执行工具' }))
+      .toHaveTextContent('正在调用 Read');
+  });
+
   test('stops the active reply', async () => {
     sanmao.send.mockImplementation(() => new Promise(() => undefined));
     render(<SanmaoPage />);
