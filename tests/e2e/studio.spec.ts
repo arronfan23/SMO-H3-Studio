@@ -2535,6 +2535,59 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     }
   });
 
+  test('visited Sanmao stays hidden on other pages without overlapping controls', async () => {
+    const testInfo = test.info();
+    await setViewport(app!, page!, 1280, 820);
+    await page!.click('nav[aria-label="主导航"] button:has-text("三脚猫")');
+    await expect(page!.locator('.sanmao-page')).toBeVisible();
+    await assertViewLayout(page!, 'sanmao', [
+      '.sanmao-attachment-button',
+      'select[aria-label="当前模型"]',
+      'select[aria-label="思考深度"]',
+      '.sanmao-send-button',
+    ]);
+    await page!.screenshot({ path: testInfo.outputPath('sanmao-1280.png') });
+
+    const destinations = [
+      {
+        name: 'studio',
+        trigger: '#studio-video-button',
+        active: '#video-main-panel',
+      },
+      {
+        name: 'avatars',
+        trigger: 'nav[aria-label="主导航"] button:has-text("数字模特")',
+        active: '.avatar-form',
+      },
+      {
+        name: 'works',
+        trigger: 'nav[aria-label="主导航"] button:has-text("我的作品")',
+        active: '.works-filters',
+      },
+      {
+        name: 'settings',
+        trigger: 'nav[aria-label="主导航"] button:has-text("设置")',
+        active: '#llm-base-url',
+      },
+    ];
+
+    for (const destination of destinations) {
+      await page!.click(destination.trigger);
+      await expect(page!.locator(destination.active)).toBeVisible();
+      await expect(
+        page!.locator('.sanmao-page-host'),
+        `${destination.name}: visited Sanmao host must be hidden`,
+      ).toBeHidden();
+      await expect(
+        page!.locator('.sanmao-page'),
+        `${destination.name}: visited Sanmao content must not overlap the active page`,
+      ).toBeHidden();
+      await page!.screenshot({
+        path: testInfo.outputPath(`after-sanmao-${destination.name}.png`),
+      });
+    }
+  });
+
   test('settings layout handles narrow viewport at 200% zoom', async () => {
     await expect(page!.locator('.app-shell')).toBeVisible();
     await createAvatar(page!, 'E2E Zoom Avatar');
