@@ -630,6 +630,8 @@ describe('语音工作区', () => {
     expect(screen.getByRole('button', { name: '安装语音组件' })).toBeEnabled();
 
     fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
     expect(screen.getByRole('region', { name: '当前人物预览' })).toBeVisible();
     expect(screen.getByRole('button', { name: '生成视频' })).toBeEnabled();
     expect(screen.queryByRole('heading', { name: '还没有数字模特' })).not.toBeInTheDocument();

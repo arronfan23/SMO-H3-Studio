@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from '../../src/renderer/App';
@@ -71,7 +71,8 @@ function useHardwareApi(overrides: Partial<SmoApi["hardware"]> = {}): void {
 async function renderDetectedHardware() {
   const view = render(<SettingsPage />);
   fireEvent.click(await screen.findByRole("button", { name: "检测硬件" }));
-  await screen.findByText(hardwareInfo.gpu);
+  await within(screen.getByRole('region', { name: '生成环境' }))
+    .findByText(hardwareInfo.gpu);
   return view;
 }
 

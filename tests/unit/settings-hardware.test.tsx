@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { SettingsPage } from "../../src/renderer/SettingsPage";
@@ -72,13 +72,14 @@ describe("SettingsPage hardware controls", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "检测硬件" }));
 
-    expect(await screen.findByText(hardwareInfo.gpu)).toBeInTheDocument();
-    expect(screen.getByText("576.88")).toBeInTheDocument();
-    expect(screen.getByText("12.0")).toBeInTheDocument();
-    expect(screen.getByText(hardwareInfo.windowsVersion)).toBeInTheDocument();
-    expect(screen.getByText(/16(?:\.0)? GiB/)).toBeInTheDocument();
-    expect(screen.getByText(/64(?:\.0)? GiB/)).toBeInTheDocument();
-    expect(screen.getByText(/512(?:\.0)? GiB/)).toBeInTheDocument();
+    const environment = screen.getByRole('region', { name: '生成环境' });
+    expect(await within(environment).findByText(hardwareInfo.gpu)).toBeInTheDocument();
+    expect(within(environment).getByText("576.88")).toBeInTheDocument();
+    expect(within(environment).getByText("12.0")).toBeInTheDocument();
+    expect(within(environment).getByText(hardwareInfo.windowsVersion)).toBeInTheDocument();
+    expect(within(environment).getByText(/16(?:\.0)? GiB/)).toBeInTheDocument();
+    expect(within(environment).getByText(/64(?:\.0)? GiB/)).toBeInTheDocument();
+    expect(within(environment).getByText(/512(?:\.0)? GiB/)).toBeInTheDocument();
     expect(smo.hardware.detect).toHaveBeenCalledTimes(1);
   });
 

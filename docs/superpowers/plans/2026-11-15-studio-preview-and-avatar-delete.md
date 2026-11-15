@@ -127,7 +127,7 @@ git commit -m "Preserve works when deleting avatars"
 
 ### 任务 5：完整验证
 
-- [ ] **步骤 1：运行自动回归**
+- [x] **步骤 1：运行自动回归**
 
 ```powershell
 npm run typecheck
@@ -135,6 +135,6 @@ npx vitest run --exclude tests/unit/environment-wizard.test.tsx --reporter=dot
 npm run test:e2e -- tests/e2e/studio.spec.ts
 ```
 
-- [ ] **步骤 2：补充 Electron 验证并提交**
+- [x] **步骤 2：补充 Electron 验证并提交**
 
 在 `tests/e2e/studio.spec.ts` 验证三种播放器、文生/图生无模特区域、删除模特后作品仍可播放。通过后只提交本计划相关代码、测试和本计划文件。

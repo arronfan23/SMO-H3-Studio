@@ -126,7 +126,7 @@ git commit -m "Add Sanmao effort levels and real attachments"
 
 ### 任务 5：重启、Electron 与打包验证
 
-- [ ] **步骤 1：补充重启和 Electron 测试**
+- [x] **步骤 1：补充重启和 Electron 测试**
 
 在 `tests/e2e/studio.spec.ts` 验证旧会话重启恢复、选择/删除、底部 composer、思考动效、模型/effort 切换及真实附件内容块。`tests/e2e/package.spec.ts` 验证数据库可写和包内无测试密钥/聊天记录。
 
@@ -139,6 +139,8 @@ npm run test:e2e -- tests/e2e/studio.spec.ts
 npm run test:e2e:package
 ```
 
-- [ ] **步骤 3：只提交本计划相关文件**
+验证记录：68 个单元测试文件共 2860 通过、1 跳过，Electron 28/28 通过，类型检查与生产构建通过。本次未重新打包，因此 `test:e2e:package` 留待明确发起安装包构建后执行。
+
+- [x] **步骤 3：只提交本计划相关文件**
 
 确认无环境向导、缓存、真实密钥或聊天内容后提交实现、测试和本计划文件。

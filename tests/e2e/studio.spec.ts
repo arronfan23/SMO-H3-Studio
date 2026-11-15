@@ -285,6 +285,7 @@ async function setZoomedViewport(
   page: Page,
   cssWidth: number,
   cssHeight: number,
+  maxCssWidth = 800,
 ): Promise<void> {
   const [actualWidth, actualHeight] = await app.evaluate(({ BrowserWindow }, { cssWidth, cssHeight }) => {
     const win = BrowserWindow.getAllWindows()[0];
@@ -318,9 +319,9 @@ async function setZoomedViewport(
     )
     .toEqual({ size: expect.any(Object), withinTolerance: true });
 
-  // Confirm the effective CSS viewport is still narrow (< 800 px matches the max-width breakpoint).
+  // Confirm the effective CSS viewport is inside the requested breakpoint.
   const innerWidth = await page.evaluate(() => window.innerWidth);
-  expect(innerWidth).toBeLessThanOrEqual(800);
+  expect(innerWidth).toBeLessThanOrEqual(maxCssWidth);
 }
 
 async function waitForVideoReadyByJobId(page: Page, jobId: string): Promise<void> {
@@ -583,9 +584,8 @@ async function openStudio(page: Page, avatarName?: string): Promise<void> {
   }
   await page.locator('#studio-video-button').click();
   if (avatarName !== undefined) {
-    await expect(
-      page.locator(`.person-preview h2:has-text("${avatarName}")`),
-    ).toBeVisible();
+    await expect(page.locator('#text-mode-panel')).toBeVisible();
+    await expect(page.locator('.person-preview:visible')).toHaveCount(0);
   } else {
     await expect(page.locator('#text-mode-panel')).toBeVisible();
   }
@@ -602,7 +602,7 @@ async function assertStudioAvatarLayout(page: Page, viewName: string): Promise<v
   const image = page.locator('.person-preview .avatar-image img');
   await image.scrollIntoViewIfNeeded();
   await expect(image).toBeVisible();
-  await expect(page.locator('.person-preview .reference-label')).toHaveCount(0);
+  await expect(page.locator('.person-preview .reference-label')).toHaveCount(1);
   await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0);
 
@@ -818,14 +818,14 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.locator('#studio-image-button').click();
     await expect(page!.locator('#image-main-panel')).toBeVisible();
     await expect(page!.locator('#studio-image-button')).toHaveAttribute('aria-current', 'page');
-    await page!.fill('#image-prompt', 'Keep the image draft while collapsed.');
+    await page!.fill('#text-image-prompt', 'Keep the image draft while collapsed.');
 
     await parent.focus();
     await page!.keyboard.press('Enter');
     await expect(parent).toHaveAttribute('aria-expanded', 'false');
     await expect(parent).toBeFocused();
     await expect(page!.locator('#studio-mode-navigation')).toBeHidden();
-    await expect(page!.locator('#image-prompt')).toHaveValue(
+    await expect(page!.locator('#text-image-prompt')).toHaveValue(
       'Keep the image draft while collapsed.',
     );
 
@@ -1010,10 +1010,28 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
       const jobId = (await jobLocator.textContent())!;
       await waitForStableStatus(page!, jobId, 'done');
+      await expect(page!.getByLabel('生成视频结果')).toBeVisible();
       expect(comfyMock.submittedPromptIds).toHaveLength(submittedBefore + 1);
       const submitted = comfyMock.submittedPrompts[submittedBefore];
       const promptNode = submitted.prompt['42'] as { inputs: { prompt: string } };
       expect(promptNode.inputs.prompt).toBe('Keep audio video draft.');
+      if (format === 'wav') {
+        await page!.click('nav[aria-label="主导航"] button:has-text("数字模特")');
+        const avatarItem = page!.locator('.avatar-list article').filter({ hasText: avatarName });
+        await avatarItem.getByRole('button', { name: `删除 ${avatarName}` }).click();
+        await page!.getByRole('button', { name: '确认删除' }).click();
+        await expect(avatarItem).toHaveCount(0);
+
+        await page!.click('nav[aria-label="主导航"] button:has-text("我的作品")');
+        const preservedWork = page!.locator('.works-list article').filter({ hasText: jobId });
+        await expect(preservedWork.locator('video')).toBeVisible();
+        const preserved = await page!.evaluate(async (id) => {
+          const works = await (window as unknown as SmoGlobal).smo.works.list();
+          return works.find((work) => work.id === id);
+        }, jobId);
+        expect(preserved).toMatchObject({ avatarId: null, title: avatarName });
+        expect(await readdir(join(outputDirectory, 'SMO-H3', jobId))).not.toHaveLength(0);
+      }
     });
   }
 
@@ -1046,6 +1064,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.click('#text-mode-panel button:has-text("生成视频")');
     const originalJobId = await readVisibleTextJobId(page!);
     await waitForStableStatus(page!, originalJobId, 'done');
+    await expect(page!.getByLabel('生成视频结果')).toBeVisible();
 
     expect(comfyMock.uploadedImages).toEqual([]);
     expect(comfyMock.submittedPrompts).toHaveLength(1);
@@ -1224,6 +1243,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.click('#reference-mode-panel button:has-text("生成视频")');
     const jobId = await readVisibleReferenceJobId(page!);
     await waitForStableStatus(page!, jobId, 'done');
+    await expect(page!.getByLabel('生成视频结果')).toBeVisible();
     expect(comfyMock.submittedPromptIds).toHaveLength(previousCount + 1);
     expect(comfyMock.uploadedImages.map((image) => image.filename)).toEqual([
       `${jobId}-0.png`,
@@ -1499,7 +1519,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(page.locator('#image-main-panel')).toBeVisible();
     await expect(page.locator('.person-preview:visible')).toHaveCount(0);
     await expect(page.locator('#image-main-panel button:has-text("生成图像")')).toBeEnabled();
-    await page.fill('#image-prompt', 'A clean geometric image from the simulated backend.');
+    await page.fill('#text-image-prompt', 'A clean geometric image from the simulated backend.');
     await page.selectOption('#image-aspect', '16:9 (Widescreen)');
     await page.selectOption('#image-resolution', '1');
     await page.fill('#image-seed', '7');
@@ -1512,6 +1532,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
     const jobId = (await jobLocator.textContent())!;
     await waitForStableStatus(page, jobId, 'done');
+    await expect(page.getByLabel('生成图像结果')).toBeVisible();
     const outputPath = join(outputDirectory, 'SMO-Image', `${jobId}_00001.png`);
     expect(existsSync(outputPath)).toBe(true);
 
@@ -1627,8 +1648,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     const prompt = 'One ordered landscape reference at 1MP.';
     await page.click('#studio-image-button');
-    await page.fill('#image-prompt', prompt);
+    await page.fill('#text-image-prompt', prompt);
     await page.click('#reference-image-tab');
+    await page.fill('#reference-image-prompt', prompt);
     await page.getByRole('button', { name: '选择参考图', exact: true }).click();
     const referencePreview = page.getByRole('img', {
       name: '参考图 1：reference-1.png',
@@ -1639,9 +1661,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     ).toBe(1600);
 
     await page.click('#text-image-tab');
-    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await expect(page.locator('#text-image-prompt')).toHaveValue(prompt);
     await page.click('#reference-image-tab');
-    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await expect(page.locator('#reference-image-prompt')).toHaveValue(prompt);
     await expect(page.locator('#image-main-panel .reference-image-preview img')).toHaveCount(1);
     await expect(referencePreview).toBeVisible();
     await page.selectOption('#image-resolution', '1');
@@ -1787,8 +1809,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     const prompt = 'Four ordered references with a square first image at 4MP.';
     await page.click('#studio-image-button');
-    await page.fill('#image-prompt', prompt);
+    await page.fill('#text-image-prompt', prompt);
     await page.click('#reference-image-tab');
+    await page.fill('#reference-image-prompt', prompt);
     for (const [index, definition] of referenceDefinitions.entries()) {
       const selectButton = page.getByRole('button', {
         name: '选择参考图',
@@ -1817,9 +1840,9 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     ).toBeDisabled();
 
     await page.click('#text-image-tab');
-    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await expect(page.locator('#text-image-prompt')).toHaveValue(prompt);
     await page.click('#reference-image-tab');
-    await expect(page.locator('#image-prompt')).toHaveValue(prompt);
+    await expect(page.locator('#reference-image-prompt')).toHaveValue(prompt);
     await expect(page.locator('#image-main-panel .reference-image-count')).toHaveText('4 / 4');
     await expect(page.locator('#image-main-panel .reference-image-preview img')).toHaveCount(4);
     await page.selectOption('#image-resolution', '4');
@@ -1832,7 +1855,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     await setViewport(app, page, 960, 640);
     await assertViewLayout(page, 'studio-reference-four-960x640', [
-      '#image-prompt',
+      '#reference-image-prompt',
       '#image-main-panel .reference-image-picker',
       '#image-resolution',
       '#image-steps',
@@ -1962,6 +1985,186 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     for (const [index, referencePath] of referencePaths.entries()) {
       expect(await readFile(referencePath)).toEqual(originalReferences[index]);
     }
+  });
+
+  test('三脚猫发送真实附件并在重启后恢复旧会话、草稿和附件', async () => {
+    const testInfo = test.info();
+    const attachmentDirectory = join(tempDirectory!, 'sanmao-attachments');
+    const imagePath = join(attachmentDirectory, 'reference.png');
+    const textPath = join(attachmentDirectory, 'brief.txt');
+    await mkdir(attachmentDirectory, { recursive: true });
+    await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 32, g: 120, b: 110 },
+      },
+    }).png().toFile(imagePath);
+    await writeFile(textPath, '重启后仍应可读取的附件内容', 'utf8');
+
+    await app!.close();
+    app = undefined;
+    page = undefined;
+    imageServiceProbeEntry = await createImageServiceProbeEntry();
+    app = await launchApp({
+      ...launchOptions,
+      appPath: imageServiceProbeEntry,
+      fileDialogPaths: [imagePath, textPath],
+    });
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    type QueryInput = {
+      prompt: string | AsyncIterable<unknown>;
+      options: { effort?: string };
+    };
+    await expect.poll(() => app!.evaluate(() =>
+      Object.hasOwn(process, '__smoImageE2eServices'),
+    )).toBe(true);
+    await app.evaluate(() => {
+      const probe = process as unknown as {
+        __smoImageE2eServices?: {
+          sanmao: { queryImpl: (input: QueryInput) => AsyncIterable<unknown> };
+        };
+        __smoSanmaoQueries?: QueryInput[];
+      };
+      const services = probe.__smoImageE2eServices;
+      if (!services) throw new Error('Sanmao service probe is unavailable');
+      probe.__smoSanmaoQueries = [];
+      services.sanmao.queryImpl = (input) => {
+        probe.__smoSanmaoQueries!.push(input);
+        return (async function* () {
+          yield {
+            type: 'stream_event',
+            event: {
+              type: 'content_block_delta',
+              delta: { type: 'text_delta', text: '这是模拟三脚猫回复' },
+            },
+          };
+          yield {
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            result: '这是模拟三脚猫回复',
+          };
+        })();
+      };
+    });
+    await page.reload();
+    await page.evaluate(async (apiKey) => {
+      await (window as unknown as {
+        smo: { sanmao: { saveProfile(input: unknown): Promise<void> } };
+      }).smo.sanmao.saveProfile({
+        baseUrl: 'https://claude.test',
+        model: 'claude-a',
+        apiKey,
+      });
+    }, TEST_LLM_API_KEY);
+
+    await page.click('nav[aria-label="主导航"] button:has-text("三脚猫")');
+    const messageInput = page.getByLabel('发送给三脚猫的消息');
+    await expect(messageInput).toBeVisible();
+    await page.getByRole('button', { name: '添加附件' }).click();
+    await expect(page.locator('.sanmao-attachment-list')).toContainText('reference.png');
+    await page.getByLabel('思考深度').selectOption('high');
+    await messageInput.fill('分析这张参考图');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await expect(page.getByText('这是模拟三脚猫回复')).toBeVisible();
+
+    const query = await app.evaluate(async () => {
+      const probe = process as unknown as { __smoSanmaoQueries?: QueryInput[] };
+      const input = probe.__smoSanmaoQueries?.[0];
+      if (!input) throw new Error('No Sanmao query was captured');
+      const content: unknown[] = [];
+      if (typeof input.prompt === 'string') {
+        content.push({ type: 'text', text: input.prompt });
+      } else {
+        for await (const message of input.prompt) {
+          content.push(...(message as { message: { content: unknown[] } }).message.content);
+        }
+      }
+      return { effort: input.options.effort, content };
+    });
+    expect(query.effort).toBe('high');
+    expect(query.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'text', text: expect.stringContaining('分析这张参考图') }),
+      expect.objectContaining({
+        type: 'image',
+        source: expect.objectContaining({ type: 'base64', media_type: 'image/png' }),
+      }),
+    ]));
+    expect(JSON.stringify(query.content)).not.toContain(attachmentDirectory);
+
+    await page.getByRole('button', { name: '添加附件' }).click();
+    await expect(page.locator('.sanmao-attachment-list')).toContainText('brief.txt');
+    await messageInput.fill('重启后保留这段草稿');
+    await expect.poll(() => page!.evaluate(async () => {
+      const api = (window as unknown as {
+        smo: { sanmao: {
+          listConversations(): Promise<Array<{ id: string }>>;
+          getConversation(id: string): Promise<{
+            draft: string;
+            draftAttachments: Array<{ name: string }>;
+          } | null>;
+        } };
+      }).smo.sanmao;
+      const conversations = await api.listConversations();
+      if (conversations.length === 0) return null;
+      const current = await api.getConversation(conversations[0].id);
+      return current === null ? null : {
+        draft: current.draft,
+        attachments: current.draftAttachments.map((attachment) => attachment.name),
+      };
+    })).toEqual({ draft: '重启后保留这段草稿', attachments: ['brief.txt'] });
+
+    await app.close();
+    app = undefined;
+    page = undefined;
+    app = await launchApp({
+      ...launchOptions,
+      appPath: imageServiceProbeEntry,
+      fileDialogPaths: [],
+    });
+    attachMainProcessLogs(app, mainProcessRaw);
+    app.on('window', (windowPage) =>
+      attachRendererLogs(windowPage, pageErrors, consoleErrors, rendererLogs),
+    );
+    page = await app.firstWindow();
+    await page.click('nav[aria-label="主导航"] button:has-text("三脚猫")');
+    await page.getByRole('button', { name: /^分析这张参考图/ }).click();
+    await expect(page.getByText('这是模拟三脚猫回复')).toBeVisible();
+    await expect(page.getByLabel('发送给三脚猫的消息')).toHaveValue('重启后保留这段草稿');
+    await expect(page.locator('.sanmao-attachment-list')).toContainText('brief.txt');
+    const composerLayout = await page.evaluate(() => {
+      const log = document.querySelector('.sanmao-message-log')!.getBoundingClientRect();
+      const composer = document.querySelector('.sanmao-composer')!.getBoundingClientRect();
+      const main = document.querySelector('.main-content')!;
+      const mainRect = main.getBoundingClientRect();
+      return {
+        logBottom: log.bottom,
+        composerTop: composer.top,
+        composerBottom: composer.bottom,
+        composerMarginBottom: Number.parseFloat(
+          getComputedStyle(document.querySelector('.sanmao-composer')!).marginBottom,
+        ),
+        mainContentBottom: mainRect.bottom - Number.parseFloat(getComputedStyle(main).paddingBottom),
+        viewportHeight: window.innerHeight,
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+      };
+    });
+    expect(composerLayout.composerTop).toBeGreaterThanOrEqual(composerLayout.logBottom);
+    expect(composerLayout.composerBottom).toBeLessThanOrEqual(composerLayout.viewportHeight);
+    expect(composerLayout.composerBottom + composerLayout.composerMarginBottom)
+      .toBeCloseTo(composerLayout.mainContentBottom, 1);
+    expect(composerLayout.overflow).toBe(false);
+    await page.screenshot({ path: testInfo.outputPath('sanmao-history-restored.png') });
+
+    await page.getByRole('button', { name: '删除会话 分析这张参考图' }).click();
+    await page.getByRole('button', { name: '确认删除' }).click();
+    await expect(page.getByRole('button', { name: /^分析这张参考图/ })).toHaveCount(0);
   });
 
   test('works list combines hierarchical mode and status filters', async () => {
@@ -2250,9 +2453,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       // text mode explicitly instead of relying on an implicit reset.
       await page!.click('#text-mode-tab');
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
-      await assertStudioAvatarLayout(page!, `studio-${viewport.width}x${viewport.height}`);
+      await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
       await assertViewLayout(page!, 'studio-text', [
-        '.person-preview .avatar-image img',
         '#reference-mode-tab',
         '#original-text',
         '#polished-tab',
@@ -2261,6 +2463,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
       await page!.click('#audio-mode-tab');
       await expect(page!.locator('#audio-mode-panel')).toBeVisible();
+      await assertStudioAvatarLayout(page!, `studio-audio-${viewport.width}x${viewport.height}`);
       await assertViewLayout(page!, 'studio-audio', [
         '#audio-mode-tab',
         '#audio-mode-panel .button-generate',
@@ -2270,14 +2473,14 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       await expect(page!.locator('#image-main-panel')).toBeVisible();
       await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
       await assertViewLayout(page!, 'studio-image', [
-        '#image-prompt',
+        '#text-image-prompt',
         '#image-aspect',
         '#image-resolution',
         '#image-seed',
         '#image-steps',
         '#image-main-panel .button-generate',
       ], [
-        { selector: 'label[for="image-prompt"]', text: '图像提示词' },
+        { selector: 'label[for="text-image-prompt"]', text: '图像提示词' },
         { selector: 'label[for="image-aspect"]', text: '图像比例' },
         { selector: 'label[for="image-resolution"]', text: '分辨率' },
         { selector: 'label[for="image-seed"]', text: '随机种子' },
@@ -2375,9 +2578,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
 
     await page!.locator('#studio-video-button').click();
     await expect(page!.locator('#text-mode-panel')).toBeVisible();
-    await assertStudioAvatarLayout(page!, 'studio-200-zoom');
+    await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
     await assertViewLayout(page!, 'studio-200-zoom', [
-      '.person-preview .avatar-image img',
       '#reference-mode-tab',
       '#original-text',
       '#text-mode-panel .button-generate',
@@ -2386,14 +2588,14 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.click('#studio-image-button');
     await expect(page!.locator('#image-main-panel')).toBeVisible();
     await assertViewLayout(page!, 'studio-image-200-zoom', [
-      '#image-prompt',
+      '#text-image-prompt',
       '#image-aspect',
       '#image-resolution',
       '#image-seed',
       '#image-steps',
       '#image-main-panel .button-generate',
     ], [
-      { selector: 'label[for="image-prompt"]', text: '图像提示词' },
+      { selector: 'label[for="text-image-prompt"]', text: '图像提示词' },
       { selector: 'label[for="image-aspect"]', text: '图像比例' },
       { selector: 'label[for="image-resolution"]', text: '分辨率' },
       { selector: 'label[for="image-seed"]', text: '随机种子' },
@@ -2412,6 +2614,61 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       '#image-resolution',
       '1024 × 1024 px',
     );
+  });
+
+  test('设置概览在宽屏分栏、960px 下堆叠且无横向溢出', async () => {
+    const testInfo = test.info();
+    await page!.click('nav[aria-label="主导航"] button:has-text("设置")');
+    const overview = page!.getByRole('region', { name: '设置概览' });
+    const environment = page!.getByRole('region', { name: '生成环境' });
+    const aiServices = page!.getByRole('region', { name: 'AI 服务' });
+    await expect(overview).toBeVisible();
+    await expect(environment).toBeVisible();
+    await expect(aiServices).toBeVisible();
+
+    await setViewport(app!, page!, 1280, 820);
+    const wide = await page!.evaluate(() => {
+      const overviewRect = document.querySelector('.settings-overview')!.getBoundingClientRect();
+      const workspaceRect = document.querySelector('.settings-workspace')!.getBoundingClientRect();
+      const environmentRect = document.querySelector('.settings-environment')!.getBoundingClientRect();
+      const aiRect = document.querySelector('.settings-ai-services')!.getBoundingClientRect();
+      return {
+        overviewWidth: overviewRect.width,
+        workspaceWidth: workspaceRect.width,
+        environmentRight: environmentRect.right,
+        aiLeft: aiRect.left,
+        columns: getComputedStyle(document.querySelector('.settings-workspace')!).gridTemplateColumns,
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+      };
+    });
+    expect(wide.overviewWidth).toBeCloseTo(wide.workspaceWidth, 1);
+    expect(wide.aiLeft).toBeGreaterThan(wide.environmentRight);
+    expect(wide.columns.split(' ')).toHaveLength(2);
+    expect(wide.overflow).toBe(false);
+    await page!.screenshot({ path: testInfo.outputPath('settings-1280.png') });
+
+    await setZoomedViewport(app!, page!, 940, 720, 960);
+    await expect.poll(() => page!.evaluate(() => ({
+      withinBreakpoint: window.innerWidth <= 960 && matchMedia('(max-width: 960px)').matches,
+      columns: getComputedStyle(document.querySelector('.settings-workspace')!)
+        .gridTemplateColumns.split(' ').length,
+    }))).toMatchObject({ withinBreakpoint: true, columns: 1 });
+    const narrow = await page!.evaluate(() => {
+      const environmentRect = document.querySelector('.settings-environment')!.getBoundingClientRect();
+      const aiRect = document.querySelector('.settings-ai-services')!.getBoundingClientRect();
+      return {
+        environmentBottom: environmentRect.bottom,
+        aiTop: aiRect.top,
+        columns: getComputedStyle(document.querySelector('.settings-workspace')!).gridTemplateColumns,
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+      };
+    });
+    expect(narrow.aiTop).toBeGreaterThanOrEqual(narrow.environmentBottom);
+    expect(narrow.columns.split(' ')).toHaveLength(1);
+    expect(narrow.overflow).toBe(false);
+    await page!.getByText('高级工作流设置', { exact: true }).click();
+    await expect(page!.getByLabel('模型目录')).toBeVisible();
+    await page!.screenshot({ path: testInfo.outputPath('settings-960.png') });
   });
 
   test('window maximize round trip toggles the rounded frame', async () => {

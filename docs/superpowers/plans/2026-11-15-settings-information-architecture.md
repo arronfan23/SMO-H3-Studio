@@ -45,23 +45,23 @@ git commit -m "Organize settings by runtime overview and workflows"
 
 ### 任务 2：专业布局与响应式状态
 
-- [ ] **步骤 1：编写布局失败测试**
+- [x] **步骤 1：编写布局失败测试**
 
 在 `tests/e2e/studio.spec.ts` 验证顶部状态概览全宽、两栏分区在宽屏不重叠，960px 以下单栏；按钮、错误和保存状态位于对应分组，没有横向溢出或嵌套卡片。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npm run test:e2e -- tests/e2e/studio.spec.ts -t "设置概览|设置页|settings"`
 
-- [ ] **步骤 3：实现样式**
+- [x] **步骤 3：实现样式**
 
 新增 `settings-overview`、`settings-workspace`、`settings-environment`、`settings-ai-services`、`settings-advanced` 样式。概览使用全宽摘要行，两栏使用 `minmax(0, 1.1fr) minmax(0, .9fr)`，960px 以下单列。统一按钮、状态、展开区和焦点样式，避免嵌套卡片和装饰动效。
 
-- [ ] **步骤 4：运行布局回归**
+- [x] **步骤 4：运行布局回归**
 
 运行：`npm run test:e2e -- tests/e2e/studio.spec.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/renderer/styles.css tests/e2e/studio.spec.ts
@@ -79,6 +79,8 @@ npm run test:e2e -- tests/e2e/studio.spec.ts
 npm run test:e2e:package
 ```
 
-- [ ] **步骤 2：检查工作树并提交**
+验证记录：68 个单元测试文件共 2860 通过、1 跳过，Electron 28/28 通过，类型检查与生产构建通过。本次未重新打包，因此 `test:e2e:package` 留待明确发起安装包构建后执行。
+
+- [x] **步骤 2：检查工作树并提交**
 
 确认仅本计划相关代码、测试和计划文件进入提交，保留环境向导和缓存改动。
