@@ -190,6 +190,41 @@ describe('图像工作区', () => {
     expect(document.querySelectorAll('#image-resolution')).toHaveLength(1);
   });
 
+  test('文字生图与参考生图的提示词独立保留并分别提交', async () => {
+    const { panel } = await renderImage();
+    await waitForImageReady();
+
+    fireEvent.change(panel.getByLabelText('图像提示词'), {
+      target: { value: '文字模式提示词 A' },
+    });
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
+
+    const referencePrompt = panel.getByLabelText('图像提示词');
+    expect(referencePrompt).toHaveValue('');
+    expect(referencePrompt).toHaveAttribute('id', 'reference-image-prompt');
+    fireEvent.change(referencePrompt, {
+      target: { value: '参考模式提示词 B' },
+    });
+    await addReference(panel, 'G:\\refs\\independent-prompt.png');
+    await loadFirstReference(panel, 1920, 1080);
+    fireEvent.click(panel.getByRole('button', { name: '生成图像' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: '参考模式提示词 B' }),
+    ));
+
+    fireEvent.click(panel.getByRole('tab', { name: '文字生图' }));
+    const textPrompt = panel.getByLabelText('图像提示词');
+    expect(textPrompt).toHaveValue('文字模式提示词 A');
+    expect(textPrompt).toHaveAttribute('id', 'text-image-prompt');
+    fireEvent.click(panel.getByRole('button', { name: '生成图像' }));
+    await waitFor(() => expect(smo.jobs.start).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: '文字模式提示词 A' }),
+    ));
+
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
+    expect(panel.getByLabelText('图像提示词')).toHaveValue('参考模式提示词 B');
+  });
+
   test('参考生图没有参考图时说明原因且不能提交', async () => {
     const { panel } = await renderImage();
     await waitForImageReady();
@@ -221,10 +256,10 @@ describe('图像工作区', () => {
   test('参考生图按横向首图自然比例提交 1MP 尺寸和路径', async () => {
     const { panel } = await renderImage();
     await waitForImageReady();
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     fireEvent.change(panel.getByLabelText('图像提示词'), {
       target: { value: '  根据首图延伸画面  ' },
     });
-    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     await addReference(panel, 'G:\\refs\\landscape.png');
     await loadFirstReference(panel, 1920, 1080);
 
@@ -247,10 +282,10 @@ describe('图像工作区', () => {
   test('参考生图按竖向首图自然比例提交尺寸', async () => {
     const { panel } = await renderImage();
     await waitForImageReady();
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     fireEvent.change(panel.getByLabelText('图像提示词'), {
       target: { value: '竖图参考生图' },
     });
-    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     await addReference(panel, 'G:\\refs\\portrait.png');
     await loadFirstReference(panel, 1200, 1600);
     fireEvent.click(panel.getByRole('button', { name: '生成图像' }));
@@ -266,10 +301,10 @@ describe('图像工作区', () => {
   ])('参考生图横向首图 %iMP 使用首图比例和具体像素', async (mp, width, height) => {
     const { panel } = await renderImage();
     await waitForImageReady();
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     fireEvent.change(panel.getByLabelText('图像提示词'), {
       target: { value: `${mp}MP 参考生图` },
     });
-    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     await addReference(panel, 'G:\\refs\\landscape.png');
     await loadFirstReference(panel, 1920, 1080);
 
@@ -319,10 +354,10 @@ describe('图像工作区', () => {
   test('无效 MP 可改回有效档位并恢复提交', async () => {
     const { panel } = await renderImage();
     await waitForImageReady();
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     fireEvent.change(panel.getByLabelText('图像提示词'), {
       target: { value: '调整 MP 恢复提交' },
     });
-    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     await addReference(panel, 'G:\\refs\\wide.png');
     await loadFirstReference(panel, 10000, 1000);
 
@@ -348,10 +383,10 @@ describe('图像工作区', () => {
     const paths = Array.from({ length: 4 }, (_, index) => `G:\\refs\\ordered-${index + 1}.png`);
     const { panel } = await renderImage();
     await waitForImageReady();
+    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     fireEvent.change(panel.getByLabelText('图像提示词'), {
       target: { value: '四张参考图保持顺序' },
     });
-    fireEvent.click(panel.getByRole('tab', { name: '参考生图' }));
     for (const path of paths) {
       await addReference(panel, path);
     }
@@ -846,7 +881,7 @@ describe('图像工作区', () => {
     expect(await within(speechPanel).findByText('speech-reference.wav')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled());
     fireEvent.click(screen.getByRole('tab', { name: '视频' }));
-    expect(screen.getByRole('region', { name: '当前人物预览' })).toBeVisible();
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '生成视频' })).toBeEnabled();
   });
 

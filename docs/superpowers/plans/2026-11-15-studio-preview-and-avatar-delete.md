@@ -75,23 +75,23 @@ git commit -m "Preview generated media in the studio"
 
 ### 任务 3：独立文字与参考生图提示词
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/image-form.test.tsx` 写入文字提示词 A，切到参考生图，断言输入框为空；写入参考提示词 B，切回文字生图，断言仍为 A。分别提交并断言 text 模式发送 A、reference 模式发送 B。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/image-form.test.tsx -t "提示词独立|独立提示词"`
 
-- [ ] **步骤 3：分离状态和输入框**
+- [x] **步骤 3：分离状态和输入框**
 
 将 `prompt` 改为 `textPrompt` 和 `referencePrompt`，使用 `text-image-prompt` 与 `reference-image-prompt` 两个 ID。当前模式的值用于 trim 和提交，切换只切换显示，不互相同步。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/image-form.test.tsx && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/renderer/ImageForm.tsx tests/unit/image-form.test.tsx

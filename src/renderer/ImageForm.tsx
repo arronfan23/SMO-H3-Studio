@@ -61,7 +61,8 @@ export function ImageForm({
   const [imageMode, setImageMode] = useState<ImageMode>('text');
   const [referenceImagePaths, setReferenceImagePaths] = useState<string[]>([]);
   const [referenceSelectionVersion, setReferenceSelectionVersion] = useState(0);
-  const [prompt, setPrompt] = useState('');
+  const [textPrompt, setTextPrompt] = useState('');
+  const [referencePrompt, setReferencePrompt] = useState('');
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('1:1 (Square)');
   const [megapixels, setMegapixels] = useState<ImageResolutionMegapixels>(
     DEFAULT_IMAGE_RESOLUTION_MP,
@@ -106,6 +107,7 @@ export function ImageForm({
         megapixels,
       )
     : null;
+  const prompt = imageMode === 'text' ? textPrompt : referencePrompt;
   const referenceResolutionError = referenceResolution !== null &&
     !isValidImageResolution(referenceResolution)
     ? invalidImageResolutionMessage(referenceResolution, megapixels)
@@ -565,13 +567,21 @@ export function ImageForm({
         </div>
 
         <div className="field">
-          <label htmlFor="image-prompt">图像提示词</label>
+          <label htmlFor={imageMode === 'text' ? 'text-image-prompt' : 'reference-image-prompt'}>
+            图像提示词
+          </label>
           <textarea
-            id="image-prompt"
+            id={imageMode === 'text' ? 'text-image-prompt' : 'reference-image-prompt'}
             rows={7}
             value={prompt}
             placeholder="描述主体、环境、构图、光线和色彩"
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => {
+              if (imageMode === 'text') {
+                setTextPrompt(event.target.value);
+              } else {
+                setReferencePrompt(event.target.value);
+              }
+            }}
           />
         </div>
 
