@@ -363,8 +363,35 @@ export function SettingsPage({
       {loading ? (
         <div className="page-state">正在检测服务与配置…</div>
       ) : (
-        <div className="settings-grid">
-          <section className="settings-section">
+        <>
+          <section className="settings-overview" aria-label="设置概览">
+            <div className="settings-overview-item">
+              <span>ComfyUI</span>
+              <strong>{health ? '已连接' : '未连接'}</strong>
+              <small>{health ? `${health.devices.length} 个可用设备` : '需要启动或检查服务'}</small>
+            </div>
+            <div className="settings-overview-item">
+              <span>硬件</span>
+              <strong>{hardwareInfo?.gpu ?? '尚未检测'}</strong>
+              <small>
+                {hardwareInfo
+                  ? `${formatGiB(hardwareInfo.vramGiB)} 显存 · ${formatGiB(hardwareInfo.ramGiB)} 内存`
+                  : '检测后可查看推荐工作流'}
+              </small>
+            </div>
+            <div className="settings-overview-item">
+              <span>应用版本</span>
+              <strong>{appVersion ?? '版本未知'}</strong>
+              <small>SMO.H3 Studio</small>
+            </div>
+          </section>
+          <div className="settings-workspace">
+            <section className="settings-environment" aria-label="生成环境">
+              <div className="settings-group-heading">
+                <span className="page-kicker">本地运行</span>
+                <h3>生成环境</h3>
+              </div>
+              <section className="settings-section">
             <span className="page-kicker">硬件与工作流</span>
             <h3>硬件配置</h3>
             <div className="settings-actions">
@@ -376,15 +403,6 @@ export function SettingsPage({
               >
                 <Cpu size={16} aria-hidden="true" />
                 {hardwareAction === "detect" ? "正在检测…" : "检测硬件"}
-              </button>
-              <button
-                className="button button-secondary"
-                type="button"
-                disabled={hardwareAction !== null}
-                onClick={() => void resetHardware()}
-              >
-                <RotateCcw size={16} aria-hidden="true" />
-                {hardwareAction === "reset" ? "正在恢复…" : "恢复默认"}
               </button>
             </div>
             <p className="form-notice">
@@ -402,22 +420,34 @@ export function SettingsPage({
                 <dt>空闲磁盘</dt><dd>{formatGiB(hardwareInfo.freeDiskGiB)}</dd>
               </dl>
             )}
-            <div className="field">
-              <label htmlFor="hardware-mode">应用模式</label>
-              <select
-                id="hardware-mode"
-                value={hardwareMode}
-                disabled={hardwareAction !== null}
-                onChange={(event) => {
-                  setHardwareMode(event.target.value as VideoMode);
-                  setHardwareResult(null);
-                  setHardwareError(null);
-                }}
-              >
-                <option value="text">文本生视频</option>
-                <option value="audio">音频数字人</option>
-              </select>
-            </div>
+            <details className="settings-advanced">
+              <summary>高级工作流设置</summary>
+              <div className="settings-advanced-content">
+                <div className="field">
+                  <label htmlFor="hardware-mode">应用模式</label>
+                  <select
+                    id="hardware-mode"
+                    value={hardwareMode}
+                    disabled={hardwareAction !== null}
+                    onChange={(event) => {
+                      setHardwareMode(event.target.value as VideoMode);
+                      setHardwareResult(null);
+                      setHardwareError(null);
+                    }}
+                  >
+                    <option value="text">文本生视频</option>
+                    <option value="audio">音频数字人</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="hardware-model-directory">模型目录</label>
+                  <input
+                    id="hardware-model-directory"
+                    value={modelDirectory}
+                    disabled={hardwareAction !== null}
+                    onChange={(event) => setModelDirectory(event.target.value)}
+                  />
+                </div>
             {recommendation && (
               <div>
                 <dl className="status-details">
@@ -433,15 +463,6 @@ export function SettingsPage({
                 {recommendation.preset === "high-memory-candidate" && (
                   <p className="form-notice">高显存候选配置，尚未实测。</p>
                 )}
-                <div className="field">
-                  <label htmlFor="hardware-model-directory">模型目录</label>
-                  <input
-                    id="hardware-model-directory"
-                    value={modelDirectory}
-                    disabled={hardwareAction !== null}
-                    onChange={(event) => setModelDirectory(event.target.value)}
-                  />
-                </div>
                 <div className="settings-actions">
                   <button
                     className="button button-primary"
@@ -455,14 +476,27 @@ export function SettingsPage({
                 </div>
               </div>
             )}
+                <div className="settings-actions settings-advanced-reset">
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    disabled={hardwareAction !== null}
+                    onClick={() => void resetHardware()}
+                  >
+                    <RotateCcw size={16} aria-hidden="true" />
+                    {hardwareAction === "reset" ? "正在恢复…" : "恢复默认"}
+                  </button>
+                </div>
+              </div>
+            </details>
             {hardwareResult && (
               <p className="form-notice" role="status">
                 {hardwareResult.kind === "applied" ? "已应用工作流副本：" : "已恢复默认工作流："}
                 {hardwareResult.path}
               </p>
             )}
-          </section>
-          <section className="settings-section">
+              </section>
+              <section className="settings-section">
             <span className="page-kicker">生成服务</span>
             <h3>{health ? 'ComfyUI 连接正常' : 'ComfyUI 不可用'}</h3>
             {healthError && <p className="form-error" role="alert">{healthError}</p>}
@@ -499,9 +533,14 @@ export function SettingsPage({
                 {startingComfy ? '正在启动…' : '启动 ComfyUI'}
               </button>
             )}
-          </section>
-          <div className="settings-ai-tabs">
-            <span className="page-kicker">AI 服务</span>
+              </section>
+            </section>
+            <section className="settings-ai-services" aria-label="AI 服务">
+              <div className="settings-group-heading">
+                <span className="page-kicker">云端能力</span>
+                <h3>AI 服务</h3>
+              </div>
+              <div className="settings-ai-tabs">
             <div className="tab-list" role="tablist" aria-label="AI 服务">
               <button
                 id="ai-polish-tab"
@@ -524,7 +563,7 @@ export function SettingsPage({
                 三脚猫
               </button>
             </div>
-          </div>
+              </div>
           <section
             id="ai-sanmao-panel"
             className="settings-section"
@@ -660,7 +699,9 @@ export function SettingsPage({
             )}
             {llmStatus.kind === 'error' && <p className="form-error" role="alert">{llmStatus.message}</p>}
           </section>
-        </div>
+            </section>
+          </div>
+        </>
       )}
       <footer className="settings-version">
         SMO.H3 Studio · {appVersion === null ? '版本未知' : `版本 ${appVersion}`}

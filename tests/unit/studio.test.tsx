@@ -4531,8 +4531,10 @@ describe('generation options and hardware apply', () => {
     await renderStudio();
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     fireEvent.click(await screen.findByRole('button', { name: '检测硬件' }));
-    expect(await screen.findByText('NVIDIA GeForce RTX 5080')).toBeInTheDocument();
+    expect(await within(screen.getByRole('region', { name: '生成环境' }))
+      .findByText('NVIDIA GeForce RTX 5080')).toBeInTheDocument();
     expect(await screen.findByText('均衡模式')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('高级工作流设置'));
     const directoryInput = await screen.findByLabelText('模型目录');
     fireEvent.change(directoryInput, { target: { value: 'D:\\自定义模型目录' } });
 
@@ -4786,6 +4788,40 @@ describe('settings page app version', () => {
       await screen.findByText('SMO.H3 Studio · 版本未知'),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重新检测' })).toBeEnabled();
+  });
+});
+
+describe('设置页信息架构', () => {
+  test('显示运行概览、生成环境和 AI 服务分区并收起高级工作流', async () => {
+    smo.llm.getProfile.mockResolvedValue({
+      baseUrl: 'https://api.example.com/v1',
+      model: 'gpt-4o',
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    await screen.findByText('已配置 LLM');
+
+    const overview = screen.getByRole('region', { name: '设置概览' });
+    expect(within(overview).getByText('ComfyUI')).toBeInTheDocument();
+    expect(within(overview).getByText('硬件')).toBeInTheDocument();
+    expect(within(overview).getByText('应用版本')).toBeInTheDocument();
+    expect(within(overview).getByText('0.3.15-test')).toBeInTheDocument();
+
+    const environment = screen.getByRole('region', { name: '生成环境' });
+    expect(within(environment).getByRole('heading', { name: '硬件配置' })).toBeInTheDocument();
+    expect(within(environment).getByRole('button', { name: '检测硬件' })).toBeInTheDocument();
+    expect(within(environment).getByRole('heading', { name: 'ComfyUI 连接正常' }))
+      .toBeInTheDocument();
+
+    const aiServices = screen.getByRole('region', { name: 'AI 服务' });
+    expect(within(aiServices).getByRole('tablist', { name: 'AI 服务' })).toBeInTheDocument();
+    expect(within(aiServices).getByRole('tabpanel', { name: '文字润色' })).toBeInTheDocument();
+
+    const advanced = within(environment).getByText('高级工作流设置').closest('details');
+    expect(advanced).not.toHaveAttribute('open');
+    fireEvent.click(within(environment).getByText('高级工作流设置'));
+    expect(advanced).toHaveAttribute('open');
+    expect(within(advanced as HTMLElement).getByLabelText('模型目录')).toBeInTheDocument();
   });
 });
 

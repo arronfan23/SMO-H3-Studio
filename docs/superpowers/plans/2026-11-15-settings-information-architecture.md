@@ -20,23 +20,23 @@
 
 ### 任务 1：状态概览与分区
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/studio.test.tsx` 断言出现 `region[aria-label="设置概览"]`，包含 ComfyUI、硬件和应用版本；存在 `region[aria-label="生成环境"]` 和 `region[aria-label="AI 服务"]`，AI tab 仍在对应区域内，硬件高级操作位于 `details` 元素中。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/studio.test.tsx -t "设置概览|生成环境|AI 服务"`
 
-- [ ] **步骤 3：重构 SettingsPage 结构**
+- [x] **步骤 3：重构 SettingsPage 结构**
 
 在现有加载完成后渲染顶部 `settings-overview`，下方 `settings-workspace` 两栏。左栏包含硬件和 ComfyUI，右栏包含 AI tab 与面板。模型目录、应用推荐和恢复默认放入 `<details><summary>高级工作流设置</summary></details>`，不改变任何业务处理函数。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/studio.test.tsx && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/renderer/SettingsPage.tsx tests/unit/studio.test.tsx
