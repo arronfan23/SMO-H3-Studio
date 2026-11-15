@@ -210,16 +210,20 @@ describe('avatar library', () => {
     }, makeTemporaryDatabasePath());
   });
 
-  test('keeps an avatar and its work when deletion violates the foreign key', () => {
+  test('keeps an avatar and its active work when deletion is requested', () => {
     withStore((store) => {
       const avatar = store.createAvatar({
         name: 'Referenced',
         photoPath: 'avatars/referenced.png',
       });
-      const work = store.addWork(makeWork(avatar.id));
+      const work = store.addWork({
+        ...makeWork(avatar.id),
+        outputPath: null,
+        status: 'running',
+      });
 
       expect(() => store.deleteAvatar(avatar.id)).toThrow(
-        /cannot be deleted while works exist/i,
+        /cannot be deleted while works are active/i,
       );
       expect(store.listAvatars()).toEqual([avatar]);
       expect(store.listWorks()).toEqual([work]);
@@ -567,10 +571,6 @@ describe('schema initialization', () => {
         metadata: { workflowVersion: 'legacy-text.json', note: '保留' },
         error: 'Legacy error',
       });
-      expect(() => store.deleteAvatar('avatar-legacy')).toThrow(
-        /cannot be deleted while works exist/i,
-      );
-
       const speech = store.addWork({
         id: 'speech',
         avatarId: null,

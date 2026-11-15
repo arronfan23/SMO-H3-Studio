@@ -100,25 +100,25 @@ git commit -m "Keep text and reference image prompts independent"
 
 ### 任务 4：保留历史作品的数字模特删除
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/avatars.test.ts` 覆盖：有 done/failed 作品时可删除，未命名作品标题保留原模特名，`avatarId` 为 `NULL`，输出路径和媒体不变，照片删除，外键检查为空；pending/running 作品仍拒绝且模特与照片保留。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/avatars.test.ts -t "delete|删除|history|历史"`
 
 预期：当前抛出 `Avatar cannot be deleted while works exist`。
 
-- [ ] **步骤 3：实现删除事务和照片清理**
+- [x] **步骤 3：实现删除事务和照片清理**
 
 `Store.deleteAvatar` 在单个事务中检查活动作品，给无标题历史作品写入原模特名，解除 `avatarId`，删除模特并返回 avatar。`AvatarService.deleteAvatar` 仅在事务成功后执行受管路径照片删除。禁止关闭外键或删除作品。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/avatars.test.ts tests/unit/store.test.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/main/store.ts src/main/avatars.ts tests/unit/avatars.test.ts

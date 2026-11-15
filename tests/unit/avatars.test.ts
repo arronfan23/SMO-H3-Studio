@@ -11,6 +11,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest';
 import { AvatarService } from '../../src/main/avatars';
 import { FileService, type FileDialog } from '../../src/main/files';
@@ -28,7 +29,7 @@ describe('AvatarService', () => {
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'smo-avatars-'));
     avatarsDirectory = join(directory, 'managed-avatars');
-    store = new Store(':memory:');
+    store = new Store(join(directory, 'avatars.db'));
     registry = new MediaRegistry({
       avatarsDirectory,
       outputDirectory: join(directory, 'output'),
@@ -164,26 +165,99 @@ describe('AvatarService', () => {
     expect(await readdir(avatarsDirectory)).toEqual(['unrelated.png']);
   });
 
-  test('refuses deletion when works reference the avatar and keeps the photo', async () => {
+  test('preserves historical works and media when deleting their avatar', async () => {
     const source = join(directory, 'portrait.png');
     await writeFile(source, 'portrait');
     await registry.authorizeSelectedImage(source);
     const avatar = await service.createAvatar({ name: 'Referenced', photoPath: source });
-    const work = store.addWork({
-      id: 'work-1',
+    const outputPath = join(directory, 'output', 'historical.mp4');
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, 'generated-video');
+    const done = store.addWork({
+      id: 'work-done',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath,
+      status: 'done',
+    });
+    const failed = store.addWork({
+      id: 'work-failed',
       avatarId: avatar.id,
       mode: 'text',
       outputPath: null,
       status: 'failed',
+      title: '自定义作品名',
     });
 
-    await expect(service.deleteAvatar(avatar.id)).rejects.toThrow(
-      /cannot be deleted while works exist/i,
-    );
+    await service.deleteAvatar(avatar.id);
 
-    expect(store.listAvatars()).toEqual([avatar]);
-    expect(store.getWork(work.id)).toEqual(work);
-    expect(await readFile(avatar.photoPath, 'utf8')).toBe('portrait');
+    expect(store.listAvatars()).toEqual([]);
+    expect(store.getWork(done.id)).toEqual({
+      ...done,
+      avatarId: null,
+      title: avatar.name,
+    });
+    expect(store.getWork(failed.id)).toEqual({
+      ...failed,
+      avatarId: null,
+    });
+    expect(await readFile(outputPath, 'utf8')).toBe('generated-video');
+    await expect(readFile(avatar.photoPath, 'utf8')).rejects.toThrow();
+
+    const database = new DatabaseSync(join(directory, 'avatars.db'));
+    try {
+      expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  test.each(['pending', 'running'] as const)(
+    'refuses deletion while a %s work is active and keeps its photo',
+    async (status) => {
+      const source = join(directory, 'portrait.png');
+      await writeFile(source, 'portrait');
+      await registry.authorizeSelectedImage(source);
+      const avatar = await service.createAvatar({ name: 'Active', photoPath: source });
+      const work = store.addWork({
+        id: `work-${status}`,
+        avatarId: avatar.id,
+        mode: 'text',
+        outputPath: null,
+        status,
+      });
+
+      await expect(service.deleteAvatar(avatar.id)).rejects.toThrow(
+        /cannot be deleted while works are active/i,
+      );
+
+      expect(store.listAvatars()).toEqual([avatar]);
+      expect(store.getWork(work.id)).toEqual(work);
+      expect(await readFile(avatar.photoPath, 'utf8')).toBe('portrait');
+    },
+  );
+
+  test('preserves an explicitly blank historical title as the avatar name', async () => {
+    const source = join(directory, 'portrait.png');
+    await writeFile(source, 'portrait');
+    await registry.authorizeSelectedImage(source);
+    const avatar = await service.createAvatar({ name: 'Fallback', photoPath: source });
+    const work = store.addWork({
+      id: 'work-blank-title',
+      avatarId: avatar.id,
+      mode: 'text',
+      outputPath: null,
+      status: 'failed',
+      title: '   ',
+    });
+
+    await service.deleteAvatar(avatar.id);
+
+    expect(store.getWork(work.id)).toEqual({
+      ...work,
+      avatarId: null,
+      title: avatar.name,
+    });
   });
 
   test('never removes a directory even if a stored photo path points to one', async () => {

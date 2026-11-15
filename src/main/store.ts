@@ -222,22 +222,50 @@ export class Store {
   }
 
   deleteAvatar(id: string): Avatar {
-    const avatar = this.findAvatar(id);
-    if (avatar === null) {
-      throw new Error(`Avatar not found: ${id}`);
-    }
+    let transactionOpen = false;
+    try {
+      this.db.exec('BEGIN IMMEDIATE');
+      transactionOpen = true;
+      const avatar = this.findAvatar(id);
+      if (avatar === null) {
+        throw new Error(`Avatar not found: ${id}`);
+      }
+      const activeWork = this.db
+        .prepare(
+          `SELECT 1 AS active FROM works
+           WHERE avatarId = ? AND status IN ('pending', 'running')
+           LIMIT 1`,
+        )
+        .get(id);
+      if (activeWork !== undefined) {
+        throw new Error('Avatar cannot be deleted while works are active');
+      }
 
-    const result = this.db
-      .prepare(
-        `DELETE FROM avatars
-         WHERE id = ?
-           AND NOT EXISTS (SELECT 1 FROM works WHERE avatarId = ?)`,
-      )
-      .run(id, id);
-    if (result.changes !== 1) {
-      throw new Error('Avatar cannot be deleted while works exist');
+      this.db
+        .prepare(
+          `UPDATE works SET title = ?
+           WHERE avatarId = ? AND (title IS NULL OR TRIM(title) = '')`,
+        )
+        .run(avatar.name, id);
+      this.db.prepare('UPDATE works SET avatarId = NULL WHERE avatarId = ?').run(id);
+      const result = this.db.prepare('DELETE FROM avatars WHERE id = ?').run(id);
+      if (result.changes !== 1) {
+        throw new Error(`Avatar not found: ${id}`);
+      }
+      assertForeignKeysValid(this.db);
+      this.db.exec('COMMIT');
+      transactionOpen = false;
+      return avatar;
+    } catch (error) {
+      if (transactionOpen) {
+        try {
+          this.db.exec('ROLLBACK');
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], 'Avatar deletion and rollback failed');
+        }
+      }
+      throw error;
     }
-    return avatar;
   }
 
   addWork(input: NewWork): Work {
