@@ -218,6 +218,7 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
               error={avatarsError}
               modelDirectory={modelDirectory}
               onCreateAvatar={() => setPage('avatars')}
+              onOpenWorks={() => setPage('works')}
               pageActive={page === 'studio'}
               intent={studioIntent}
               mode={studioMode}

@@ -50,23 +50,23 @@ git commit -m "Add shared generation result preview"
 
 ### 任务 2：制作台接入预览并移除文生/图生模特区域
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/studio.test.tsx` 为语音、图像、文生视频、音频数字人分别断言完成后出现预览播放器。断言 `#video-main-panel` 在 text/reference 下没有 `section[aria-label="当前人物预览"]`，audio 下保留。断言可调用 `onOpenWorks` 进入仓库。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/studio.test.tsx -t "预览|当前人物预览"`
 
-- [ ] **步骤 3：接入 `onOpenWorks` 和 `useWorkResult`**
+- [x] **步骤 3：接入 `onOpenWorks` 和 `useWorkResult`**
 
 `App` 传 `onOpenWorks={() => setPage('works')}` 给 `StudioPage`，再传至四种表单。表单在 `JobStatus` 后渲染 `GenerationResultPreview`。`StudioPage` 仅在 `videoMode === 'audio' && avatar !== null` 时渲染模特区域，text/reference 使用 `studio-layout-without-avatar`。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/studio.test.tsx tests/unit/generation-result-preview.test.tsx && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/renderer/App.tsx src/renderer/StudioPage.tsx src/renderer/SpeechForm.tsx src/renderer/ImageForm.tsx src/renderer/TextToVideoForm.tsx src/renderer/AudioDigitalHumanForm.tsx tests/unit/studio.test.tsx

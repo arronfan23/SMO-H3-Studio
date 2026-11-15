@@ -11,6 +11,7 @@ import { AudioInput } from './AudioInput';
 import { AudioRecorder } from './AudioRecorder';
 import { ComponentGate } from './ComponentGate';
 import { JobStatus } from './JobStatus';
+import { GenerationResultPreview } from './GenerationResultPreview';
 import { errorMessage } from './ui';
 import { useMediaUrl } from './useMediaUrl';
 
@@ -33,11 +34,13 @@ export function SpeechForm({
   active = true,
   pageActive = true,
   busy = false,
+  onOpenWorks,
   onJobStarted,
 }: {
   active?: boolean;
   pageActive?: boolean;
   busy?: boolean;
+  onOpenWorks?: () => void;
   onJobStarted?: () => Promise<boolean | void>;
 }) {
   const [speechMode, setSpeechMode] = useState<SpeechMode>('custom');
@@ -636,6 +639,7 @@ export function SpeechForm({
           {submitting ? '正在提交…' : '生成语音'}
         </button>
         <JobStatus jobId={jobId} active={active && pageActive} allowCancel />
+        <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
       </form>
     </section>
   );

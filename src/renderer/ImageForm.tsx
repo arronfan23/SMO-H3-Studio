@@ -20,6 +20,7 @@ import { ComponentGate } from './ComponentGate';
 import { JobStatus } from './JobStatus';
 import { ReferenceImagePicker } from './ReferenceImagePicker';
 import { StepNumberField } from './StepNumberField';
+import { GenerationResultPreview } from './GenerationResultPreview';
 import { errorMessage } from './ui';
 import { useMediaUrl } from './useMediaUrl';
 
@@ -46,12 +47,14 @@ export function ImageForm({
   active = true,
   pageActive = true,
   busy = false,
+  onOpenWorks,
   syncRevision = 0,
   onJobStarted,
 }: {
   active?: boolean;
   pageActive?: boolean;
   busy?: boolean;
+  onOpenWorks?: () => void;
   syncRevision?: number;
   onJobStarted?: () => Promise<boolean | void>;
 }) {
@@ -686,6 +689,7 @@ export function ImageForm({
           {submitting ? '正在提交…' : '生成图像'}
         </button>
         <JobStatus jobId={jobId} active={active && pageActive} allowCancel />
+        <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
       </form>
     </section>
   );

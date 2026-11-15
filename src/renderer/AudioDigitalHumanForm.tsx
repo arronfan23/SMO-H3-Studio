@@ -12,6 +12,7 @@ import { AudioInput } from './AudioInput';
 import { AudioRecorder } from './AudioRecorder';
 import { JobStatus } from './JobStatus';
 import { StepNumberField } from './StepNumberField';
+import { GenerationResultPreview } from './GenerationResultPreview';
 import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage } from './ui';
@@ -42,6 +43,7 @@ export function AudioDigitalHumanForm({
   active = true,
   pageActive = true,
   busy = false,
+  onOpenWorks,
   isGenerationPending = false,
   generationPendingRef,
   onGenerationPendingChange,
@@ -53,6 +55,7 @@ export function AudioDigitalHumanForm({
   active?: boolean;
   pageActive?: boolean;
   busy?: boolean;
+  onOpenWorks?: () => void;
   isGenerationPending?: boolean;
   generationPendingRef?: { current: boolean };
   onGenerationPendingChange?: (pending: boolean) => void;
@@ -556,6 +559,7 @@ export function AudioDigitalHumanForm({
         {submitting ? '正在提交…' : '生成视频'}
       </button>
       <JobStatus jobId={jobId} active={active} allowCancel />
+      <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
     </form>
   );
 }

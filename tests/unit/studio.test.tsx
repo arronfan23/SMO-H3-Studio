@@ -100,7 +100,7 @@ const smo = createSmoMock();
 
 async function renderStudio() {
   render(<App />);
-  await screen.findByRole('heading', { name: avatar.name });
+  await waitFor(() => expect(document.getElementById('original-text')).not.toBeNull());
 }
 
 function studioSpeechField(label: string, mode: 'custom' | 'clone' = 'custom') {
@@ -1436,7 +1436,6 @@ describe('text-to-video studio', () => {
     expect(screen.queryByRole('tablist', { name: '主制作模式' })).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: '视频', exact: true })).not.toBeInTheDocument();
 
-    const preview = screen.getByRole('region', { name: '当前人物预览' });
     const controls = screen.getByRole('region', { name: '制作控制区' });
     const modeTabs = within(controls).getByRole('tablist', { name: '制作模式' });
     expect(within(modeTabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
@@ -1462,16 +1461,18 @@ describe('text-to-video studio', () => {
     expect(textPanel).toBeVisible();
     expect(referencePanel).not.toBeVisible();
     expect(audioPanel).not.toBeVisible();
-    expect(preview).not.toBeNull();
-    expect(controls).not.toContainElement(preview);
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     fireEvent.click(referenceTab);
     expect(textPanel).not.toBeVisible();
     expect(referencePanel).toBeVisible();
     expect(audioPanel).not.toBeVisible();
     expect(referenceTab).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     fireEvent.click(audioTab);
+    const preview = screen.getByRole('region', { name: '当前人物预览' });
+    expect(controls).not.toContainElement(preview);
     expect(textPanel).not.toBeVisible();
     expect(referencePanel).not.toBeVisible();
     expect(audioPanel).toBeVisible();
@@ -2103,7 +2104,7 @@ describe('text-to-video studio', () => {
     fireEvent.click(screen.getByRole('tab', { name: '文生视频' }));
 
     expect(textVideoField('原始文字')).toHaveValue('尚未提交的草稿');
-    expect(screen.getByRole('heading', { name: avatar.name })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: avatar.name })).not.toBeInTheDocument();
   });
 
   test('视频子模式切换和应用页面往返保留原文、润色文本、音频与步数', async () => {
@@ -2431,7 +2432,14 @@ describe('用于音频数字人', () => {
     expect(
       await screen.findByLabelText('作品语音 speech-retry-media'),
     ).toBeInTheDocument();
-    smo.files.mediaUrl.mockRejectedValueOnce(new Error('首次媒体读取失败'));
+    let failAudioRead = true;
+    smo.files.mediaUrl.mockImplementation(async (path: string) => {
+      if (path === audioPath && failAudioRead) {
+        failAudioRead = false;
+        throw new Error('首次媒体读取失败');
+      }
+      return `smo-media://media/${encodeURIComponent(path)}`;
+    });
 
     let panel = await useSpeechWork('speech-retry-media');
     expect(await panel.findByRole('alert')).toHaveTextContent('首次媒体读取失败');
@@ -2531,6 +2539,100 @@ describe('用于音频数字人', () => {
     expect(panel.getByText('busy-original.wav')).toBeInTheDocument();
     expect(panel.queryByText('busy-new.mp3')).not.toBeInTheDocument();
     expect(smo.jobs.start).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('制作台结果预览与模特区域', () => {
+  function renderStudioPage(onOpenWorks = vi.fn()) {
+    return render(
+      <StudioPage
+        avatar={avatar}
+        loading={false}
+        error={null}
+        modelDirectory={DEFAULT_MODEL_DIRECTORY}
+        onCreateAvatar={vi.fn()}
+        onOpenWorks={onOpenWorks}
+      />,
+    );
+  }
+
+  function completeJob(mode: Work['mode'], outputPath: string): void {
+    smo.works.list.mockResolvedValue([
+      createWork({ id: 'job-1', mode, outputPath, status: 'done' }),
+    ]);
+  }
+
+  test('语音完成后在当前页显示音频预览', async () => {
+    completeJob('speech', 'G:\\output\\voice.wav');
+    renderStudioPage();
+    fireEvent.click(screen.getByRole('tab', { name: '语音' }));
+    fireEvent.change(document.getElementById('custom-speech-language')!, {
+      target: { value: 'Chinese' },
+    });
+    smo.files.selectAudio.mockResolvedValue('G:\\input\\voice.wav');
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    await waitFor(() => expect(document.querySelector('audio')).not.toBeNull());
+    fireEvent.change(document.getElementById('custom-speech-prompt')!, {
+      target: { value: '预览这段语音' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成语音' }));
+
+    expect(await screen.findByLabelText('生成语音结果')).toBeInTheDocument();
+  });
+
+  test('图像完成后在当前页显示图片预览', async () => {
+    completeJob('image', 'G:\\output\\image.png');
+    renderStudioPage();
+    fireEvent.click(screen.getByRole('tab', { name: '图像' }));
+    fireEvent.change(await screen.findByLabelText('图像提示词'), {
+      target: { value: '预览这张图' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成图像' }));
+
+    expect(await screen.findByLabelText('生成图像结果')).toBeInTheDocument();
+  });
+
+  test('文生视频完成后显示预览且没有当前模特区域', async () => {
+    const onOpenWorks = vi.fn();
+    completeJob('text', 'G:\\output\\video.mp4');
+    renderStudioPage(onOpenWorks);
+    fireEvent.change(within(document.getElementById('text-mode-panel')!).getByLabelText('原始文字'), {
+      target: { value: '预览文生视频' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    expect(await screen.findByLabelText('生成视频结果')).toBeInTheDocument();
+    expect(document.querySelector('.person-preview')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '进入我的作品' }));
+    expect(onOpenWorks).toHaveBeenCalledTimes(1);
+  });
+
+  test('图片生视频不显示当前模特区域，音频数字人保留', async () => {
+    completeJob('audio', 'G:\\output\\audio-human.mp4');
+    renderStudioPage();
+
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    expect(document.querySelector('.person-preview')).not.toBeInTheDocument();
+
+    smo.files.selectAudio.mockResolvedValue('G:\\input\\voice.wav');
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    expect(document.querySelector('.person-preview')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
+    await screen.findByText('voice.wav');
+    const source = document.querySelector('audio');
+    expect(source).not.toBeNull();
+    Object.defineProperty(source!, 'duration', { value: 8, configurable: true });
+    fireEvent.loadedMetadata(source!);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '预览音频数字人' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+
+    expect(await screen.findByLabelText('生成视频结果')).toBeInTheDocument();
   });
 });
 

@@ -19,6 +19,7 @@ export function StudioPage({
   error,
   modelDirectory,
   onCreateAvatar,
+  onOpenWorks,
   pageActive = true,
   intent = null,
   mode: controlledMode,
@@ -29,6 +30,7 @@ export function StudioPage({
   error: string | null;
   modelDirectory: string;
   onCreateAvatar: () => void;
+  onOpenWorks?: () => void;
   pageActive?: boolean;
   intent?: StudioIntent | null;
   mode?: StudioMode;
@@ -288,8 +290,8 @@ export function StudioPage({
         {loading ? (
           <div className="page-state">正在读取数字模特…</div>
         ) : (
-          <div className={`studio-layout${avatar === null ? ' studio-layout-without-avatar' : ''}`}>
-            {avatar !== null && (
+          <div className={`studio-layout${avatar === null || videoMode !== 'audio' ? ' studio-layout-without-avatar' : ''}`}>
+            {videoMode === 'audio' && avatar !== null && (
               <section className="person-preview" aria-label="当前人物预览">
                 <div className="section-heading">
                   <span>当前模特</span>
@@ -360,6 +362,7 @@ export function StudioPage({
                   modelDirectory={modelDirectory}
                   active={mode === 'video' && videoMode === 'text'}
                   busy={busy}
+                  onOpenWorks={onOpenWorks}
                   isGenerationPending={isGenerationPending}
                   generationPendingRef={generationPendingRef}
                   onGenerationPendingChange={onGenerationPendingChange}
@@ -378,6 +381,7 @@ export function StudioPage({
                   modelDirectory={modelDirectory}
                   active={mode === 'video' && videoMode === 'reference'}
                   busy={busy}
+                  onOpenWorks={onOpenWorks}
                   isGenerationPending={isGenerationPending}
                   generationPendingRef={generationPendingRef}
                   onGenerationPendingChange={onGenerationPendingChange}
@@ -406,6 +410,7 @@ export function StudioPage({
                     active={mode === 'video' && videoMode === 'audio'}
                     pageActive={pageActive && mode === 'video'}
                     busy={busy}
+                    onOpenWorks={onOpenWorks}
                     isGenerationPending={isGenerationPending}
                     generationPendingRef={generationPendingRef}
                     onGenerationPendingChange={onGenerationPendingChange}

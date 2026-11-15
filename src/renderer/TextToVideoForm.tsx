@@ -12,6 +12,7 @@ import { GenerationOptions } from './GenerationOptions';
 import { JobStatus } from './JobStatus';
 import { ReferenceImagePicker } from './ReferenceImagePicker';
 import { StepNumberField } from './StepNumberField';
+import { GenerationResultPreview } from './GenerationResultPreview';
 import { errorMessage } from './ui';
 import { estimateNarrationDuration } from '../shared/duration';
 
@@ -33,6 +34,7 @@ export function TextToVideoForm({
   modelDirectory,
   active = true,
   busy = false,
+  onOpenWorks,
   isGenerationPending = false,
   generationPendingRef,
   onGenerationPendingChange,
@@ -43,6 +45,7 @@ export function TextToVideoForm({
   modelDirectory: string;
   active?: boolean;
   busy?: boolean;
+  onOpenWorks?: () => void;
   isGenerationPending?: boolean;
   generationPendingRef?: { current: boolean };
   onGenerationPendingChange?: (pending: boolean) => void;
@@ -422,6 +425,7 @@ export function TextToVideoForm({
         {submitting ? '正在提交…' : '生成视频'}
       </button>
       <JobStatus jobId={jobId} active={active} />
+      <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
     </form>
   );
 }
