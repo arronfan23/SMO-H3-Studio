@@ -1,7 +1,17 @@
 import { createRequire } from 'node:module';
 import type { Options } from '@anthropic-ai/claude-agent-sdk/core';
-import type { SanmaoCredentials, SanmaoMessage } from '../shared/sanmao';
+import type {
+  SanmaoConversation,
+  SanmaoConversationSummary,
+  SanmaoCredentials,
+  SanmaoEffort,
+  SanmaoMessage,
+} from '../shared/sanmao';
 import type { SanmaoConnection } from '../shared/sanmao';
+import {
+  SanmaoConversationStore,
+  type SanmaoDraftAttachmentInput,
+} from './sanmao-conversations';
 import type { FileSanmaoConfigStore } from './sanmao-config';
 import { listSanmaoModels } from './sanmao-models';
 
@@ -23,6 +33,7 @@ export interface SanmaoSendInput {
 
 export interface SanmaoServiceOptions {
   store: Pick<FileSanmaoConfigStore, 'getCredentials'>;
+  conversations?: SanmaoConversationStore;
   queryImpl?: SanmaoQuery;
   timeoutMs?: number;
   claudeExecutablePath?: string;
@@ -115,11 +126,12 @@ export class SanmaoService {
   private readonly timeoutMs: number;
   private readonly claudeExecutablePath: string;
   private readonly modelLister: typeof listSanmaoModels;
-  private readonly conversations = new Map<string, SanmaoMessage[]>();
+  private readonly conversations: SanmaoConversationStore;
   private active: { replyId: string; controller: AbortController } | null = null;
   private closed = false;
 
   constructor(private readonly options: SanmaoServiceOptions) {
+    this.conversations = options.conversations ?? new SanmaoConversationStore(':memory:');
     this.queryImpl = options.queryImpl ?? defaultQuery;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.claudeExecutablePath = options.claudeExecutablePath ??
@@ -133,23 +145,55 @@ export class SanmaoService {
     return this.modelLister(connection);
   }
 
+  listConversations(): SanmaoConversationSummary[] {
+    return this.conversations.listConversations();
+  }
+
+  getConversation(conversationId: string): SanmaoConversation | null {
+    return this.conversations.getConversation(conversationId);
+  }
+
+  saveDraft(input: {
+    conversationId: string;
+    model: string;
+    effort?: SanmaoEffort;
+    draft: string;
+    attachments?: SanmaoDraftAttachmentInput[];
+  }): SanmaoConversation {
+    return this.conversations.updateDraft({
+      ...input,
+      attachments: input.attachments ?? [],
+    });
+  }
+
+  deleteConversation(conversationId: string): void {
+    this.conversations.deleteConversation(conversationId);
+  }
+
   async send(input: SanmaoSendInput): Promise<{ replyId: string; text: string }> {
     if (this.closed) throw new Error('三脚猫服务已关闭');
     if (this.active !== null) throw new Error('三脚猫正在回复，请稍候');
     const text = input.text.trim();
     if (!text) throw new Error('消息不能为空');
 
-    const history = this.conversations.get(input.conversationId) ?? [];
+    const credentials = await this.requireCredentials();
+    const history = this.conversations.getConversation(input.conversationId)?.messages ?? [];
+    this.conversations.appendMessage({
+      conversationId: input.conversationId,
+      model: credentials.model,
+      message: { id: `${input.replyId}:user`, role: 'user', text },
+    });
     const response = await this.execute(
       this.buildPrompt(history, text),
       input.replyId,
       input.onText,
+      credentials,
     );
-    this.conversations.set(input.conversationId, [
-      ...history,
-      { id: `${input.replyId}:user`, role: 'user', text },
-      { id: `${input.replyId}:assistant`, role: 'assistant', text: response },
-    ]);
+    this.conversations.appendMessage({
+      conversationId: input.conversationId,
+      model: credentials.model,
+      message: { id: `${input.replyId}:assistant`, role: 'assistant', text: response },
+    });
     return { replyId: input.replyId, text: response };
   }
 
@@ -170,9 +214,10 @@ export class SanmaoService {
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
     this.active?.controller.abort(new Error('三脚猫服务已关闭'));
-    this.conversations.clear();
+    this.conversations.close();
   }
 
   private buildPrompt(history: readonly SanmaoMessage[], text: string): string {

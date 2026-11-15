@@ -30,6 +30,9 @@ import type {
   Work,
 } from './types';
 import type {
+  SanmaoConversation,
+  SanmaoConversationSummary,
+  SanmaoEffort,
   SanmaoProfile,
   SanmaoProfileView,
   SanmaoStreamEvent,
@@ -84,6 +87,10 @@ export const IPC_CHANNELS = [
   'sanmao:saveProfile',
   'sanmao:testConnection',
   'sanmao:listModels',
+  'sanmao:listConversations',
+  'sanmao:getConversation',
+  'sanmao:saveDraft',
+  'sanmao:deleteConversation',
   'sanmao:send',
   'sanmao:cancel',
   'avatars:list',
@@ -125,6 +132,14 @@ const sanmaoSendSchema = z.object({
   conversationId: z.string().uuid(),
   replyId: z.string().uuid(),
   text: z.string().trim().min(1).max(32_000),
+}).strict();
+const sanmaoConversationSchema = z.object({
+  conversationId: z.string().uuid(),
+}).strict();
+const sanmaoDraftSchema = sanmaoConversationSchema.extend({
+  model: nonEmptyString,
+  effort: z.enum(['low', 'medium', 'high']).optional(),
+  draft: z.string().max(32_000),
 }).strict();
 
 const httpUrlSchema = z.string().superRefine((value, context) => {
@@ -449,6 +464,10 @@ export function createIpcSchema() {
     requestSchema('sanmao:saveProfile', sanmaoProfileSchema),
     requestSchema('sanmao:testConnection', sanmaoProfileSchema),
     requestSchema('sanmao:listModels', sanmaoModelDiscoverySchema),
+    requestSchema('sanmao:listConversations', emptyPayload),
+    requestSchema('sanmao:getConversation', sanmaoConversationSchema),
+    requestSchema('sanmao:saveDraft', sanmaoDraftSchema),
+    requestSchema('sanmao:deleteConversation', sanmaoConversationSchema),
     requestSchema('sanmao:send', sanmaoSendSchema),
     requestSchema(
       'sanmao:cancel',
@@ -580,6 +599,15 @@ export interface SmoApi {
       input: SanmaoProfile & { apiKey?: string },
     ): Promise<SanmaoTestResult>;
     listModels(input: { baseUrl?: string; apiKey?: string }): Promise<string[]>;
+    listConversations(): Promise<SanmaoConversationSummary[]>;
+    getConversation(conversationId: string): Promise<SanmaoConversation | null>;
+    saveDraft(input: {
+      conversationId: string;
+      model: string;
+      effort?: SanmaoEffort;
+      draft: string;
+    }): Promise<SanmaoConversation>;
+    deleteConversation(conversationId: string): Promise<void>;
     send(input: {
       conversationId: string;
       replyId: string;

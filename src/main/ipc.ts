@@ -66,7 +66,18 @@ export interface IpcServices {
   llm: Pick<LlmService, 'listModels' | 'testModel'>;
   skills: Pick<SkillsService, 'polish'>;
   llmConfig: LlmConfigStore;
-  sanmao: Pick<SanmaoService, 'send' | 'testConnection' | 'listModels' | 'cancel' | 'close'>;
+  sanmao: Pick<
+    SanmaoService,
+    | 'send'
+    | 'testConnection'
+    | 'listModels'
+    | 'listConversations'
+    | 'getConversation'
+    | 'saveDraft'
+    | 'deleteConversation'
+    | 'cancel'
+    | 'close'
+  >;
   sanmaoConfig: FileSanmaoConfigStore;
   store: Pick<Store, 'listAvatars' | 'listWorks' | 'renameWork'>;
   avatars: Pick<AvatarService, 'createAvatar' | 'updateAvatar' | 'deleteAvatar'>;
@@ -203,6 +214,15 @@ async function dispatch(
       return services.sanmao.listModels(
         await services.sanmaoConfig.resolveConnection(request.payload),
       );
+    case 'sanmao:listConversations':
+      return services.sanmao.listConversations();
+    case 'sanmao:getConversation':
+      return services.sanmao.getConversation(request.payload.conversationId);
+    case 'sanmao:saveDraft':
+      return services.sanmao.saveDraft(request.payload);
+    case 'sanmao:deleteConversation':
+      services.sanmao.deleteConversation(request.payload.conversationId);
+      return undefined;
     case 'sanmao:send': {
       const { conversationId, replyId, text } = request.payload;
       try {

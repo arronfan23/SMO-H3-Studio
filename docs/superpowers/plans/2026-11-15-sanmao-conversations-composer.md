@@ -51,23 +51,23 @@ git commit -m "Persist Sanmao conversations locally"
 
 ### 任务 2：会话服务、IPC 与旧会话管理
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/sanmao-service.test.ts` 验证用户消息立即持久化、成功回复才保存助手消息、失败不写半截回复，list/get/delete 调用对应存储。`tests/unit/ipc.test.ts` 覆盖 `sanmao:listConversations`、`getConversation`、`deleteConversation`、`saveDraft` 的严格 schema 和授权。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/sanmao-service.test.ts tests/unit/ipc.test.ts -t "conversation|会话"`
 
-- [ ] **步骤 3：接入存储与严格 IPC**
+- [x] **步骤 3：接入存储与严格 IPC**
 
 `createAppServices` 注入同一个 SQLite 会话存储。`SanmaoService` 在发送前写用户消息，成功后写助手消息，提供会话查询/删除和草稿保存。preload 暴露对应方法，所有返回不包含 API Key 或附件完整路径。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/sanmao-conversations.test.ts tests/unit/sanmao-service.test.ts tests/unit/ipc.test.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/main/sanmao-conversations.ts src/main/sanmao-service.ts src/main/app-services.ts src/main/ipc.ts src/preload/index.ts src/shared/ipc.ts src/shared/sanmao.ts tests/unit/sanmao-service.test.ts tests/unit/ipc.test.ts

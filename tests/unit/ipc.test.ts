@@ -577,6 +577,36 @@ describe('IPC input schema', () => {
     })).toThrow();
   });
 
+  test('sanmao accepts strict conversation history and draft requests', () => {
+    const conversationId = '00000000-0000-4000-8000-000000000101';
+    const requests = [
+      { channel: 'sanmao:listConversations', payload: {} },
+      { channel: 'sanmao:getConversation', payload: { conversationId } },
+      { channel: 'sanmao:deleteConversation', payload: { conversationId } },
+      {
+        channel: 'sanmao:saveDraft',
+        payload: {
+          conversationId,
+          model: 'claude-a',
+          effort: 'medium',
+          draft: '未发送内容',
+        },
+      },
+    ];
+
+    for (const request of requests) {
+      expect(createIpcSchema().parse(request)).toEqual(request);
+    }
+    expect(() => createIpcSchema().parse({
+      channel: 'sanmao:getConversation',
+      payload: { conversationId, sourcePath: 'G:\\private\\brief.txt' },
+    })).toThrow();
+    expect(() => createIpcSchema().parse({
+      channel: 'sanmao:saveDraft',
+      payload: { conversationId, model: 'claude-a', draft: '', apiKey: 'not-allowed' },
+    })).toThrow();
+  });
+
   test('speech accepts a native speech rate', () => {
     const request = {
       channel: 'jobs:start',
@@ -1267,6 +1297,10 @@ describe('main-process IPC handlers', () => {
       send,
       testConnection,
       listModels: vi.fn(async () => ['claude-a']),
+      listConversations: vi.fn(() => []),
+      getConversation: vi.fn(() => null),
+      saveDraft: vi.fn(),
+      deleteConversation: vi.fn(),
       cancel,
       close: vi.fn(),
     };
@@ -1312,6 +1346,27 @@ describe('main-process IPC handlers', () => {
       baseUrl: 'https://claude.test',
       apiKey: 'override-key',
     });
+  });
+
+  test('dispatches Sanmao history and drafts without exposing local paths', async () => {
+    const harness = await createHarness();
+    const conversationId = '00000000-0000-4000-8000-000000000101';
+
+    await harness.invoke('sanmao:saveDraft', {
+      conversationId,
+      model: 'claude-test',
+      effort: 'medium',
+      draft: '跨会话保留',
+    });
+    const list = await harness.invoke('sanmao:listConversations', {});
+    expect(list).toHaveLength(1);
+    const conversation = await harness.invoke('sanmao:getConversation', { conversationId });
+    expect(conversation).toMatchObject({ draft: '跨会话保留', messages: [] });
+    expect(conversation).not.toHaveProperty('sourcePath');
+
+    await harness.invoke('sanmao:deleteConversation', { conversationId });
+    await expect(harness.invoke('sanmao:getConversation', { conversationId }))
+      .resolves.toBeNull();
   });
 
   test('speech refuses a new component runtime install while any generation is active', async () => {

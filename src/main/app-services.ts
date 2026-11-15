@@ -38,6 +38,7 @@ import { JobCoordinator, type JobEventErrorHandler } from './jobs';
 import { LlmService } from './llm';
 import { FileLlmConfigStore } from './llm-config';
 import { FileSanmaoConfigStore } from './sanmao-config';
+import { SanmaoConversationStore } from './sanmao-conversations';
 import { SanmaoService } from './sanmao-service';
 import { SkillsService } from './skills';
 import { Store } from './store';
@@ -568,7 +569,10 @@ export async function createAppServices(
     const sanmaoConfig = new FileSanmaoConfigStore(
       join(dataDirectory, 'sanmao-config.json'),
     );
-    sanmao = new SanmaoService({ store: sanmaoConfig });
+    sanmao = new SanmaoService({
+      store: sanmaoConfig,
+      conversations: new SanmaoConversationStore(join(dataDirectory, 'studio.sqlite')),
+    });
     comfy = new ComfyClient(comfyBaseUrl);
     activeComfyProcess = new ComfyProcessManager(
       {

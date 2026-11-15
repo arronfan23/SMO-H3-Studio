@@ -69,6 +69,16 @@ const api: SmoApi = {
     saveProfile: (input) => ipcRenderer.invoke('sanmao:saveProfile', input),
     testConnection: (input) => ipcRenderer.invoke('sanmao:testConnection', input),
     listModels: (input) => ipcRenderer.invoke('sanmao:listModels', input),
+    listConversations: () => ipcRenderer.invoke('sanmao:listConversations', {}),
+    getConversation: (conversationId) => ipcRenderer.invoke(
+      'sanmao:getConversation',
+      { conversationId },
+    ),
+    saveDraft: (input) => ipcRenderer.invoke('sanmao:saveDraft', input),
+    deleteConversation: (conversationId) => ipcRenderer.invoke(
+      'sanmao:deleteConversation',
+      { conversationId },
+    ),
     send: (input) => ipcRenderer.invoke('sanmao:send', input),
     cancel: (replyId) => ipcRenderer.invoke('sanmao:cancel', { replyId }),
     subscribe: (listener) => {

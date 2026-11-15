@@ -1,7 +1,8 @@
 // @vitest-environment node
 
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
+import { SanmaoConversationStore } from '../../src/main/sanmao-conversations';
 import {
   SanmaoService,
   normalizeClaudeExecutablePath,
@@ -40,16 +41,28 @@ function success(text: string): unknown {
   };
 }
 
-function createService(queryImpl: SanmaoQuery, timeoutMs = 1_000) {
+const conversationStores: SanmaoConversationStore[] = [];
+
+function createService(
+  queryImpl: SanmaoQuery,
+  timeoutMs = 1_000,
+  conversations?: SanmaoConversationStore,
+) {
+  if (conversations !== undefined) conversationStores.push(conversations);
   return new SanmaoService({
     store: {
       getCredentials: vi.fn(async () => credentials),
     },
+    conversations,
     queryImpl,
     timeoutMs,
     claudeExecutablePath: 'G:\\claude-test\\claude.exe',
   });
 }
+
+afterEach(() => {
+  for (const store of conversationStores.splice(0)) store.close();
+});
 
 describe('SanmaoService', () => {
   test('maps an asar native executable to its unpacked location', () => {
@@ -264,5 +277,73 @@ describe('SanmaoService', () => {
     await service.send({ ...input, replyId: '00000000-0000-4000-8000-000000000072' });
 
     expect(models).toEqual(['claude-a', 'claude-b']);
+  });
+
+  test('persists the user before querying and saves the assistant only after success', async () => {
+    const conversations = new SanmaoConversationStore(':memory:');
+    const conversationId = '00000000-0000-4000-8000-000000000201';
+    const service = createService((input: SanmaoQueryInput) => {
+      expect(conversations.getConversation(conversationId)?.messages.map((message) => message.role))
+        .toEqual(['user']);
+      return successfulQuery([success('完整回复')])(input);
+    }, 1_000, conversations);
+
+    await service.send({
+      conversationId,
+      replyId: '00000000-0000-4000-8000-000000000202',
+      text: '立即保存这条消息',
+      onText: () => undefined,
+    });
+
+    expect(conversations.getConversation(conversationId)?.messages.map((message) => [
+      message.role,
+      message.text,
+    ])).toEqual([
+      ['user', '立即保存这条消息'],
+      ['assistant', '完整回复'],
+    ]);
+  });
+
+  test('keeps the user message but never saves a partial assistant reply on failure', async () => {
+    const conversations = new SanmaoConversationStore(':memory:');
+    const conversationId = '00000000-0000-4000-8000-000000000203';
+    const service = createService(() => (async function* () {
+      yield textDelta('不应保存的半截回复');
+      throw new Error('upstream failed');
+    })(), 1_000, conversations);
+
+    await expect(service.send({
+      conversationId,
+      replyId: '00000000-0000-4000-8000-000000000204',
+      text: '保留用户原文',
+      onText: () => undefined,
+    })).rejects.toThrow(/failed/i);
+
+    expect(conversations.getConversation(conversationId)?.messages.map((message) => [
+      message.role,
+      message.text,
+    ])).toEqual([['user', '保留用户原文']]);
+  });
+
+  test('lists, opens, drafts, and deletes persistent conversations', async () => {
+    const conversations = new SanmaoConversationStore(':memory:');
+    const service = createService(successfulQuery([success('OK')]), 1_000, conversations);
+    const conversationId = '00000000-0000-4000-8000-000000000205';
+
+    service.saveDraft({
+      conversationId,
+      model: 'claude-b',
+      effort: 'high',
+      draft: '保存这个草稿',
+    });
+
+    expect(service.listConversations()).toHaveLength(1);
+    expect(service.getConversation(conversationId)).toMatchObject({
+      model: 'claude-b',
+      effort: 'high',
+      draft: '保存这个草稿',
+    });
+    service.deleteConversation(conversationId);
+    expect(service.getConversation(conversationId)).toBeNull();
   });
 });
