@@ -24,25 +24,25 @@
 
 ### 任务 1：SQLite 会话与草稿存储
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 创建 `tests/unit/sanmao-conversations.test.ts`，验证首次发送创建会话、标题取首条用户消息前 40 字、模型/effort/草稿/附件元数据可更新，重开数据库后消息与草稿仍在，删除只删除目标会话及其消息/附件，其他会话不受影响。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/sanmao-conversations.test.ts`
 
 预期：找不到 `sanmao-conversations.ts`。
 
-- [ ] **步骤 3：实现版本化存储**
+- [x] **步骤 3：实现版本化存储**
 
 `SanmaoConversationStore` 使用 `DatabaseSync`，创建 `sanmao_conversations`、`sanmao_messages`、`sanmao_draft_attachments` 表和外键。提供 `createConversation`、`appendMessage`、`listConversations`、`getConversation`、`updateDraft`、`deleteConversation`。首次 `appendMessage` 自动创建会话；助手消息只在显式调用时写入。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/sanmao-conversations.test.ts && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/main/sanmao-conversations.ts tests/unit/sanmao-conversations.test.ts

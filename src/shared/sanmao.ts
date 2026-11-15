@@ -4,11 +4,38 @@ export type SanmaoProfile = LlmProfile;
 export type SanmaoProfileView = LlmProfileView;
 export type SanmaoCredentials = LlmCredentials;
 export type SanmaoConnection = LlmConnection;
+export type SanmaoEffort = 'low' | 'medium' | 'high';
+export type SanmaoAttachmentKind = 'image' | 'text';
+
+export interface SanmaoAttachmentMetadata {
+  id: string;
+  name: string;
+  kind: SanmaoAttachmentKind;
+  mimeType: string;
+  size: number;
+}
 
 export interface SanmaoMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  createdAt?: string;
+  attachments?: SanmaoAttachmentMetadata[];
+}
+
+export interface SanmaoConversationSummary {
+  id: string;
+  title: string;
+  model: string;
+  effort: SanmaoEffort;
+  draft: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SanmaoConversation extends SanmaoConversationSummary {
+  messages: SanmaoMessage[];
+  draftAttachments: SanmaoAttachmentMetadata[];
 }
 
 export type SanmaoStreamEvent = {
