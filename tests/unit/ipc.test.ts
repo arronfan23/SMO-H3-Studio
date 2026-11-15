@@ -2365,6 +2365,34 @@ describe('preload API', () => {
     expect(ipcRendererInvoke).not.toHaveBeenCalled();
   });
 
+  test('sanmao send strips attachment metadata down to authorized IDs', async () => {
+    const conversationId = '00000000-0000-4000-8000-000000000101';
+    const replyId = '00000000-0000-4000-8000-000000000102';
+    const attachmentId = '00000000-0000-4000-8000-000000000601';
+
+    await api.sanmao.send({
+      conversationId,
+      replyId,
+      text: '分析附件',
+      effort: 'high',
+      attachments: [{
+        id: attachmentId,
+        name: 'private.png',
+        kind: 'image',
+        mimeType: 'image/png',
+        size: 128,
+      }],
+    });
+
+    expect(ipcRendererInvoke).toHaveBeenCalledWith('sanmao:send', {
+      conversationId,
+      replyId,
+      text: '分析附件',
+      effort: 'high',
+      attachments: [{ id: attachmentId }],
+    });
+  });
+
   test('exposes only the fixed domain methods', () => {
     expect(Object.keys(api).sort()).toEqual([
       'app',

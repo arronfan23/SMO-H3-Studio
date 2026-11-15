@@ -93,7 +93,10 @@ const api: SmoApi = {
         existingIds,
       },
     ),
-    send: (input) => ipcRenderer.invoke('sanmao:send', input),
+    send: (input) => ipcRenderer.invoke('sanmao:send', {
+      ...input,
+      attachments: input.attachments?.map(({ id }) => ({ id })),
+    }),
     cancel: (replyId) => ipcRenderer.invoke('sanmao:cancel', { replyId }),
     subscribe: (listener) => {
       const receive = (_event: unknown, payload: unknown) => {

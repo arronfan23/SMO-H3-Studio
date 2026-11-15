@@ -94,6 +94,24 @@ describe('SanmaoConversationStore', () => {
     expect(store.getConversation(firstId)).toEqual(before);
   });
 
+  test('names a draft-created conversation from its first user message', () => {
+    store.updateDraft({
+      conversationId: firstId,
+      model: 'claude-a',
+      draft: '先保存的草稿',
+      attachments: [],
+    });
+    expect(store.getConversation(firstId)?.title).toBe('新会话');
+
+    store.appendMessage({
+      conversationId: firstId,
+      model: 'claude-a',
+      message: { id: 'first-user', role: 'user', text: '首条消息应该成为标题' },
+    });
+
+    expect(store.getConversation(firstId)?.title).toBe('首条消息应该成为标题');
+  });
+
   test('deletes only the selected conversation and cascades its messages and drafts', () => {
     store.createConversation({ id: firstId, model: 'claude-a' });
     store.createConversation({ id: secondId, model: 'claude-a' });

@@ -109,6 +109,18 @@ export class SanmaoConversationStore {
         model: input.model,
         effort: input.effort,
       });
+      if (input.message.role === 'user') {
+        const current = this.db.prepare(
+          `SELECT title,
+            (SELECT COUNT(*) FROM sanmao_messages WHERE conversationId = ? AND role = 'user') AS userMessages
+           FROM sanmao_conversations WHERE id = ?`,
+        ).get(input.conversationId, input.conversationId);
+        if (current?.title === '新会话' && current.userMessages === 0) {
+          this.db.prepare(
+            'UPDATE sanmao_conversations SET title = ? WHERE id = ?',
+          ).run(conversationTitle(input.message.text), input.conversationId);
+        }
+      }
       const timestamp = now();
       const message: SanmaoMessage = {
         ...input.message,

@@ -225,7 +225,7 @@ function StudioApplication({ initialModelDirectory }: StudioApplicationProps) {
               onModeChange={setStudioMode}
             />
           </div>
-          <div hidden={page !== 'sanmao'}>
+          <div className="sanmao-page-host" hidden={page !== 'sanmao'}>
             <SanmaoPage
               active={page === 'sanmao'}
               onOpenSettings={() => {
