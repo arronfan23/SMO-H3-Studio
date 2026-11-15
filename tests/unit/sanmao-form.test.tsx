@@ -20,6 +20,8 @@ const sanmao = {
   getConversation: vi.fn(),
   saveDraft: vi.fn(),
   deleteConversation: vi.fn(),
+  selectAttachments: vi.fn(),
+  authorizeDroppedAttachments: vi.fn(),
   send: vi.fn(),
   cancel: vi.fn(),
   subscribe: vi.fn(),
@@ -48,6 +50,8 @@ beforeEach(() => {
     draftAttachments: [],
   }));
   sanmao.deleteConversation.mockResolvedValue(undefined);
+  sanmao.selectAttachments.mockResolvedValue([]);
+  sanmao.authorizeDroppedAttachments.mockResolvedValue([]);
   sanmao.cancel.mockResolvedValue(undefined);
   sanmao.subscribe.mockImplementation((listener) => {
     receive = listener;
@@ -222,5 +226,58 @@ describe('SanmaoPage', () => {
       });
     });
     expect(screen.queryByRole('status', { name: '正在生成回复' })).not.toBeInTheDocument();
+  });
+
+  test('selects real attachments and sends their IDs with the selected effort', async () => {
+    const attachment = {
+      id: 'attachment-image',
+      name: 'reference.png',
+      kind: 'image' as const,
+      mimeType: 'image/png',
+      size: 128,
+    };
+    sanmao.selectAttachments.mockResolvedValue([attachment]);
+    render(<SanmaoPage />);
+    const input = await screen.findByLabelText('发送给三脚猫的消息');
+
+    fireEvent.click(screen.getByRole('button', { name: '添加附件' }));
+    expect(await screen.findByText('reference.png')).toBeInTheDocument();
+    await waitFor(() => expect(sanmao.saveDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ attachments: [{ id: attachment.id }] }),
+    ));
+    fireEvent.change(screen.getByLabelText('思考深度'), { target: { value: 'high' } });
+    fireEvent.change(input, { target: { value: '分析这张图片' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(sanmao.send).toHaveBeenCalledWith(expect.objectContaining({
+      effort: 'high',
+      attachments: [attachment],
+    })));
+    expect(sanmao.selectAttachments).toHaveBeenCalledWith(expect.any(String), []);
+  });
+
+  test('authorizes dropped attachments and removes them before sending', async () => {
+    const attachment = {
+      id: 'attachment-text',
+      name: 'brief.txt',
+      kind: 'text' as const,
+      mimeType: 'text/plain',
+      size: 64,
+    };
+    sanmao.authorizeDroppedAttachments.mockResolvedValue([attachment]);
+    render(<SanmaoPage />);
+    const input = await screen.findByLabelText('发送给三脚猫的消息');
+    const composer = input.closest('form') as HTMLFormElement;
+    const file = new File(['brief'], 'brief.txt', { type: 'text/plain' });
+
+    fireEvent.drop(composer, { dataTransfer: { files: [file] } });
+    expect(await screen.findByText('brief.txt')).toBeInTheDocument();
+    expect(sanmao.authorizeDroppedAttachments).toHaveBeenCalledWith(
+      [file],
+      expect.any(String),
+      [],
+    );
+    fireEvent.click(screen.getByRole('button', { name: '移除附件 brief.txt' }));
+    expect(screen.queryByText('brief.txt')).not.toBeInTheDocument();
   });
 });

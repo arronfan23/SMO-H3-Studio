@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
-import { ArrowUp, Plus, RefreshCw, Square } from 'lucide-react';
-import type { SanmaoEffort } from '../shared/sanmao';
+import { ArrowUp, FileText, Image as ImageIcon, Plus, RefreshCw, Square, X } from 'lucide-react';
+import type { SanmaoAttachmentMetadata, SanmaoEffort } from '../shared/sanmao';
 
 export function SanmaoComposer({
   draft,
@@ -9,10 +9,15 @@ export function SanmaoComposer({
   model,
   models,
   effort,
+  attachments,
+  selectingAttachments,
   savingModel,
   refreshing,
   onDraftChange,
   onEffortChange,
+  onSelectAttachments,
+  onDropAttachments,
+  onRemoveAttachment,
   onModelChange,
   onRefreshModels,
   onSend,
@@ -24,10 +29,15 @@ export function SanmaoComposer({
   model: string;
   models: string[];
   effort: SanmaoEffort;
+  attachments: SanmaoAttachmentMetadata[];
+  selectingAttachments: boolean;
   savingModel: boolean;
   refreshing: boolean;
   onDraftChange: (draft: string) => void;
   onEffortChange: (effort: SanmaoEffort) => void;
+  onSelectAttachments: () => void;
+  onDropAttachments: (files: File[]) => void;
+  onRemoveAttachment: (attachmentId: string) => void;
   onModelChange: (model: string) => void;
   onRefreshModels: () => void;
   onSend: () => void;
@@ -49,6 +59,13 @@ export function SanmaoComposer({
         event.preventDefault();
         onSend();
       }}
+      onDragOver={(event) => {
+        event.preventDefault();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        onDropAttachments(Array.from(event.dataTransfer.files));
+      }}
     >
       <label className="sr-only" htmlFor="sanmao-message">发送给三脚猫的消息</label>
       <textarea
@@ -65,6 +82,28 @@ export function SanmaoComposer({
           }
         }}
       />
+      {attachments.length > 0 && (
+        <ul className="sanmao-attachment-list" aria-label="已选附件">
+          {attachments.map((attachment) => (
+            <li key={attachment.id}>
+              {attachment.kind === 'image'
+                ? <ImageIcon size={14} aria-hidden="true" />
+                : <FileText size={14} aria-hidden="true" />}
+              <span>{attachment.name}</span>
+              <button
+                className="button button-icon"
+                type="button"
+                aria-label={`移除附件 ${attachment.name}`}
+                title="移除附件"
+                disabled={activeReplyId !== null}
+                onClick={() => onRemoveAttachment(attachment.id)}
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="sanmao-composer-toolbar">
         <div className="sanmao-composer-leading">
           <button
@@ -72,7 +111,8 @@ export function SanmaoComposer({
             type="button"
             aria-label="添加附件"
             title="添加附件"
-            disabled
+            disabled={!canChat || activeReplyId !== null || selectingAttachments}
+            onClick={onSelectAttachments}
           >
             <Plus size={18} aria-hidden="true" />
           </button>
@@ -124,7 +164,7 @@ export function SanmaoComposer({
               type="submit"
               aria-label="发送"
               title="发送"
-              disabled={!draft.trim() || !canChat}
+              disabled={(!draft.trim() && attachments.length === 0) || !canChat}
             >
               <ArrowUp size={18} aria-hidden="true" />
             </button>

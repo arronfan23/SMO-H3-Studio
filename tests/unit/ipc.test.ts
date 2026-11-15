@@ -590,6 +590,22 @@ describe('IPC input schema', () => {
           model: 'claude-a',
           effort: 'medium',
           draft: '未发送内容',
+          attachments: [{ id: '00000000-0000-4000-8000-000000000601' }],
+        },
+      },
+      {
+        channel: 'sanmao:selectAttachments',
+        payload: {
+          conversationId,
+          existingIds: ['00000000-0000-4000-8000-000000000601'],
+        },
+      },
+      {
+        channel: 'sanmao:authorizeDroppedAttachments',
+        payload: {
+          paths: ['G:\\drop\\brief.txt'],
+          conversationId,
+          existingIds: [],
         },
       },
     ];
@@ -604,6 +620,28 @@ describe('IPC input schema', () => {
     expect(() => createIpcSchema().parse({
       channel: 'sanmao:saveDraft',
       payload: { conversationId, model: 'claude-a', draft: '', apiKey: 'not-allowed' },
+    })).toThrow();
+  });
+
+  test('sanmao accepts effort and attachment references in a chat request', () => {
+    const request = {
+      channel: 'sanmao:send',
+      payload: {
+        conversationId: '00000000-0000-4000-8000-000000000101',
+        replyId: '00000000-0000-4000-8000-000000000102',
+        text: '分析附件',
+        effort: 'high',
+        attachments: [{ id: '00000000-0000-4000-8000-000000000601' }],
+      },
+    };
+
+    expect(createIpcSchema().parse(request)).toEqual(request);
+    expect(() => createIpcSchema().parse({
+      ...request,
+      payload: {
+        ...request.payload,
+        attachments: [{ id: request.payload.attachments[0].id, sourcePath: 'G:\\private\\x.png' }],
+      },
     })).toThrow();
   });
 
@@ -1301,6 +1339,8 @@ describe('main-process IPC handlers', () => {
       getConversation: vi.fn(() => null),
       saveDraft: vi.fn(),
       deleteConversation: vi.fn(),
+      selectAttachments: vi.fn(async () => []),
+      authorizeDroppedAttachments: vi.fn(async () => []),
       cancel,
       close: vi.fn(),
     };
@@ -1367,6 +1407,29 @@ describe('main-process IPC handlers', () => {
     await harness.invoke('sanmao:deleteConversation', { conversationId });
     await expect(harness.invoke('sanmao:getConversation', { conversationId }))
       .resolves.toBeNull();
+  });
+
+  test('dispatches Sanmao attachment selection and drop authorization', async () => {
+    const harness = await createHarness();
+    const selectAttachments = vi.fn(async () => []);
+    const authorizeDroppedAttachments = vi.fn(async () => []);
+    harness.services.sanmao.selectAttachments = selectAttachments;
+    harness.services.sanmao.authorizeDroppedAttachments = authorizeDroppedAttachments;
+    const conversationId = '00000000-0000-4000-8000-000000000101';
+
+    await harness.invoke('sanmao:selectAttachments', { conversationId, existingIds: [] });
+    await harness.invoke('sanmao:authorizeDroppedAttachments', {
+      paths: ['G:\\drop\\brief.txt'],
+      conversationId,
+      existingIds: [],
+    });
+
+    expect(selectAttachments).toHaveBeenCalledWith(conversationId, []);
+    expect(authorizeDroppedAttachments).toHaveBeenCalledWith(
+      ['G:\\drop\\brief.txt'],
+      conversationId,
+      [],
+    );
   });
 
   test('speech refuses a new component runtime install while any generation is active', async () => {

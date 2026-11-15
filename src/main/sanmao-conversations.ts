@@ -187,6 +187,21 @@ export class SanmaoConversationStore {
     };
   }
 
+  getDraftAttachmentInputs(conversationId: string): SanmaoDraftAttachmentInput[] {
+    return this.db.prepare(
+      `SELECT id, name, kind, mimeType, size, sourcePath
+       FROM sanmao_draft_attachments WHERE conversationId = ?
+       ORDER BY sortOrder, rowid`,
+    ).all(conversationId).map((attachment) => ({
+      id: attachment.id as string,
+      name: attachment.name as string,
+      kind: attachment.kind as SanmaoAttachmentMetadata['kind'],
+      mimeType: attachment.mimeType as string,
+      size: attachment.size as number,
+      sourcePath: attachment.sourcePath as string,
+    }));
+  }
+
   updateDraft(input: DraftInput): SanmaoConversation {
     return this.inTransaction(() => {
       this.ensureConversation({

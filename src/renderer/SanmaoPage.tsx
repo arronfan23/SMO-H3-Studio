@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Plus, Settings2, X } from 'lucide-react';
 import type {
+  SanmaoAttachmentMetadata,
   SanmaoConversationSummary,
   SanmaoEffort,
   SanmaoMessage,
@@ -42,6 +43,8 @@ export function SanmaoPage({
   const [draft, setDraft] = useState('');
   const [draftDirty, setDraftDirty] = useState(false);
   const [effort, setEffort] = useState<SanmaoEffort>('medium');
+  const [attachments, setAttachments] = useState<SanmaoAttachmentMetadata[]>([]);
+  const [selectingAttachments, setSelectingAttachments] = useState(false);
   const [conversationId, setConversationId] = useState<string>(() => crypto.randomUUID());
   const [activeReplyId, setActiveReplyId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SanmaoConversationSummary | null>(null);
@@ -110,6 +113,7 @@ export function SanmaoPage({
         model: profile.model,
         effort,
         draft,
+        attachments: attachments.map(({ id }) => ({ id })),
       }).then((saved) => {
         const summary = summaryOf(saved);
         setConversations((current) => [
@@ -123,7 +127,7 @@ export function SanmaoPage({
       });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [canChat, conversationId, draft, draftDirty, effort, profile]);
+  }, [attachments, canChat, conversationId, draft, draftDirty, effort, profile]);
 
   const refreshConversations = async (): Promise<void> => {
     try {
@@ -170,15 +174,22 @@ export function SanmaoPage({
   };
 
   const send = async (): Promise<void> => {
-    const text = draft.trim();
+    const currentAttachments = [...attachments];
+    const text = draft.trim() || (currentAttachments.length > 0 ? '请阅读并分析附件。' : '');
     if (!text || activeReplyRef.current !== null || !canChat) return;
     const replyId = crypto.randomUUID();
     const requestedConversationId = conversationIdRef.current;
     setMessages((current) => [
       ...current,
-      { id: `${replyId}:user`, role: 'user', text },
+      {
+        id: `${replyId}:user`,
+        role: 'user',
+        text,
+        ...(currentAttachments.length === 0 ? {} : { attachments: currentAttachments }),
+      },
     ]);
     setDraft('');
+    setAttachments([]);
     setDraftDirty(false);
     setError(null);
     activeReplyRef.current = replyId;
@@ -188,6 +199,8 @@ export function SanmaoPage({
         conversationId: requestedConversationId,
         replyId,
         text,
+        effort,
+        attachments: currentAttachments,
       });
       await refreshConversations();
     } catch (sendError) {
@@ -206,6 +219,7 @@ export function SanmaoPage({
     setConversationId(next);
     setMessages([]);
     setDraft('');
+    setAttachments([]);
     setDraftDirty(false);
     setEffort('medium');
     setActiveReplyId(null);
@@ -228,6 +242,7 @@ export function SanmaoPage({
       setConversationId(nextConversationId);
       setMessages(conversation.messages);
       setDraft(conversation.draft);
+      setAttachments(conversation.draftAttachments);
       setEffort(conversation.effort);
       setDraftDirty(false);
       setError(null);
@@ -249,6 +264,43 @@ export function SanmaoPage({
       setError(errorMessage(deleteError));
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const selectAttachments = async (): Promise<void> => {
+    if (selectingAttachments || activeReplyRef.current) return;
+    setSelectingAttachments(true);
+    setError(null);
+    try {
+      const selected = await window.smo.sanmao.selectAttachments(
+        conversationIdRef.current,
+        attachments.map(({ id }) => id),
+      );
+      setAttachments((current) => [...current, ...selected]);
+      if (selected.length > 0) setDraftDirty(true);
+    } catch (selectError) {
+      setError(errorMessage(selectError));
+    } finally {
+      setSelectingAttachments(false);
+    }
+  };
+
+  const dropAttachments = async (files: File[]): Promise<void> => {
+    if (files.length === 0 || activeReplyRef.current || !canChat) return;
+    setSelectingAttachments(true);
+    setError(null);
+    try {
+      const selected = await window.smo.sanmao.authorizeDroppedAttachments(
+        files,
+        conversationIdRef.current,
+        attachments.map(({ id }) => id),
+      );
+      setAttachments((current) => [...current, ...selected]);
+      setDraftDirty(true);
+    } catch (dropError) {
+      setError(errorMessage(dropError));
+    } finally {
+      setSelectingAttachments(false);
     }
   };
 
@@ -298,6 +350,8 @@ export function SanmaoPage({
             model={profile?.model ?? ''}
             models={modelOptions}
             effort={effort}
+            attachments={attachments}
+            selectingAttachments={selectingAttachments}
             savingModel={savingModel}
             refreshing={refreshing}
             onDraftChange={(next) => {
@@ -306,6 +360,12 @@ export function SanmaoPage({
             }}
             onEffortChange={(next) => {
               setEffort(next);
+              setDraftDirty(true);
+            }}
+            onSelectAttachments={() => void selectAttachments()}
+            onDropAttachments={(files) => void dropAttachments(files)}
+            onRemoveAttachment={(attachmentId) => {
+              setAttachments((current) => current.filter(({ id }) => id !== attachmentId));
               setDraftDirty(true);
             }}
             onModelChange={(next) => void changeModel(next)}

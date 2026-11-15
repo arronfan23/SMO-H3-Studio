@@ -39,6 +39,7 @@ import { LlmService } from './llm';
 import { FileLlmConfigStore } from './llm-config';
 import { FileSanmaoConfigStore } from './sanmao-config';
 import { SanmaoConversationStore } from './sanmao-conversations';
+import { SanmaoAttachmentService } from './sanmao-attachments';
 import { SanmaoService } from './sanmao-service';
 import { SkillsService } from './skills';
 import { Store } from './store';
@@ -572,6 +573,7 @@ export async function createAppServices(
     sanmao = new SanmaoService({
       store: sanmaoConfig,
       conversations: new SanmaoConversationStore(join(dataDirectory, 'studio.sqlite')),
+      attachments: new SanmaoAttachmentService({ dialog: fileDialog }),
     });
     comfy = new ComfyClient(comfyBaseUrl);
     activeComfyProcess = new ComfyProcessManager(

@@ -101,23 +101,23 @@ git commit -m "Add Sanmao history and fixed composer"
 
 ### 任务 4：思考档位和真实附件
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 在 `tests/unit/sanmao-service.test.ts` 断言 low/medium/high 映射到 SDK `options.effort`，活动请求不随后续改变。`tests/unit/sanmao-attachments.test.ts` 验证 PNG/JPEG/WebP 图片转 base64 图片块、文本文件转文本块、数量/大小/格式/未授权拒绝，且 prompt 是 `AsyncIterable<SDKUserMessage>`。
 
-- [ ] **步骤 2：运行测试确认失败**
+- [x] **步骤 2：运行测试确认失败**
 
 运行：`npx vitest run tests/unit/sanmao-service.test.ts tests/unit/sanmao-attachments.test.ts -t "effort|attachment|附件|思考"`
 
-- [ ] **步骤 3：实现 effort 和附件管线**
+- [x] **步骤 3：实现 effort 和附件管线**
 
 发送请求捕获 effort 并传给 SDK。新增 `SanmaoAttachmentService` 处理文件选择、拖放授权、5MiB 图片和 1MiB 文本限制，各最多 4 个。`SanmaoQueryInput.prompt` 支持 `AsyncIterable<SDKUserMessage>`，保留现有文本历史，附件仅用于当前请求。preload 增加选择/授权附件接口。
 
-- [ ] **步骤 4：运行测试和类型检查**
+- [x] **步骤 4：运行测试和类型检查**
 
 运行：`npx vitest run tests/unit/sanmao-service.test.ts tests/unit/sanmao-attachments.test.ts tests/unit/sanmao-form.test.tsx && npm run typecheck`
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/main/sanmao-attachments.ts src/main/sanmao-service.ts src/main/ipc.ts src/preload/index.ts src/shared/ipc.ts src/shared/sanmao.ts src/renderer/SanmaoComposer.tsx src/renderer/SanmaoPage.tsx tests/unit/sanmao-service.test.ts tests/unit/sanmao-attachments.test.ts tests/unit/sanmao-form.test.tsx

@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
-import type { Options } from '@anthropic-ai/claude-agent-sdk/core';
+import type { Options, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk/core';
 import type {
+  SanmaoAttachmentMetadata,
   SanmaoConversation,
   SanmaoConversationSummary,
   SanmaoCredentials,
@@ -12,11 +13,15 @@ import {
   SanmaoConversationStore,
   type SanmaoDraftAttachmentInput,
 } from './sanmao-conversations';
+import {
+  SanmaoAttachmentService,
+  type SanmaoContentBlock,
+} from './sanmao-attachments';
 import type { FileSanmaoConfigStore } from './sanmao-config';
 import { listSanmaoModels } from './sanmao-models';
 
 export interface SanmaoQueryInput {
-  prompt: string;
+  prompt: string | AsyncIterable<SDKUserMessage>;
   options: Options;
 }
 
@@ -28,12 +33,15 @@ export interface SanmaoSendInput {
   conversationId: string;
   replyId: string;
   text: string;
+  effort?: SanmaoEffort;
+  attachments?: Array<Pick<SanmaoAttachmentMetadata, 'id'>>;
   onText: (text: string) => void;
 }
 
 export interface SanmaoServiceOptions {
   store: Pick<FileSanmaoConfigStore, 'getCredentials'>;
   conversations?: SanmaoConversationStore;
+  attachments?: SanmaoAttachmentService;
   queryImpl?: SanmaoQuery;
   timeoutMs?: number;
   claudeExecutablePath?: string;
@@ -42,6 +50,32 @@ export interface SanmaoServiceOptions {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const requireClaude = createRequire(import.meta.url);
+
+function attachmentMetadata(
+  attachments: SanmaoDraftAttachmentInput[],
+): SanmaoAttachmentMetadata[] {
+  return attachments.map(({ id, name, kind, mimeType, size }) => ({
+    id,
+    name,
+    kind,
+    mimeType,
+    size,
+  }));
+}
+
+async function* attachmentPrompt(
+  text: string,
+  attachments: SanmaoContentBlock[],
+): AsyncIterable<SDKUserMessage> {
+  yield {
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text }, ...attachments],
+    },
+    parent_tool_use_id: null,
+  } as SDKUserMessage;
+}
 
 export function normalizeClaudeExecutablePath(path: string): string {
   return path.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
@@ -158,12 +192,31 @@ export class SanmaoService {
     model: string;
     effort?: SanmaoEffort;
     draft: string;
-    attachments?: SanmaoDraftAttachmentInput[];
+    attachments?: Array<Pick<SanmaoAttachmentMetadata, 'id'>>;
   }): SanmaoConversation {
     return this.conversations.updateDraft({
       ...input,
-      attachments: input.attachments ?? [],
+      attachments: this.resolveAttachments(input.conversationId, input.attachments ?? []),
     });
+  }
+
+  selectAttachments(
+    conversationId: string,
+    existingIds: string[],
+  ): Promise<SanmaoAttachmentMetadata[]> {
+    const attachments = this.requireAttachments();
+    attachments.restore(this.conversations.getDraftAttachmentInputs(conversationId));
+    return attachments.selectAttachments(existingIds);
+  }
+
+  authorizeDroppedAttachments(
+    paths: string[],
+    conversationId: string,
+    existingIds: string[],
+  ): Promise<SanmaoAttachmentMetadata[]> {
+    const attachments = this.requireAttachments();
+    attachments.restore(this.conversations.getDraftAttachmentInputs(conversationId));
+    return attachments.authorizeDroppedAttachments(paths, existingIds);
   }
 
   deleteConversation(conversationId: string): void {
@@ -173,25 +226,43 @@ export class SanmaoService {
   async send(input: SanmaoSendInput): Promise<{ replyId: string; text: string }> {
     if (this.closed) throw new Error('三脚猫服务已关闭');
     if (this.active !== null) throw new Error('三脚猫正在回复，请稍候');
+    const effort = input.effort ?? 'medium';
+    const attachmentRefs = [...(input.attachments ?? [])];
     const text = input.text.trim();
     if (!text) throw new Error('消息不能为空');
 
     const credentials = await this.requireCredentials();
+    const attachments = this.resolveAttachments(input.conversationId, attachmentRefs);
     const history = this.conversations.getConversation(input.conversationId)?.messages ?? [];
     this.conversations.appendMessage({
       conversationId: input.conversationId,
       model: credentials.model,
-      message: { id: `${input.replyId}:user`, role: 'user', text },
+      effort,
+      message: {
+        id: `${input.replyId}:user`,
+        role: 'user',
+        text,
+        ...(attachments.length === 0 ? {} : { attachments: attachmentMetadata(attachments) }),
+      },
     });
+    const historyPrompt = this.buildPrompt(history, text);
+    const prompt = attachments.length === 0
+      ? historyPrompt
+      : attachmentPrompt(
+          historyPrompt,
+          await this.requireAttachments().createContentBlocks(attachments),
+        );
     const response = await this.execute(
-      this.buildPrompt(history, text),
+      prompt,
       input.replyId,
       input.onText,
       credentials,
+      effort,
     );
     this.conversations.appendMessage({
       conversationId: input.conversationId,
       model: credentials.model,
+      effort,
       message: { id: `${input.replyId}:assistant`, role: 'assistant', text: response },
     });
     return { replyId: input.replyId, text: response };
@@ -233,10 +304,11 @@ export class SanmaoService {
   }
 
   private async execute(
-    prompt: string,
+    prompt: string | AsyncIterable<SDKUserMessage>,
     replyId: string,
     onText: (text: string) => void,
     credentialsOverride?: SanmaoCredentials,
+    effort: SanmaoEffort = 'medium',
   ): Promise<string> {
     const credentials = credentialsOverride ?? await this.requireCredentials();
     const controller = new AbortController();
@@ -254,6 +326,7 @@ export class SanmaoService {
         prompt,
         options: {
           model: credentials.model,
+          effort,
           env: createSanmaoEnvironment(credentials),
           tools: [],
           mcpServers: {},
@@ -299,6 +372,27 @@ export class SanmaoService {
     const credentials = await this.options.store.getCredentials();
     if (credentials === null) throw new Error('请先配置三脚猫的服务地址、API Key 和模型');
     return credentials;
+  }
+
+  private requireAttachments(): SanmaoAttachmentService {
+    if (this.options.attachments === undefined) {
+      throw new Error('三脚猫附件服务未配置');
+    }
+    return this.options.attachments;
+  }
+
+  private resolveAttachments(
+    conversationId: string,
+    references: Array<Pick<SanmaoAttachmentMetadata, 'id'>>,
+  ): SanmaoDraftAttachmentInput[] {
+    const persisted = this.conversations.getDraftAttachmentInputs(conversationId);
+    this.options.attachments?.restore(persisted);
+    return references.map((reference) => {
+      const attachment = this.options.attachments?.getAuthorized(reference.id) ??
+        persisted.find((candidate) => candidate.id === reference.id);
+      if (attachment === undefined) throw new Error('附件未授权或已移除');
+      return attachment;
+    });
   }
 
   private sanitizeError(error: unknown, apiKey: string): Error {

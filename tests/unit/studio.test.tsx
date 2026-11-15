@@ -82,6 +82,8 @@ function createSmoMock() {
       getConversation: vi.fn(),
       saveDraft: vi.fn(),
       deleteConversation: vi.fn(),
+      selectAttachments: vi.fn(),
+      authorizeDroppedAttachments: vi.fn(),
       send: vi.fn(),
       cancel: vi.fn(),
       subscribe: vi.fn(),
@@ -214,6 +216,8 @@ beforeEach(() => {
     draftAttachments: [],
   }));
   smo.sanmao.deleteConversation.mockResolvedValue(undefined);
+  smo.sanmao.selectAttachments.mockResolvedValue([]);
+  smo.sanmao.authorizeDroppedAttachments.mockResolvedValue([]);
   smo.sanmao.send.mockResolvedValue({ ok: true });
   smo.sanmao.cancel.mockResolvedValue(undefined);
   smo.sanmao.subscribe.mockReturnValue(() => undefined);

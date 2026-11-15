@@ -30,6 +30,7 @@ import type {
   Work,
 } from './types';
 import type {
+  SanmaoAttachmentMetadata,
   SanmaoConversation,
   SanmaoConversationSummary,
   SanmaoEffort,
@@ -91,6 +92,8 @@ export const IPC_CHANNELS = [
   'sanmao:getConversation',
   'sanmao:saveDraft',
   'sanmao:deleteConversation',
+  'sanmao:selectAttachments',
+  'sanmao:authorizeDroppedAttachments',
   'sanmao:send',
   'sanmao:cancel',
   'avatars:list',
@@ -132,6 +135,8 @@ const sanmaoSendSchema = z.object({
   conversationId: z.string().uuid(),
   replyId: z.string().uuid(),
   text: z.string().trim().min(1).max(32_000),
+  effort: z.enum(['low', 'medium', 'high']).optional(),
+  attachments: z.array(z.object({ id: z.string().uuid() }).strict()).max(8).optional(),
 }).strict();
 const sanmaoConversationSchema = z.object({
   conversationId: z.string().uuid(),
@@ -140,6 +145,13 @@ const sanmaoDraftSchema = sanmaoConversationSchema.extend({
   model: nonEmptyString,
   effort: z.enum(['low', 'medium', 'high']).optional(),
   draft: z.string().max(32_000),
+  attachments: z.array(z.object({ id: z.string().uuid() }).strict()).max(8).optional(),
+}).strict();
+const sanmaoAttachmentSelectionSchema = sanmaoConversationSchema.extend({
+  existingIds: z.array(z.string().uuid()).max(8),
+}).strict();
+const sanmaoAttachmentDropSchema = sanmaoAttachmentSelectionSchema.extend({
+  paths: z.array(nonEmptyString).min(1).max(8),
 }).strict();
 
 const httpUrlSchema = z.string().superRefine((value, context) => {
@@ -468,6 +480,8 @@ export function createIpcSchema() {
     requestSchema('sanmao:getConversation', sanmaoConversationSchema),
     requestSchema('sanmao:saveDraft', sanmaoDraftSchema),
     requestSchema('sanmao:deleteConversation', sanmaoConversationSchema),
+    requestSchema('sanmao:selectAttachments', sanmaoAttachmentSelectionSchema),
+    requestSchema('sanmao:authorizeDroppedAttachments', sanmaoAttachmentDropSchema),
     requestSchema('sanmao:send', sanmaoSendSchema),
     requestSchema(
       'sanmao:cancel',
@@ -606,12 +620,24 @@ export interface SmoApi {
       model: string;
       effort?: SanmaoEffort;
       draft: string;
+      attachments?: Array<{ id: string }>;
     }): Promise<SanmaoConversation>;
     deleteConversation(conversationId: string): Promise<void>;
+    selectAttachments(
+      conversationId: string,
+      existingIds: string[],
+    ): Promise<SanmaoAttachmentMetadata[]>;
+    authorizeDroppedAttachments(
+      files: unknown[],
+      conversationId: string,
+      existingIds: string[],
+    ): Promise<SanmaoAttachmentMetadata[]>;
     send(input: {
       conversationId: string;
       replyId: string;
       text: string;
+      effort?: SanmaoEffort;
+      attachments?: SanmaoAttachmentMetadata[];
     }): Promise<{ ok: true }>;
     cancel(replyId: string): Promise<void>;
     subscribe(listener: (event: SanmaoStreamEvent) => void): () => void;

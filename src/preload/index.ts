@@ -79,6 +79,20 @@ const api: SmoApi = {
       'sanmao:deleteConversation',
       { conversationId },
     ),
+    selectAttachments: (conversationId, existingIds) => ipcRenderer.invoke(
+      'sanmao:selectAttachments',
+      { conversationId, existingIds },
+    ),
+    authorizeDroppedAttachments: (files, conversationId, existingIds) => ipcRenderer.invoke(
+      'sanmao:authorizeDroppedAttachments',
+      {
+        paths: files.map((file) => webUtils.getPathForFile(
+          file as Parameters<typeof webUtils.getPathForFile>[0],
+        )),
+        conversationId,
+        existingIds,
+      },
+    ),
     send: (input) => ipcRenderer.invoke('sanmao:send', input),
     cancel: (replyId) => ipcRenderer.invoke('sanmao:cancel', { replyId }),
     subscribe: (listener) => {

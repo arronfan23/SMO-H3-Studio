@@ -75,6 +75,8 @@ export interface IpcServices {
     | 'getConversation'
     | 'saveDraft'
     | 'deleteConversation'
+    | 'selectAttachments'
+    | 'authorizeDroppedAttachments'
     | 'cancel'
     | 'close'
   >;
@@ -223,13 +225,26 @@ async function dispatch(
     case 'sanmao:deleteConversation':
       services.sanmao.deleteConversation(request.payload.conversationId);
       return undefined;
+    case 'sanmao:selectAttachments':
+      return services.sanmao.selectAttachments(
+        request.payload.conversationId,
+        request.payload.existingIds,
+      );
+    case 'sanmao:authorizeDroppedAttachments':
+      return services.sanmao.authorizeDroppedAttachments(
+        request.payload.paths,
+        request.payload.conversationId,
+        request.payload.existingIds,
+      );
     case 'sanmao:send': {
-      const { conversationId, replyId, text } = request.payload;
+      const { conversationId, replyId, text, effort, attachments } = request.payload;
       try {
         const result = await services.sanmao.send({
           conversationId,
           replyId,
           text,
+          effort,
+          attachments,
           onText: (delta) => context.emit('sanmao:stream', {
             conversationId,
             replyId,

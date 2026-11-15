@@ -78,7 +78,7 @@ describe('SanmaoService', () => {
     const prompts: string[] = [];
     const options: Options[] = [];
     const service = createService((input: SanmaoQueryInput) => {
-      prompts.push(input.prompt);
+      if (typeof input.prompt === 'string') prompts.push(input.prompt);
       options.push(input.options);
       return successfulQuery([
         textDelta('你好'),
@@ -346,4 +346,28 @@ describe('SanmaoService', () => {
     service.deleteConversation(conversationId);
     expect(service.getConversation(conversationId)).toBeNull();
   });
+
+  test.each(['low', 'medium', 'high'] as const)(
+    'captures the %s effort for the active SDK request',
+    async (effort) => {
+      let capturedEffort: Options['effort'];
+      const service = createService((input: SanmaoQueryInput) => {
+        capturedEffort = input.options.effort;
+        return successfulQuery([success('OK')])(input);
+      });
+      const input = {
+        conversationId: '00000000-0000-4000-8000-000000000501',
+        replyId: '00000000-0000-4000-8000-000000000502',
+        text: '固定思考档位',
+        effort,
+        onText: () => undefined,
+      };
+
+      const pending = service.send(input);
+      input.effort = effort === 'low' ? 'high' : 'low';
+      await pending;
+
+      expect(capturedEffort).toBe(effort);
+    },
+  );
 });
