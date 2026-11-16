@@ -172,6 +172,7 @@ function makeService(
     dataDirectory,
     manifest,
     downloadFile: download,
+    downloadRetryDelay: async () => undefined,
     modelDirectory: options.modelDirectory,
     inspectImageRuntime:
       options.inspectImageRuntime ??
@@ -707,10 +708,14 @@ describe('MediaComponentService', () => {
 
     expect(download.mock.calls.map(([options]) => options.url)).toEqual([
       mirrorUrl,
+      mirrorUrl,
+      mirrorUrl,
       originalUrl,
     ]);
     expect(requests).toEqual([
       { path: mirrorPath, range: undefined },
+      { path: mirrorPath, range: 'bytes=5-' },
+      { path: mirrorPath, range: 'bytes=5-' },
       { path: officialPath, range: undefined },
     ]);
     const installed = await readFile(fileDestination);
@@ -735,7 +740,7 @@ describe('MediaComponentService', () => {
     });
   });
 
-  test('does not resume a failed mirror part from the official URL on the next install', async () => {
+  test('resumes the interrupted fallback source on the next install without mixing sources', async () => {
     const manifest = makeManifest();
     const originalUrl =
       'https://github.com/astral-sh/uv/releases/download/0.11.13/uv-x86_64-pc-windows-msvc.zip';
@@ -770,10 +775,14 @@ describe('MediaComponentService', () => {
         return;
       }
       if (request.url === mirrorPath) {
-        response.writeHead(200, { 'Content-Length': speechFile.size });
-        response.write(Buffer.from('WRONG'), () => {
-          setTimeout(() => response.destroy(), 25);
-        });
+        if (officialShouldFail) {
+          response.writeHead(200, { 'Content-Length': speechFile.size });
+          response.write(firstData.subarray(0, 5), () => {
+            setTimeout(() => response.destroy(), 25);
+          });
+        } else {
+          serveBuffer(firstData)(request, response);
+        }
         return;
       }
       response.writeHead(404);
@@ -781,13 +790,13 @@ describe('MediaComponentService', () => {
     };
 
     await expect(service.install('speech')).rejects.toThrow();
-    expect(await readFile(`${fileDestination}.part`)).toEqual(Buffer.from('WRONG'));
+    expect(await readFile(`${fileDestination}.part`)).toEqual(firstData.subarray(0, 5));
 
     requests = [];
     officialShouldFail = false;
     await service.install('speech');
 
-    expect(requests).toEqual([{ path: officialPath, range: undefined }]);
+    expect(requests).toEqual([{ path: mirrorPath, range: 'bytes=5-' }]);
     expect(await readFile(fileDestination)).toEqual(firstData);
     expect(sha256(await readFile(fileDestination))).toBe(speechFile.sha256);
     expect(service.getState('speech')).toMatchObject({
@@ -839,6 +848,58 @@ describe('MediaComponentService', () => {
     expect(await readFile(fileDestination)).toEqual(firstData);
     expect(service.getState('speech')).toMatchObject({ status: 'ready', active: false });
     expect(await exists(`${fileDestination}.part.source`)).toBe(false);
+  });
+
+  test('automatically resumes a network interruption before trying another source', async () => {
+    const manifest = makeManifest();
+    const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const mirrorUrl = 'https://hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const mirrorPath = '/hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const officialPath = '/huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    speechFile.url = originalUrl;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    const prefix = firstData.subarray(0, 8);
+    let mirrorAttempts = 0;
+    const download = vi.fn<DownloadFile>(async (options) => {
+      const source = new URL(options.url);
+      return realDownloadFile({
+        ...options,
+        url: `${localOrigin}/${source.hostname}${source.pathname}`,
+        fetch: transport,
+      });
+    });
+    const { service } = makeService(manifest, download);
+    handler = (request, response) => {
+      if (request.url === mirrorPath) {
+        mirrorAttempts += 1;
+        if (mirrorAttempts === 1) {
+          response.writeHead(200, { 'Content-Length': speechFile.size });
+          response.write(prefix, () => {
+            setTimeout(() => response.destroy(), 25);
+          });
+        } else {
+          serveBuffer(firstData)(request, response);
+        }
+        return;
+      }
+      response.writeHead(503);
+      response.end('official must not be needed');
+    };
+
+    await expect(service.install('speech')).resolves.toMatchObject({
+      status: 'ready',
+      active: false,
+    });
+
+    expect(requests).toEqual([
+      { path: mirrorPath, range: undefined },
+      { path: mirrorPath, range: `bytes=${prefix.length}-` },
+    ]);
+    expect(requests.some((request) => request.path === officialPath)).toBe(false);
+    expect(await readFile(destination(speechFile.path))).toEqual(firstData);
   });
 
   test('stops before the official URL when a mirror download is cancelled', async () => {

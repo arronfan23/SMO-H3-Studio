@@ -1,4 +1,5 @@
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import defaultManifest from '../../resources/environment/media-components.json';
 import type {
@@ -83,6 +84,38 @@ function isDownloadHashMismatch(error: unknown): boolean {
     error instanceof Error &&
     error.message === 'Downloaded SHA256 does not match the expected SHA256'
   );
+}
+
+function isTransientDownloadError(error: unknown): boolean {
+  return (
+    /net::ERR_(?:CONNECTION_RESET|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|TIMED_OUT|CONNECTION_CLOSED|CONNECTION_REFUSED)/i.test(
+      errorMessage(error),
+    ) ||
+    /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETDOWN|ENETUNREACH)\b/i.test(
+      errorMessage(error),
+    ) ||
+    /(?:Download response was aborted|Download timed out|fetch failed|socket hang up|other side closed|terminated)/i.test(
+      errorMessage(error),
+    )
+  );
+}
+
+async function preferInterruptedDownloadSource(
+  destination: string,
+  sources: string[],
+): Promise<string[]> {
+  let interruptedSource: string;
+  try {
+    interruptedSource = await readFile(`${destination}.part.source`, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return sources;
+    throw error;
+  }
+  if (!sources.includes(interruptedSource)) return sources;
+  return [
+    interruptedSource,
+    ...sources.filter((source) => source !== interruptedSource),
+  ];
 }
 
 const mediaComponentFileSchema = z
@@ -222,6 +255,7 @@ export interface MediaComponentServiceOptions {
   inspectImageRuntime?: () => ImageRuntimeInspection | Promise<ImageRuntimeInspection>;
   manifest?: unknown;
   downloadFile?: typeof defaultDownloadFile;
+  downloadRetryDelay?: (attempt: number) => Promise<void>;
 }
 
 interface InstallFlight {
@@ -420,46 +454,67 @@ export class MediaComponentService {
       const destination = this.destination(component, file, modelDirectory);
       this.setState(id, { currentFile: file.path });
       const hostname = new URL(file.url).hostname;
-      const sources =
+      const availableSources =
         hostname === 'huggingface.co'
           ? modelDownloadUrls(file)
           : hostname === 'github.com'
             ? runtimeDownloadUrls(file.url)
             : [file.url];
+      const sources = await preferInterruptedDownloadSource(
+        destination,
+        availableSources,
+      );
       let receipt: DownloadReceipt | undefined;
       for (const [sourceIndex, url] of sources.entries()) {
-        signal.throwIfAborted();
-        try {
-          await prepareDownloadSource(destination, url);
-          receipt = await (this.options.downloadFile ?? defaultDownloadFile)({
-            url,
-            destination,
-            expectedSize: file.size,
-            expectedSha256: file.sha256,
-            signal,
-            onProgress: (progress) => {
-              displayedBytes = Math.max(
-                displayedBytes,
-                Math.min(totalBytes, completedBytes + progress.downloadedBytes),
-              );
-              this.setState(id, {
-                downloadedBytes: displayedBytes,
-                totalBytes,
-                currentFile: file.path,
-              });
-            },
-          });
-          await clearTemporaryDownload(destination);
-          break;
-        } catch (error) {
-          if (signal.aborted) throw error;
-          const finalSource = sourceIndex === sources.length - 1;
-          if (!finalSource || isDownloadHashMismatch(error)) {
-            // A part can only be resumed by the exact source that wrote it.
+        let networkAttempt = 0;
+        while (true) {
+          signal.throwIfAborted();
+          try {
+            await prepareDownloadSource(destination, url);
+            receipt = await (this.options.downloadFile ?? defaultDownloadFile)({
+              url,
+              destination,
+              expectedSize: file.size,
+              expectedSha256: file.sha256,
+              signal,
+              onProgress: (progress) => {
+                displayedBytes = Math.max(
+                  displayedBytes,
+                  Math.min(totalBytes, completedBytes + progress.downloadedBytes),
+                );
+                this.setState(id, {
+                  downloadedBytes: displayedBytes,
+                  totalBytes,
+                  currentFile: file.path,
+                });
+              },
+            });
             await clearTemporaryDownload(destination);
+            break;
+          } catch (error) {
+            if (signal.aborted) throw error;
+            if (
+              networkAttempt < 2 &&
+              !isDownloadHashMismatch(error) &&
+              isTransientDownloadError(error)
+            ) {
+              networkAttempt += 1;
+              await (this.options.downloadRetryDelay?.(networkAttempt) ??
+                new Promise<void>((resolveDelay) => {
+                  setTimeout(resolveDelay, networkAttempt * 1000);
+                }));
+              continue;
+            }
+            const finalSource = sourceIndex === sources.length - 1;
+            if (!finalSource || isDownloadHashMismatch(error)) {
+              // A part can only be resumed by the exact source that wrote it.
+              await clearTemporaryDownload(destination);
+            }
+            if (finalSource) throw error;
+            break;
           }
-          if (finalSource) throw error;
         }
+        if (receipt) break;
       }
       if (!receipt) throw new Error(`No download source available for ${file.path}`);
       completedBytes += receipt.bytes;
