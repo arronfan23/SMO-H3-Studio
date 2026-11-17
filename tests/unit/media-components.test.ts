@@ -710,10 +710,16 @@ describe('MediaComponentService', () => {
       mirrorUrl,
       mirrorUrl,
       mirrorUrl,
+      mirrorUrl,
+      mirrorUrl,
+      mirrorUrl,
       originalUrl,
     ]);
     expect(requests).toEqual([
       { path: mirrorPath, range: undefined },
+      { path: mirrorPath, range: 'bytes=5-' },
+      { path: mirrorPath, range: 'bytes=5-' },
+      { path: mirrorPath, range: 'bytes=5-' },
       { path: mirrorPath, range: 'bytes=5-' },
       { path: mirrorPath, range: 'bytes=5-' },
       { path: officialPath, range: undefined },
@@ -902,6 +908,38 @@ describe('MediaComponentService', () => {
     expect(await readFile(destination(speechFile.path))).toEqual(firstData);
   });
 
+  test('keeps resuming through repeated stalls beyond the old three-attempt limit', async () => {
+    const manifest = makeManifest();
+    const speechFile = manifest.components.speech.files[0] as MediaComponentFile;
+    manifest.components.speech.files = [speechFile];
+    manifest.components.speech.revisions = revisionsFor(FIRST_REPOSITORY);
+    manifest.components.speech.totalBytes = speechFile.size;
+    let attempts = 0;
+    const download = vi.fn<DownloadFile>(async (options) => {
+      attempts += 1;
+      if (attempts < 5) {
+        options.onProgress?.({
+          downloadedBytes: 8,
+          totalBytes: options.expectedSize,
+          path: options.destination,
+        });
+        throw new Error('Download timed out after 120000 ms without progress');
+      }
+      return {
+        resumed: true,
+        bytes: options.expectedSize,
+        sha256: options.expectedSha256,
+      };
+    });
+    const { service } = makeService(manifest, download);
+
+    await expect(service.install('speech')).resolves.toMatchObject({
+      status: 'ready',
+      active: false,
+    });
+    expect(attempts).toBe(5);
+  });
+
   test('stops before the official URL when a mirror download is cancelled', async () => {
     const manifest = makeManifest();
     const originalUrl = 'https://huggingface.co/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth';
@@ -1026,10 +1064,10 @@ describe('MediaComponentService', () => {
       'https://hf-mirror.com/IndexTeam/IndexTTS-2.5/resolve/main/gpt.pth',
       originalUrl,
     ]);
-    expect(rejection).toBe(officialError);
+    expect(rejection).toMatchObject({ cause: officialError });
     expect(service.getState('speech')).toMatchObject({
       status: 'failed',
-      error: officialError.message,
+      error: expect.stringContaining(officialError.message),
       active: false,
     });
   });
@@ -1372,8 +1410,10 @@ describe('MediaComponentService', () => {
     expect(service.getState('speech')).toMatchObject({
       status: 'failed',
       active: false,
-      error: 'injected download failure',
+      error: expect.stringContaining('injected download failure'),
     });
+    expect(service.getState('speech').error).toContain('CustomVoice/config.json');
+    expect(service.getState('speech').error).toContain('127.0.0.1');
 
     await expect(service.install('speech')).resolves.toMatchObject({
       status: 'ready',

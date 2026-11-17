@@ -196,6 +196,39 @@ describe('downloadFile', () => {
     ).rejects.toThrow(/20 ms without progress/i);
   });
 
+  test('allows slow large-model servers up to 120 seconds without progress by default', async () => {
+    const controller = new AbortController();
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const destination = join(directory, 'slow-large-model.bin');
+      const fetchMock = vi.fn<Fetch>((_input, init) => {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        });
+      });
+      const downloading = downloadFile({
+        url: testUrl('/slow-large-model.bin'),
+        destination,
+        expectedSize: 20,
+        expectedSha256: 'a'.repeat(64),
+        fetch: fetchMock,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      const scheduledTimeouts = timeoutSpy.mock.calls.map((call) => call[1]);
+      controller.abort(new Error('Default timeout inspection complete'));
+      await expect(downloading).rejects.toThrow('Default timeout inspection complete');
+      expect(scheduledTimeouts).toContain(120_000);
+    } finally {
+      controller.abort();
+      timeoutSpy.mockRestore();
+    }
+  });
+
   test('times out when the response body stalls before sending data', async () => {
     const destination = join(directory, 'stalled.bin');
     const fetchMock = vi.fn<Fetch>().mockResolvedValue(

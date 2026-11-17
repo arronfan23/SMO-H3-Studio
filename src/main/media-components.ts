@@ -494,14 +494,15 @@ export class MediaComponentService {
           } catch (error) {
             if (signal.aborted) throw error;
             if (
-              networkAttempt < 2 &&
+              networkAttempt < 5 &&
               !isDownloadHashMismatch(error) &&
               isTransientDownloadError(error)
             ) {
               networkAttempt += 1;
               await (this.options.downloadRetryDelay?.(networkAttempt) ??
                 new Promise<void>((resolveDelay) => {
-                  setTimeout(resolveDelay, networkAttempt * 1000);
+                  const delayMs = Math.min(1000 * 2 ** (networkAttempt - 1), 10_000);
+                  setTimeout(resolveDelay, delayMs);
                 }));
               continue;
             }
@@ -510,7 +511,12 @@ export class MediaComponentService {
               // A part can only be resumed by the exact source that wrote it.
               await clearTemporaryDownload(destination);
             }
-            if (finalSource) throw error;
+            if (finalSource) {
+              throw new Error(
+                `${errorMessage(error)}（文件：${file.path}；下载源：${new URL(url).hostname}）`,
+                { cause: error },
+              );
+            }
             break;
           }
         }
