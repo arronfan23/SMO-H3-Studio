@@ -302,7 +302,7 @@ git commit -m "Verify studio layout across window sizes"
 
 预期：6/6 PASS。使用 `Get-FileHash -Algorithm SHA256` 计算两个 exe 的哈希，写入 `SHA256SUMS-0.6.3.txt`。
 
-- [ ] **步骤 4：提交、推送并创建 Release**
+- [x] **步骤 4：提交、推送并创建 Release**
 
 只暂存本计划涉及的文件，继续排除用户已有的 `tests/e2e/environment.spec.ts`、`tests/unit/environment-wizard.test.tsx` 与缓存目录。
 
@@ -317,7 +317,7 @@ gh release create v0.6.3 release/SMO.H3-Studio-Setup-0.6.3.exe release/SMO.H3-St
 
 Release 说明包含自适应双栏、媒体防溢出、语音入口合并和旧作品兼容。使用 `gh release view v0.6.3 --json assets` 核对远端 digest 与本地 SHA-256 完全一致。
 
-- [ ] **步骤 5：覆盖本机并验证运行版本**
+- [x] **步骤 5：覆盖本机并验证运行版本**
 
 只关闭可执行路径为 `G:\SMO-H3-Studio-Installed\SMO.H3 Studio.exe` 的应用进程，不停止 ComfyUI。使用安装包参数 `/S /D=G:\SMO-H3-Studio-Installed` 覆盖安装，然后重新启动该 exe。
 
