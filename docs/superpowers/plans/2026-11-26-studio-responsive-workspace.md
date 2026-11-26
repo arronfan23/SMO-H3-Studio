@@ -172,7 +172,7 @@ git commit -m "Unify speech generation controls"
 
 **文件：** `src/renderer/ImageForm.tsx`、`src/renderer/TextToVideoForm.tsx`、`src/renderer/AudioDigitalHumanForm.tsx`、`src/renderer/StudioPage.tsx`、`src/renderer/styles.css`、`tests/unit/image-form.test.tsx`、`tests/unit/studio.test.tsx`
 
-- [ ] **步骤 1：编写输出归属与人物位置的失败测试**
+- [x] **步骤 1：编写输出归属与人物位置的失败测试**
 
 对语音、图像、文生视频、参考生视频和音频数字人分别断言：主按钮位于 `.studio-editor-pane`，对应 `JobStatus` 和 `GenerationResultPreview` 位于 `getByRole('complementary', { name: '任务与结果' })`。音频数字人增加：
 
@@ -183,13 +183,13 @@ expect(within(editor as HTMLElement).getByRole('region', { name: '当前人物�
 expect(document.querySelector('#video-main-panel > .studio-layout > .person-preview')).toBeNull();
 ```
 
-- [ ] **步骤 2：运行测试并确认旧结构失败**
+- [x] **步骤 2：运行测试并确认旧结构失败**
 
 运行：`npx vitest run tests/unit/image-form.test.tsx tests/unit/studio.test.tsx --reporter=dot`
 
 预期：FAIL；旧输出仍在编辑列，人物预览仍由 `StudioPage` 外层持有。
 
-- [ ] **步骤 3：接入共享布局且不改提交函数**
+- [x] **步骤 3：接入共享布局且不改提交函数**
 
 每个表单保留现有 `<form>`、校验和提交函数。将原来位于 `JobStatus` 之前的编辑控件逐项移入 `StudioWorkspace` 的 `editor` 属性，并保持它们的原有顺序。把每个表单末尾现有的状态与结果组合移入 `output`，例如图像表单使用：
 
@@ -202,7 +202,7 @@ output={<>
 
 `TextToVideoForm` 使用 `<JobStatus jobId={jobId} active={active} />`，不添加 `allowCancel`。`SpeechForm` 与 `AudioDigitalHumanForm` 保留 `active={active && pageActive}` 和 `allowCancel`。`AudioDigitalHumanForm` 新增可选 `avatar?: Avatar | null`，保留 `avatarId` 提交参数；当传入模特时，在编辑区顶部渲染 `AvatarImage`、模特名称与 `参考人物：<Picture 1>`。`StudioPage` 传入 `avatar={avatar}`，删除旧 `studio-layout` 人物列。
 
-- [ ] **步骤 4：补充参数与人物横排样式**
+- [x] **步骤 4：补充参数与人物横排样式**
 
 ```css
 .studio-parameter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; }
@@ -215,7 +215,7 @@ output={<>
 
 将语音三项参数、图像比例/分辨率/种子/步数和视频参数行改用 `.studio-parameter-grid`，不修改其他页面的 `.form-row`。
 
-- [ ] **步骤 5：运行回归并提交**
+- [x] **步骤 5：运行回归并提交**
 
 运行：`npx vitest run tests/unit/image-form.test.tsx tests/unit/speech-form.test.tsx tests/unit/studio.test.tsx --reporter=dot`
 
