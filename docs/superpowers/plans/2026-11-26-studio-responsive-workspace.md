@@ -92,11 +92,11 @@ export function StudioWorkspace({ editor, output }: { editor: ReactNode; output:
 .generation-result-audio { display: block; width: 100%; max-width: 100%; }
 .generation-result-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .generation-result-actions .button { flex: 1 1 140px; }
-@container (min-width: 1040px) {
+@container (min-width: 1024px) {
   .studio-workspace-grid { grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); }
 }
 @media (min-height: 700px) {
-  @container (min-width: 1040px) { .studio-output-pane { position: sticky; top: 0; } }
+  @container (min-width: 1024px) { .studio-output-pane { position: sticky; top: 0; } }
 }
 ```
 
@@ -230,7 +230,7 @@ git commit -m "Apply adaptive workspace to studio forms"
 
 **文件：** `tests/e2e/studio.spec.ts`
 
-- [ ] **步骤 1：新增最大化和还原的失败回归**
+- [x] **步骤 1：新增最大化和还原的失败回归**
 
 扩展现有图像模拟 ComfyUI 用例，输出至少 `1376 × 768` 的横图。生成后依次设置 `1280 × 820`、`1920 × 1080`、`960 × 640`，再执行应用最大化与还原。每个尺寸保存截图，并记录：
 
@@ -253,23 +253,23 @@ const layout = await page.evaluate(() => {
 
 宽屏断言 `columns && imageInside && !horizontalOverflow`；960 宽断言 `stacked && imageInside && !horizontalOverflow`。最大化与还原后 `#text-image-prompt`、比例、分辨率、种子、步数和任务 ID 必须与切换前一致。
 
-- [ ] **步骤 2：运行目标 E2E 并确认旧布局失败**
+- [x] **步骤 2：运行目标 E2E 并确认旧布局失败**
 
 运行：`npm run test:e2e -- tests/e2e/studio.spec.ts -g "图像生成使用模拟 ComfyUI PNG"`
 
 预期：FAIL；旧页面没有共享区域，或媒体右边界超出结果容器。
 
-- [ ] **步骤 3：修正实际截图暴露的布局问题**
+- [x] **步骤 3：修正实际截图暴露的布局问题**
 
 只调整任务 1 和任务 3 的共享样式与布局结构。重点检查输出区吸顶是否被滚动容器裁剪、`.generation-result-image` 是否保持原比例、长进度文本是否推宽面板，以及矮窗口是否取消吸顶。不得通过隐藏结果、固定图片高度裁剪或添加横向滚动来通过测试。
 
-- [ ] **步骤 4：运行完整界面回归**
+- [x] **步骤 4：运行完整界面回归**
 
 运行：`npm run test:e2e -- tests/e2e/studio.spec.ts`
 
 预期：全部 PASS，新增场景保留各尺寸截图。
 
-- [ ] **步骤 5：提交响应式验收**
+- [x] **步骤 5：提交响应式验收**
 
 ```bash
 git add tests/e2e/studio.spec.ts src/renderer
