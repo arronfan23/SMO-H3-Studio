@@ -280,7 +280,7 @@ git commit -m "Verify studio layout across window sizes"
 
 **文件：** `package.json`、`package-lock.json`、`release/SMO.H3-Studio-Setup-0.6.3.exe`、`release/SMO.H3-Studio-0.6.3.exe`、`release/SHA256SUMS-0.6.3.txt`
 
-- [ ] **步骤 1：运行完整静态与单元验证**
+- [x] **步骤 1：运行完整静态与单元验证**
 
 运行：`npm run typecheck`
 
@@ -288,7 +288,7 @@ git commit -m "Verify studio layout across window sizes"
 
 预期：类型检查退出码 0；除明确排除的既有用户修改文件外，单元测试无失败。
 
-- [ ] **步骤 2：升级补丁版本并构建最终双产物**
+- [x] **步骤 2：升级补丁版本并构建最终双产物**
 
 运行：`npm version 0.6.3 --no-git-tag-version`
 
@@ -296,7 +296,7 @@ git commit -m "Verify studio layout across window sizes"
 
 预期：生成 `release/SMO.H3-Studio-Setup-0.6.3.exe` 和 `release/SMO.H3-Studio-0.6.3.exe`。
 
-- [ ] **步骤 3：验证最终产物并生成校验清单**
+- [x] **步骤 3：验证最终产物并生成校验清单**
 
 运行：`npm run test:e2e:package`
 
