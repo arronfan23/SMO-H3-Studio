@@ -30,7 +30,7 @@
 
 **文件：** `src/renderer/StudioWorkspace.tsx`、`src/renderer/GenerationResultPreview.tsx`、`src/renderer/styles.css`、`tests/unit/studio-workspace.test.tsx`、`tests/unit/generation-result-preview.test.tsx`
 
-- [ ] **步骤 1：编写共享结构和空状态的失败测试**
+- [x] **步骤 1：编写共享结构和空状态的失败测试**
 
 ```tsx
 test('keeps editor before the labelled output region', () => {
@@ -50,13 +50,13 @@ test('keeps an empty result region without querying works when there is no job',
 });
 ```
 
-- [ ] **步骤 2：运行测试并确认因结构缺失而失败**
+- [x] **步骤 2：运行测试并确认因结构缺失而失败**
 
 运行：`npx vitest run tests/unit/studio-workspace.test.tsx tests/unit/generation-result-preview.test.tsx --reporter=dot`
 
 预期：FAIL；找不到 `StudioWorkspace` 或“任务与结果 / 生成结果预览”，而不是测试语法错误。
 
-- [ ] **步骤 3：实现共享组件与稳定结果区域**
+- [x] **步骤 3：实现共享组件与稳定结果区域**
 
 ```tsx
 import type { ReactNode } from 'react';
@@ -76,7 +76,7 @@ export function StudioWorkspace({ editor, output }: { editor: ReactNode; output:
 
 `GenerationResultPreview` 在 `work === null` 或未完成时返回带有 `aria-label="生成结果预览"` 的 `section.generation-result`，其中包含“生成结果”标题和 `.generation-result-empty` 空状态；已有任务仍保留原轮询、错误、媒体与操作逻辑。媒体不再使用内联样式，改为 `.generation-result-image`、`.generation-result-video`、`.generation-result-audio`。
 
-- [ ] **步骤 4：实现容器与媒体基础样式**
+- [x] **步骤 4：实现容器与媒体基础样式**
 
 ```css
 .studio-page { max-width: 1440px; container-type: inline-size; }
@@ -100,7 +100,7 @@ export function StudioWorkspace({ editor, output }: { editor: ReactNode; output:
 }
 ```
 
-- [ ] **步骤 5：运行测试并提交**
+- [x] **步骤 5：运行测试并提交**
 
 运行：`npx vitest run tests/unit/studio-workspace.test.tsx tests/unit/generation-result-preview.test.tsx --reporter=dot`
 
