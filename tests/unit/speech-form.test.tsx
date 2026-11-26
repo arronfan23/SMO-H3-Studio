@@ -213,7 +213,7 @@ describe('语音工作区', () => {
 
     const speechPanel = screen.getByRole('tabpanel', { name: '语音' });
     const fields = speechFields();
-    expect(screen.getAllByLabelText('参考音频')).toHaveLength(1);
+    expect(fields.getByText('参考音频', { selector: '.field-caption' })).toBeVisible();
     expect(fields.getByRole('group', { name: '音频拖放区' })).toBeVisible();
     expect(fields.getByRole('button', { name: '重录' })).toBeInTheDocument();
     expect(fields.getByRole('button', { name: '移除音频' })).toBeInTheDocument();
