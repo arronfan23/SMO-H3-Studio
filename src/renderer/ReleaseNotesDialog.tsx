@@ -3,6 +3,12 @@ import { useEffect, useState } from 'react';
 export const SEEN_VERSION_STORAGE_KEY = 'smo-h3-studio:seen-version';
 
 const RELEASE_NOTES: Record<string, string[]> = {
+  '0.6.3': [
+    '制作台支持自适应双栏，宽屏并排、窄屏自动堆叠。',
+    '图片与视频在输出区完整缩放，保持原始比例。',
+    '语音入口已合并到制作台，情绪与语气为可选项。',
+    '旧作品保持兼容，可继续查看和使用已有结果。',
+  ],
   '0.6.0': [
     '三脚猫支持多轮工具调用，可以实际读取文件、搜索和执行任务。',
     'SDK 会话支持持久保存与续聊，重启后仍可继续。',

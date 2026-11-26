@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron } from '@playwright/test';
-import type { ElectronApplication, Page } from '@playwright/test';
+import type { ElectronApplication, Locator, Page } from '@playwright/test';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -82,6 +82,8 @@ async function launchApp(options: LaunchAppOptions): Promise<ElectronApplication
     ],
     env: {
       ...process.env,
+      // Exercise the current release through the real app:getVersion IPC.
+      npm_package_version: '0.6.3',
       SMO_DATA_DIRECTORY: options.dataDirectory,
       SMO_OUTPUT_DIRECTORY: options.outputDirectory,
       SMO_COMFYUI_BASE_URL: options.comfyBaseUrl,
@@ -683,21 +685,43 @@ async function readImageFormAcceptanceState(page: Page): Promise<{
   });
 }
 
+async function expectVisibleRect(locator: Locator, name: string): Promise<void> {
+  await expect(locator, name).toBeVisible();
+  const rect = await locator.boundingBox();
+  expect(rect, `${name}: bounding rect`).not.toBeNull();
+  expect(rect!.width, `${name}: width`).toBeGreaterThan(0);
+  expect(rect!.height, `${name}: height`).toBeGreaterThan(0);
+}
+
 async function assertImageWorkspaceLayout(
   page: Page,
   jobId: string,
   expected: { width: number; height: number },
   viewport: { width: number; height: number },
 ): Promise<void> {
-  await page.locator('.main-content').evaluate((element) => {
-    element.scrollTo({ top: 0, left: 0 });
-  });
-  const image = page.getByLabel('生成图像结果');
-  await expect(image).toBeVisible();
+  const panel = page.locator('#image-main-panel');
+  const output = panel.locator('.studio-output-pane');
+  const image = panel.getByLabel('生成图像结果');
+  const jobIdLocator = panel.locator('section[aria-label="任务状态"] code');
+  const progress = panel.getByRole('progressbar', { name: `生成进度 ${jobId}` });
+  const resultButtons = output.locator('.generation-result-actions button');
+  await expect(resultButtons).toHaveCount(2);
+  const visibleControls = [
+    { name: '任务 ID', locator: jobIdLocator },
+    { name: '进度条', locator: progress },
+    { name: '媒体', locator: image },
+    { name: '打开目录按钮', locator: resultButtons.nth(0) },
+    { name: '进入我的作品按钮', locator: resultButtons.nth(1) },
+  ];
+  for (const { name, locator } of visibleControls) {
+    await expectVisibleRect(locator, name);
+  }
   await expect.poll(() => image.evaluate((element) => ({
+    complete: (element as HTMLImageElement).complete,
     width: (element as HTMLImageElement).naturalWidth,
     height: (element as HTMLImageElement).naturalHeight,
-  }))).toEqual(expected);
+  }))).toEqual({ complete: true, ...expected });
+  await image.evaluate((element) => (element as HTMLImageElement).decode());
 
   const viewName = `studio-image-${expected.width}x${expected.height}-${viewport.width}x${viewport.height}`;
   const layout = await page.evaluate(({ jobId: id }) => {
@@ -727,6 +751,7 @@ async function assertImageWorkspaceLayout(
     const controls = [
       { name: 'jobId', element: jobId },
       { name: 'progress', element: progress },
+      { name: 'media', element: media as Element },
       ...buttons.map((element, index) => ({ name: `resultButton${index + 1}`, element })),
     ];
     const overlaps: string[] = [];
@@ -743,15 +768,34 @@ async function assertImageWorkspaceLayout(
     }
     const jobIdStyle = getComputedStyle(jobId);
     const actions = document.querySelector('.generation-result-actions')!;
+    const overflowContainers = [
+      { name: 'main-content', element: document.querySelector('.main-content')! },
+      { name: 'studio-page', element: document.querySelector('.studio-page')! },
+      {
+        name: 'studio-workspace-grid',
+        element: document.querySelector('#image-main-panel .studio-workspace-grid')!,
+      },
+    ];
+    const containerOverflows = overflowContainers
+      .filter(({ element }) => element.scrollWidth > element.clientWidth + 2)
+      .map(({ name, element }) => ({
+        name,
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      }));
     return {
       editor: readRect(editor),
       output: readRect(output),
       media: readRect(media),
+      controlRects: Object.fromEntries(
+        controls.map(({ name, element }) => [name, readRect(element)]),
+      ),
       naturalRatio: media.naturalWidth / media.naturalHeight,
       renderedRatio: media.getBoundingClientRect().width / media.getBoundingClientRect().height,
       objectFit: getComputedStyle(media).objectFit,
       outputPosition: getComputedStyle(output).position,
       documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 2,
+      containerOverflows,
       overlaps,
       resultButtonCount: buttons.length,
       jobIdOverflow: jobId.scrollWidth > jobId.clientWidth + 2,
@@ -772,17 +816,24 @@ async function assertImageWorkspaceLayout(
   if (viewport.width >= 1280) {
     expect(Math.abs(layout.editor.top - layout.output.top), details).toBeLessThanOrEqual(2);
     expect(layout.output.left, details).toBeGreaterThanOrEqual(layout.editor.right - 2);
+    expect(
+      layout.outputPosition,
+      details,
+    ).toBe(viewport.height >= 700 ? 'sticky' : 'static');
   } else {
     expect(layout.output.top, details).toBeGreaterThanOrEqual(layout.editor.bottom - 2);
     expect(layout.outputPosition, details).not.toBe('sticky');
   }
-  expect(layout.media.left, details).toBeGreaterThanOrEqual(layout.output.left - 2);
-  expect(layout.media.top, details).toBeGreaterThanOrEqual(layout.output.top - 2);
-  expect(layout.media.right, details).toBeLessThanOrEqual(layout.output.right + 2);
-  expect(layout.media.bottom, details).toBeLessThanOrEqual(layout.output.bottom + 2);
+  for (const [name, rect] of Object.entries(layout.controlRects)) {
+    expect(rect.left, `${details}: ${name} left`).toBeGreaterThanOrEqual(layout.output.left - 2);
+    expect(rect.top, `${details}: ${name} top`).toBeGreaterThanOrEqual(layout.output.top - 2);
+    expect(rect.right, `${details}: ${name} right`).toBeLessThanOrEqual(layout.output.right + 2);
+    expect(rect.bottom, `${details}: ${name} bottom`).toBeLessThanOrEqual(layout.output.bottom + 2);
+  }
   expect(layout.renderedRatio, details).toBeCloseTo(layout.naturalRatio, 2);
   expect(layout.objectFit, details).toBe('contain');
   expect(layout.documentOverflow, details).toBe(false);
+  expect(layout.containerOverflows, details).toEqual([]);
   expect(layout.overlaps, details).toEqual([]);
   expect(layout.resultButtonCount, details).toBe(2);
   expect(layout.jobIdOverflow, details).toBe(false);
@@ -807,6 +858,65 @@ async function assertEmptyStudioWorkspace(
   await expect(output.locator('.job-status')).toHaveCount(0);
   await expect(output.locator('.generation-result-image, .generation-result-video, .generation-result-audio'))
     .toHaveCount(0);
+  const overflows = await page.evaluate((selector) => {
+    const panel = document.querySelector(selector)!;
+    const containers = [
+      { name: 'document', element: document.documentElement },
+      { name: 'main-content', element: document.querySelector('.main-content')! },
+      { name: 'studio-page', element: panel.closest('.studio-page')! },
+      { name: 'studio-workspace-grid', element: panel.querySelector('.studio-workspace-grid')! },
+    ];
+    return containers
+      .filter(({ element }) => element.scrollWidth > element.clientWidth + 2)
+      .map(({ name, element }) => ({
+        name,
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      }));
+  }, panelSelector);
+  expect(overflows, `${panelSelector}: horizontal overflow`).toEqual([]);
+}
+
+async function assertStickyStudioOutput(page: Page, panelSelector: string): Promise<void> {
+  const main = page.locator('.main-content');
+  await main.evaluate((element) => {
+    element.scrollTo({ top: 0, left: 0 });
+  });
+  await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBe(0);
+  const before = await page.evaluate((selector) => {
+    const mainElement = document.querySelector('.main-content')!;
+    const output = document.querySelector(`${selector} .studio-output-pane`)!;
+    return {
+      position: getComputedStyle(output).position,
+      scrollRange: mainElement.scrollHeight - mainElement.clientHeight,
+    };
+  }, panelSelector);
+  expect(before.position, `${panelSelector}: sticky computed position`).toBe('sticky');
+  expect(before.scrollRange, `${panelSelector}: real vertical scroll range`).toBeGreaterThan(0);
+
+  await main.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const readStickyState = () => page.evaluate((selector) => {
+    const mainElement = document.querySelector('.main-content')!;
+    const output = document.querySelector(`${selector} .studio-output-pane`)!;
+    const mainRect = mainElement.getBoundingClientRect();
+    const outputRect = output.getBoundingClientRect();
+    const visibleTop = mainRect.top + Number.parseFloat(getComputedStyle(mainElement).paddingTop);
+    return {
+      scrollTop: mainElement.scrollTop,
+      position: getComputedStyle(output).position,
+      topDelta: outputRect.top - visibleTop,
+      visibleHeight: Math.min(mainRect.bottom, outputRect.bottom) -
+        Math.max(mainRect.top, outputRect.top),
+    };
+  }, panelSelector);
+  await expect.poll(() => readStickyState()).toMatchObject({ position: 'sticky' });
+  const sticky = await readStickyState();
+  expect(sticky.scrollTop, `${panelSelector}: ${JSON.stringify(sticky)}`).toBeGreaterThan(0);
+  expect(sticky.visibleHeight, `${panelSelector}: ${JSON.stringify(sticky)}`).toBeGreaterThan(0);
+  await expect.poll(async () => Math.abs((await readStickyState()).topDelta))
+    .toBeLessThanOrEqual(2);
 }
 
 async function readVisibleTextJobId(page: Page): Promise<string> {
@@ -996,8 +1106,15 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.reload();
     const dialog = page!.getByRole('dialog', { name: '更新内容' });
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('版本 0.6.2');
-    await expect(dialog).toContainText('优化了稳定性与使用体验');
+    const version = await page!.evaluate(async () => {
+      const api = (window as unknown as {
+        smo: { app: { getVersion(): Promise<string> } };
+      }).smo;
+      return api.app.getVersion();
+    });
+    await expect(dialog).toContainText(`版本 ${version}`);
+    await expect(dialog).toContainText('图片与视频在输出区完整缩放');
+    await expect(dialog).not.toContainText('优化了稳定性与使用体验');
     await dialog.getByRole('button', { name: '开始使用' }).click();
     await expect(dialog).toHaveCount(0);
 
@@ -1753,9 +1870,15 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await waitForStableStatus(page, jobId, 'done');
     const imageResult = page.getByLabel('生成图像结果');
     await expect(imageResult).toBeVisible();
-    await expect.poll(() => imageResult.evaluate(
-      (element) => (element as HTMLImageElement).naturalWidth,
-    )).toBe(scenario.width);
+    await expect.poll(() => imageResult.evaluate((element) => ({
+      complete: (element as HTMLImageElement).complete,
+      width: (element as HTMLImageElement).naturalWidth,
+      height: (element as HTMLImageElement).naturalHeight,
+    }))).toEqual({
+      complete: true,
+      width: scenario.width,
+      height: scenario.height,
+    });
     const outputPath = join(outputDirectory, 'SMO-Image', `${jobId}_00001.png`);
     expect(existsSync(outputPath)).toBe(true);
 
@@ -1791,6 +1914,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       resultReady: true,
     });
 
+    const boundsBeforeMaximize = await readWindowBounds(app);
     await page.getByRole('button', { name: '最大化', exact: true }).click();
     await expect(page.getByRole('button', { name: '还原', exact: true })).toBeVisible();
     await expect.poll(() => readWindowMaximized(page!)).toBe(true);
@@ -1799,6 +1923,16 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page.getByRole('button', { name: '还原', exact: true }).click();
     await expect(page.getByRole('button', { name: '最大化', exact: true })).toBeVisible();
     await expect.poll(() => readWindowMaximized(page!)).toBe(false);
+    await expect.poll(async () => {
+      const restored = await readWindowBounds(app!);
+      return {
+        x: Math.abs(restored.x - boundsBeforeMaximize.x) <= 2,
+        y: Math.abs(restored.y - boundsBeforeMaximize.y) <= 2,
+        width: Math.abs(restored.width - boundsBeforeMaximize.width) <= 2,
+        height: Math.abs(restored.height - boundsBeforeMaximize.height) <= 2,
+      };
+    }).toEqual({ x: true, y: true, width: true, height: true });
+    expect(await readImageFormAcceptanceState(page)).toEqual(beforeWindowCycle);
     await setViewport(app, page, 1280, 820);
     expect(await readImageFormAcceptanceState(page)).toEqual(beforeWindowCycle);
 
@@ -1806,9 +1940,18 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       { width: 1280, height: 820 },
       { width: 1920, height: 1080 },
       { width: 960, height: 640 },
+      { width: 960, height: 820 },
+      { width: 1280, height: 640 },
     ]) {
       await setViewport(app, page, viewport.width, viewport.height);
       expect(await readImageFormAcceptanceState(page)).toEqual(beforeWindowCycle);
+      // Measure each viewport from a known unscrolled baseline.
+      await page.locator('.main-content').evaluate((element) => {
+        element.scrollTo({ top: 0, left: 0 });
+      });
+      await expect.poll(() => page!.locator('.main-content').evaluate(
+        (element) => element.scrollTop,
+      )).toBe(0);
       await assertImageWorkspaceLayout(
         page,
         jobId,
@@ -1830,9 +1973,14 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     const image = work.getByRole('img', { name: `作品图像 ${jobId}` });
     await expect(image).toBeVisible();
     await expect.poll(() => image.evaluate((element) => ({
+      complete: (element as HTMLImageElement).complete,
       width: (element as HTMLImageElement).naturalWidth,
       height: (element as HTMLImageElement).naturalHeight,
-    }))).toEqual({ width: scenario.width, height: scenario.height });
+    }))).toEqual({
+      complete: true,
+      width: scenario.width,
+      height: scenario.height,
+    });
     const display = await image.evaluate((element) => {
       const imageElement = element as HTMLImageElement;
       const rect = imageElement.getBoundingClientRect();
@@ -2779,6 +2927,12 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#text-mode-panel .button-generate',
       ]);
       await assertEmptyStudioWorkspace(page!, '#text-mode-panel', '生成视频');
+      if (viewport.width === 1280 && viewport.height === 820) {
+        await assertStickyStudioOutput(page!, '#text-mode-panel');
+        await page!.screenshot({
+          path: testInfo.outputPath('studio-text-1280x820-sticky.png'),
+        });
+      }
 
       await page!.click('#reference-mode-tab');
       await expect(page!.locator('#reference-mode-panel')).toBeVisible();
