@@ -90,26 +90,40 @@ describe('responsive studio CSS contracts', () => {
     expect(inset).toBeGreaterThanOrEqual(eastWidth);
   });
 
-  test('制作台模特参考图保持原始比例，数字模特卡片继续裁切', async () => {
+  test('制作台编辑区模特预览使用方形容器并完整包含图片，数字模特卡片继续裁切', async () => {
     const css = await readFile(stylesUrl, 'utf8');
-    const previewRule = css.match(/\.person-preview \.avatar-image\s*\{([^}]*)\}/)?.[1];
+    const previewRule = css.match(/\.studio-editor-pane \.person-preview\s*\{([^}]*)\}/)?.[1];
+    const containerRule = css.match(
+      /\.studio-editor-pane \.person-preview \.avatar-image\s*\{([^}]*)\}/,
+    )?.[1];
     const previewImageRule = css.match(
-      /\.person-preview \.avatar-image img\s*\{([^}]*)\}/,
+      /\.studio-editor-pane \.person-preview \.avatar-image img\s*\{([^}]*)\}/,
     )?.[1];
     const cardRule = css.match(/\.avatar-item \.avatar-image\s*\{([^}]*)\}/)?.[1];
 
     expect(previewRule).toBeDefined();
-    expect(previewRule).toContain('aspect-ratio: auto');
-    expect(previewRule).toContain('min-height: 180px');
-    expect(previewRule).toContain('overflow: visible');
-    expect(previewRule).toContain('max-height: none');
+    expect(previewRule).toContain('position: static');
+    expect(previewRule).toContain('display: grid');
+    expect(previewRule).toContain('grid-template-columns: 120px minmax(0, 1fr)');
+
+    expect(containerRule).toBeDefined();
+    for (const declaration of [
+      'width: 120px',
+      'min-height: 0',
+      'max-height: 150px',
+      'aspect-ratio: 1',
+      'overflow: hidden',
+    ]) {
+      expect(containerRule).toContain(declaration);
+    }
 
     expect(previewImageRule).toBeDefined();
     for (const declaration of [
       'width: 100%',
-      'max-width: fit-content',
+      'max-width: 100%',
       'height: auto',
-      'max-height: 65vh',
+      'aspect-ratio: 1',
+      'max-height: 150px',
       'object-fit: contain',
     ]) {
       expect(previewImageRule).toContain(declaration);

@@ -575,7 +575,9 @@ body[data-window-maximized='true'] .window-resize-handle {
 
 .studio-editor-pane .person-preview .avatar-image img {
   width: 100%;
-  height: 100%;
+  max-width: 100%;
+  height: auto;
+  aspect-ratio: 1;
   max-height: 150px;
   object-fit: contain;
 }

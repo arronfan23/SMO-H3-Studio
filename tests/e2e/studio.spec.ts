@@ -599,40 +599,50 @@ async function selectCurrentAvatarReference(page: Page): Promise<void> {
 }
 
 async function assertStudioAvatarLayout(page: Page, viewName: string): Promise<void> {
-  const image = page.locator('.person-preview .avatar-image img');
+  const previewSelector = '#audio-mode-panel .studio-editor-pane .person-preview';
+  const image = page.locator(`${previewSelector} .avatar-image img`);
   await image.scrollIntoViewIfNeeded();
   await expect(image).toBeVisible();
-  await expect(page.locator('.person-preview .reference-label')).toHaveCount(1);
+  await expect(page.locator(`${previewSelector} .reference-label`)).toHaveCount(1);
   await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0);
 
-  const layout = await page.evaluate(() => {
+  const layout = await page.evaluate((selector) => {
     const imageElement = document.querySelector<HTMLImageElement>(
-      '.person-preview .avatar-image img',
+      `${selector} .avatar-image img`,
     );
-    const container = document.querySelector<HTMLElement>('.person-preview .avatar-image');
+    const container = document.querySelector<HTMLElement>(`${selector} .avatar-image`);
     if (!imageElement || !container) {
       return null;
     }
     const imageRect = imageElement.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
     const imageStyle = getComputedStyle(imageElement);
     const containerStyle = getComputedStyle(container);
     return {
       naturalRatio: imageElement.naturalWidth / imageElement.naturalHeight,
+      containerRatio: containerRect.width / containerRect.height,
       renderedRatio: imageRect.width / imageRect.height,
+      imageRect: { width: imageRect.width, height: imageRect.height },
+      containerRect: { width: containerRect.width, height: containerRect.height },
+      imageWidth: imageStyle.width,
+      imageHeight: imageStyle.height,
+      imageMaxWidth: imageStyle.maxWidth,
+      imageMaxHeight: imageStyle.maxHeight,
+      containerWidth: containerStyle.width,
+      containerHeight: containerStyle.height,
       objectFit: imageStyle.objectFit,
-      containerAspectRatio: containerStyle.aspectRatio,
       containerOverflow: containerStyle.overflow,
       documentOverflow: document.documentElement.scrollWidth > window.innerWidth,
     };
-  });
+  }, previewSelector);
 
   expect(layout, viewName).not.toBeNull();
   expect(layout!.naturalRatio, viewName).toBeCloseTo(0.5, 2);
-  expect(layout!.renderedRatio, viewName).toBeCloseTo(layout!.naturalRatio, 2);
+  expect(layout!.containerRatio, viewName).toBeCloseTo(1, 2);
+  expect(layout!.renderedRatio, `${viewName}: ${JSON.stringify(layout)}`).toBeCloseTo(1, 2);
   expect(layout!.objectFit, viewName).toBe('contain');
-  expect(layout!.containerAspectRatio, viewName).toBe('auto');
-  expect(layout!.containerOverflow, viewName).toBe('visible');
+  expect(layout!.containerOverflow, viewName).toBe('hidden');
   expect(layout!.documentOverflow, viewName).toBe(false);
 }
 

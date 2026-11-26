@@ -1281,13 +1281,14 @@ describe('text-to-video studio', () => {
 
   test('人物 Picture 1 标签只在音频数字人模式显示', async () => {
     await renderStudio();
-    expect(screen.queryByText('参考人物：<Picture 1>')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
-    expect(screen.queryByText('参考人物：<Picture 1>')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
-    expect(screen.getByText('参考人物：<Picture 1>')).toBeInTheDocument();
+    const preview = screen.getByRole('region', { name: '当前人物预览' });
+    expect(within(preview).getByText('参考人物：<Picture 1>')).toBeVisible();
   });
 
   test('跨表单 text pending 同步阻止 reference 生成并在结束后恢复', async () => {
@@ -2681,6 +2682,21 @@ describe('制作台结果预览与模特区域', () => {
     await expectVideoJobInOutput(output);
   });
 
+  test('主模式往返保留音频数字人照片 DOM 与媒体 URL', async () => {
+    renderStudioPage();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const photo = await screen.findByRole('img', { name: `${avatar.name}的照片` });
+    const avatarMediaCalls = () =>
+      smo.files.mediaUrl.mock.calls.filter(([path]) => path === avatar.photoPath).length;
+    const callsBeforeSwitch = avatarMediaCalls();
+
+    fireEvent.click(screen.getByRole('tab', { name: '图像' }));
+    fireEvent.click(screen.getByRole('tab', { name: '视频' }));
+
+    expect(await screen.findByRole('img', { name: `${avatar.name}的照片` })).toBe(photo);
+    expect(avatarMediaCalls()).toBe(callsBeforeSwitch);
+  });
+
   test('语音完成后在当前页显示音频预览', async () => {
     completeJob('speech', 'G:\\output\\voice.wav');
     renderStudioPage();
@@ -2724,7 +2740,7 @@ describe('制作台结果预览与模特区域', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
 
     expect(await screen.findByLabelText('生成视频结果')).toBeInTheDocument();
-    expect(document.querySelector('.person-preview')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '进入我的作品' }));
     expect(onOpenWorks).toHaveBeenCalledTimes(1);
   });
@@ -2734,17 +2750,16 @@ describe('制作台结果预览与模特区域', () => {
     renderStudioPage();
 
     fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
-    expect(document.querySelector('.person-preview')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     smo.files.selectAudio.mockResolvedValue('G:\\input\\voice.wav');
     fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
-    expect(document.querySelector('.person-preview')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '当前人物预览' })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
     await screen.findByText('voice.wav');
-    const source = document.querySelector('audio');
-    expect(source).not.toBeNull();
-    Object.defineProperty(source!, 'duration', { value: 8, configurable: true });
-    fireEvent.loadedMetadata(source!);
+    const source = await screen.findByLabelText('所选音频');
+    Object.defineProperty(source, 'duration', { value: 8, configurable: true });
+    fireEvent.loadedMetadata(source);
     fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
       target: { value: '预览音频数字人' },
     });
@@ -3198,6 +3213,54 @@ describe('audio digital human studio', () => {
     fireEvent.loadedMetadata(audio);
     expect(screen.getByLabelText('截取时长（秒）')).toHaveValue(seconds);
   }
+
+  test('页面隐藏暂停 JobStatus 轮询，恢复后保留快照并立即刷新', async () => {
+    const jobId = 'audio-lifecycle-job';
+    const runningWork = createWork({ id: jobId, mode: 'audio', status: 'running' });
+    smo.jobs.start.mockResolvedValue({ id: jobId });
+    smo.works.list.mockImplementation(async () => [runningWork]);
+    await renderLoadedAudio('G:\\recordings\\job-lifecycle.mp3', 8);
+    fireEvent.change(screen.getByLabelText('动作/画面提示词'), {
+      target: { value: '验证任务状态生命周期' },
+    });
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '生成视频' }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText('运行中（running）')).toBeInTheDocument();
+    const callsBeforeHide = smo.works.list.mock.calls.length;
+    expect(callsBeforeHide).toBeGreaterThan(0);
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(smo.works.list).toHaveBeenCalledTimes(callsBeforeHide);
+    expect(screen.getByText('运行中（running）')).toBeInTheDocument();
+
+    const refreshGate = deferred<Work[]>();
+    smo.works.list.mockImplementationOnce(() => refreshGate.promise);
+    act(() => {
+      fireEvent.click(studioModeButton('视频'));
+    });
+
+    expect(smo.works.list).toHaveBeenCalledTimes(callsBeforeHide + 1);
+    expect(screen.getByText('运行中（running）')).toBeInTheDocument();
+
+    await act(async () => {
+      refreshGate.resolve([
+        createWork({ id: jobId, mode: 'audio', status: 'done' }),
+      ]);
+      await refreshGate.promise;
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText('已完成（done）')).toBeInTheDocument();
+  });
 
   test('audio drop authorizes one file, previews it, and keeps it after switching panels', async () => {
     await renderStudio();

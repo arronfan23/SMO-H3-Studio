@@ -366,7 +366,7 @@ export function AudioDigitalHumanForm({
             void startGeneration();
           }}
         >
-          {active && avatar && (
+          {avatar && (
             <section className="person-preview" aria-label="当前人物预览">
               <div className="section-heading">
                 <span>当前模特</span>
