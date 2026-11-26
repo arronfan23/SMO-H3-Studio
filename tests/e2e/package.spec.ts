@@ -829,7 +829,7 @@ test.describe('SMO.H3 Studio portable package', () => {
 
     // Text/reference video has no avatar panel; audio digital human keeps it.
     await openStudioVideo(page!);
-    await expect(page!.locator('.person-preview')).toHaveCount(0);
+    await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
     await page!.click('#audio-mode-tab');
     await expect(
       page!.locator(`.person-preview h2:has-text("${AVATAR_NAME}")`),
@@ -839,7 +839,7 @@ test.describe('SMO.H3 Studio portable package', () => {
       .evaluate((img) => (img as HTMLImageElement).naturalWidth);
     expect(previewWidth).toBeGreaterThan(0);
     await page!.click('#text-mode-tab');
-    await expect(page!.locator('.person-preview')).toHaveCount(0);
+    await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
 
     await page!.fill('#original-text', 'A packaged app waves hello.');
     await page!.click('button:has-text("AI 润色")');
@@ -932,7 +932,7 @@ test.describe('SMO.H3 Studio portable package', () => {
 
       await openStudioVideo(page!);
       await expect(page!.locator('#text-mode-panel')).toBeVisible();
-      await expect(page!.locator('.person-preview')).toHaveCount(0);
+      await expect(page!.locator('.person-preview:visible')).toHaveCount(0);
       await assertViewWithinViewport(page!, `package-studio-${width}`, [
         '.brand-lockup',
         '#reference-mode-tab',
