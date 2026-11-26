@@ -5,7 +5,7 @@ import { StudioWorkspace } from '../../src/renderer/StudioWorkspace';
 
 describe('StudioWorkspace', () => {
   test('places the editor before output in the labelled complementary pane', () => {
-    render(
+    const { container } = render(
       <StudioWorkspace
         editor={<p>编辑器内容</p>}
         output={<p>结果内容</p>}
@@ -16,9 +16,11 @@ describe('StudioWorkspace', () => {
     const editorPane = editor.closest('.studio-editor-pane');
     const outputPane = screen.getByRole('complementary', { name: '任务与结果' });
 
+    expect(container.firstElementChild).toHaveClass('studio-workspace-grid');
     expect(editorPane).not.toBeNull();
     expect(editorPane).toContainElement(editor);
     expect(outputPane).toContainElement(screen.getByText('结果内容'));
+    expect(outputPane.querySelector('h2.studio-output-title')).toHaveTextContent('任务与结果');
     expect(editorPane?.nextElementSibling).toBe(outputPane);
   });
 });
