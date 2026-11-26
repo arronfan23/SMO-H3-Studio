@@ -1,11 +1,10 @@
-import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { AudioLines, Mic, Play, RotateCcw } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Play, RotateCcw } from 'lucide-react';
 import type { MediaComponentId, MediaComponentState } from '../shared/media-components';
 import type {
   AudioOutputFormat,
   SpeechCapabilities,
   SpeechGenerationRequest,
-  SpeechMode,
 } from '../shared/types';
 import { AudioInput } from './AudioInput';
 import { AudioRecorder } from './AudioRecorder';
@@ -43,21 +42,15 @@ export function SpeechForm({
   onOpenWorks?: () => void;
   onJobStarted?: () => Promise<boolean | void>;
 }) {
-  const [speechMode, setSpeechMode] = useState<SpeechMode>('custom');
   const [prompt, setPrompt] = useState('');
   const [instruct, setInstruct] = useState('');
-  const [languages, setLanguages] = useState<Record<SpeechMode, string>>({
-    custom: '',
-    clone: '',
-  });
+  const [language, setLanguage] = useState('');
   const [outputFormat, setOutputFormat] = useState<AudioOutputFormat>('wav');
   const [speechRate, setSpeechRate] = useState(1);
   const [referenceAudioPath, setReferenceAudioPath] = useState<string | null>(null);
   const [referenceAudioRevision, setReferenceAudioRevision] = useState(0);
   const [referenceAudioSeconds, setReferenceAudioSeconds] = useState<number | null>(null);
-  const [capabilities, setCapabilities] = useState<
-    Partial<Record<SpeechMode, SpeechCapabilities>>
-  >({});
+  const [currentCapabilities, setCurrentCapabilities] = useState<SpeechCapabilities | null>(null);
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
   const [capabilitiesError, setCapabilitiesError] = useState<string | null>(null);
   const [capabilitiesRevision, setCapabilitiesRevision] = useState(0);
@@ -74,8 +67,6 @@ export function SpeechForm({
   const { url: referenceAudioUrl, error: referenceMediaError } = useMediaUrl(referenceAudioPath);
   const referenceAudioRef = useRef<HTMLAudioElement | null>(null);
   const referenceAudioRevisionRef = useRef(0);
-  const customTabRef = useRef<HTMLButtonElement | null>(null);
-  const cloneTabRef = useRef<HTMLButtonElement | null>(null);
   const mountedRef = useRef(false);
   const generationRef = useRef(false);
   const capabilitiesRequestRef = useRef(0);
@@ -95,10 +86,10 @@ export function SpeechForm({
   }, []);
 
   useEffect(() => {
-    if (!active || !pageActive || speechMode !== 'clone') {
+    if (!active || !pageActive) {
       referenceAudioRef.current?.pause();
     }
-  }, [active, pageActive, speechMode, referenceAudioRevision]);
+  }, [active, pageActive, referenceAudioRevision]);
 
   const refreshComponent = useCallback(async (id: MediaComponentId): Promise<void> => {
     const requestId = ++componentRequestRef.current;
@@ -162,18 +153,15 @@ export function SpeechForm({
     setCapabilitiesError(null);
     void (async () => {
       try {
-        const next = await window.smo.speech.getCapabilities(speechMode);
+        const next = await window.smo.speech.getCapabilities('custom');
         if (!mountedRef.current || requestId !== capabilitiesRequestRef.current) {
           return;
         }
         retryCapabilitiesAfterInstallRef.current = false;
-        setCapabilities((previous) => ({ ...previous, [speechMode]: next }));
-        setLanguages((previous) => ({
-          ...previous,
-          [speechMode]: next.languages.includes(previous[speechMode])
-            ? previous[speechMode]
-            : next.languages[0] ?? '',
-        }));
+        setCurrentCapabilities(next);
+        setLanguage((previous) =>
+          next.languages.includes(previous) ? previous : next.languages[0] ?? '',
+        );
       } catch (loadError) {
         if (!mountedRef.current || requestId !== capabilitiesRequestRef.current) {
           return;
@@ -191,7 +179,7 @@ export function SpeechForm({
         }
       }
     })();
-  }, [active, pageActive, component?.status, speechMode, capabilitiesRevision]);
+  }, [active, pageActive, component?.status, capabilitiesRevision]);
 
   const installComponent = async (id: MediaComponentId): Promise<void> => {
     if (busy || activeComponentOperationRef.current !== null) {
@@ -270,35 +258,6 @@ export function SpeechForm({
     }
   };
 
-  const focusSpeechMode = (nextMode: SpeechMode): void => {
-    setSpeechMode(nextMode);
-    setError(null);
-    (nextMode === 'custom' ? customTabRef : cloneTabRef).current?.focus();
-  };
-
-  const handleSpeechModeKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    const currentMode = event.target === cloneTabRef.current ? 'clone' : 'custom';
-    let nextMode: SpeechMode;
-    switch (event.key) {
-      case 'ArrowLeft':
-      case 'ArrowRight':
-        nextMode = currentMode === 'custom' ? 'clone' : 'custom';
-        break;
-      case 'Home':
-        nextMode = 'custom';
-        break;
-      case 'End':
-        nextMode = 'clone';
-        break;
-      default:
-        return;
-    }
-    event.preventDefault();
-    focusSpeechMode(nextMode);
-  };
-
-  const currentCapabilities = capabilities[speechMode];
-  const currentLanguage = languages[speechMode];
   const generationDisabled =
     submitting ||
     busy ||
@@ -333,7 +292,7 @@ export function SpeechForm({
       setError('请填写口播文字。');
       return;
     }
-    if (currentLanguage.length === 0) {
+    if (language.length === 0) {
       setError('请选择语言。');
       return;
     }
@@ -344,18 +303,20 @@ export function SpeechForm({
 
     const shared = {
       mode: 'speech' as const,
-      speechMode,
       prompt: text,
-      language: currentLanguage,
+      language,
       outputFormat,
       speechRate,
     };
+    const trimmedInstruct = instruct.trim();
     const request: SpeechGenerationRequest =
-      speechMode === 'custom'
-        ? { ...shared, referenceAudioPath, instruct: instruct.trim() }
+      trimmedInstruct.length === 0
+        ? { ...shared, speechMode: 'clone', referenceAudioPath }
         : {
             ...shared,
+            speechMode: 'custom',
             referenceAudioPath,
+            instruct: trimmedInstruct,
           };
 
     generationRef.current = true;
@@ -381,11 +342,11 @@ export function SpeechForm({
     }
   };
 
-  const renderPromptField = (mode: SpeechMode) => (
+  const renderPromptField = () => (
     <div className="field">
-      <label htmlFor={`${mode}-speech-prompt`}>口播文字</label>
+      <label htmlFor="custom-speech-prompt">口播文字</label>
       <textarea
-        id={`${mode}-speech-prompt`}
+        id="custom-speech-prompt"
         rows={6}
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
@@ -394,40 +355,30 @@ export function SpeechForm({
     </div>
   );
 
-  const renderLanguageField = (mode: SpeechMode) => {
-    const modeCapabilities = capabilities[mode];
-    const language = languages[mode];
-    return (
-      <div className="field">
-        <label htmlFor={`${mode}-speech-language`}>语言</label>
-        <select
-          id={`${mode}-speech-language`}
-          value={language}
-          disabled={
-            submitting ||
-            (mode === speechMode && capabilitiesLoading) ||
-            !modeCapabilities
-          }
-          onChange={(event) =>
-            setLanguages((previous) => ({ ...previous, [mode]: event.target.value }))
-          }
-        >
-          {language === '' && <option value="">请选择语言</option>}
-          {modeCapabilities?.languages.map((option) => (
-            <option key={option} value={option}>
-              {LANGUAGE_LABELS[option] ?? option}
-            </option>
-          ))}
-        </select>
-      </div>
-    );
-  };
-
-  const renderOutputField = (mode: SpeechMode) => (
+  const renderLanguageField = () => (
     <div className="field">
-      <label htmlFor={`${mode}-speech-output`}>输出格式</label>
+      <label htmlFor="custom-speech-language">语言</label>
       <select
-        id={`${mode}-speech-output`}
+        id="custom-speech-language"
+        value={language}
+        disabled={submitting || capabilitiesLoading || !currentCapabilities}
+        onChange={(event) => setLanguage(event.target.value)}
+      >
+        {language === '' && <option value="">请选择语言</option>}
+        {currentCapabilities?.languages.map((option) => (
+          <option key={option} value={option}>
+            {LANGUAGE_LABELS[option] ?? option}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+
+  const renderOutputField = () => (
+    <div className="field">
+      <label htmlFor="custom-speech-output">输出格式</label>
+      <select
+        id="custom-speech-output"
         value={outputFormat}
         disabled={submitting}
         onChange={(event) => setOutputFormat(event.target.value as AudioOutputFormat)}
@@ -439,14 +390,14 @@ export function SpeechForm({
     </div>
   );
 
-  const renderSpeechRateField = (mode: SpeechMode) => (
+  const renderSpeechRateField = () => (
     <div className="field">
       <div className="speech-rate-heading">
-        <label htmlFor={`${mode}-speech-rate`}>语速</label>
+        <label htmlFor="custom-speech-rate">语速</label>
         <output>{speechRate.toFixed(2)}x</output>
       </div>
       <input
-        id={`${mode}-speech-rate`}
+        id="custom-speech-rate"
         className="speech-rate-slider"
         type="range"
         min={0.5}
@@ -466,7 +417,7 @@ export function SpeechForm({
     setReferenceAudioSeconds(null);
   };
 
-  const renderReferenceAudioFields = (mode: SpeechMode) => {
+  const renderReferenceAudioFields = () => {
     return (
     <div className="field">
       <span className="field-caption">参考音频</span>
@@ -477,7 +428,7 @@ export function SpeechForm({
         onError={setError}
       />
       <AudioRecorder
-        active={active && pageActive && speechMode === mode}
+        active={active && pageActive}
         disabled={submitting || busy}
         hasAudio={referenceAudioPath !== null}
         onBusyChange={setRecordingBusy}
@@ -490,7 +441,7 @@ export function SpeechForm({
       {referenceAudioUrl && (
         <audio
           key={`${referenceAudioPath}:${referenceAudioRevision}`}
-          ref={mode === speechMode ? referenceAudioRef : undefined}
+          ref={referenceAudioRef}
           className="audio-preview"
           aria-label="参考音频"
           controls
@@ -534,40 +485,6 @@ export function SpeechForm({
           void startGeneration();
         }}
       >
-        <div
-          className="tab-list speech-mode-tabs"
-          role="tablist"
-          aria-label="语音模式"
-          onKeyDown={handleSpeechModeKeyDown}
-        >
-          <button
-            ref={customTabRef}
-            id="custom-speech-tab"
-            type="button"
-            role="tab"
-            aria-selected={speechMode === 'custom'}
-            aria-controls="custom-speech-panel"
-            tabIndex={speechMode === 'custom' ? 0 : -1}
-            onClick={() => focusSpeechMode('custom')}
-          >
-            <Mic size={16} aria-hidden="true" />
-            参考音合成
-          </button>
-          <button
-            ref={cloneTabRef}
-            id="clone-speech-tab"
-            type="button"
-            role="tab"
-            aria-selected={speechMode === 'clone'}
-            aria-controls="clone-speech-panel"
-            tabIndex={speechMode === 'clone' ? 0 : -1}
-            onClick={() => focusSpeechMode('clone')}
-          >
-            <AudioLines size={16} aria-hidden="true" />
-            声音克隆
-          </button>
-        </div>
-
         {capabilitiesLoading && (
           <p className="form-notice" role="status">正在加载音色与语言…</p>
         )}
@@ -590,12 +507,9 @@ export function SpeechForm({
         <div
           id="custom-speech-panel"
           className="speech-mode-fields"
-          role="tabpanel"
-          aria-labelledby="custom-speech-tab"
-          hidden={speechMode !== 'custom'}
         >
-          {renderPromptField('custom')}
-          {renderReferenceAudioFields('custom')}
+          {renderPromptField()}
+          {renderReferenceAudioFields()}
           <div className="field">
             <label htmlFor="custom-speech-instruct">情绪/语气</label>
             <input
@@ -607,25 +521,9 @@ export function SpeechForm({
             />
           </div>
           <div className="form-row form-row-three">
-            {renderLanguageField('custom')}
-            {renderSpeechRateField('custom')}
-            {renderOutputField('custom')}
-          </div>
-        </div>
-
-        <div
-          id="clone-speech-panel"
-          className="speech-mode-fields"
-          role="tabpanel"
-          aria-labelledby="clone-speech-tab"
-          hidden={speechMode !== 'clone'}
-        >
-          {renderPromptField('clone')}
-          {renderReferenceAudioFields('clone')}
-          <div className="form-row form-row-three">
-            {renderLanguageField('clone')}
-            {renderSpeechRateField('clone')}
-            {renderOutputField('clone')}
+            {renderLanguageField()}
+            {renderSpeechRateField()}
+            {renderOutputField()}
           </div>
         </div>
 

@@ -109,11 +109,10 @@ async function renderStudio() {
   await waitFor(() => expect(document.getElementById('original-text')).not.toBeNull());
 }
 
-function studioSpeechField(label: string, mode: 'custom' | 'clone' = 'custom') {
-  const panel = screen.getByRole('tabpanel', {
-    name: mode === 'custom' ? '参考音合成' : '声音克隆',
-  });
-  return within(panel).getByLabelText(label);
+function studioSpeechField(label: string) {
+  const fields = document.querySelectorAll('.speech-mode-fields');
+  expect(fields).toHaveLength(1);
+  return within(fields[0] as HTMLElement).getByLabelText(label);
 }
 
 function studioModeButton(label: '语音' | '图像' | '视频') {
@@ -1772,21 +1771,19 @@ describe('text-to-video studio', () => {
     fireEvent.change(studioSpeechField('输出格式'), { target: { value: 'mp3' } });
     fireEvent.change(studioSpeechField('语速'), { target: { value: '1.5' } });
 
-    fireEvent.click(screen.getByRole('tab', { name: '声音克隆' }));
-    await waitFor(() => expect(smo.speech.getCapabilities).toHaveBeenCalledWith('clone'));
     fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-    const clonePanel = screen.getByRole('tabpanel', { name: '声音克隆' });
-    expect(await within(clonePanel).findByText('speech-clone.wav')).toBeInTheDocument();
+    expect(
+      await within(studioModePanel('语音')).findByText('speech-clone.wav'),
+    ).toBeInTheDocument();
 
     fireEvent.click(studioModeButton('视频'));
     expect(textVideoField('原始文字')).toHaveValue('主模式切换后保留的视频草稿');
     fireEvent.click(studioModeButton('语音'));
-    expect(studioSpeechField('口播文字', 'clone')).toHaveValue('主模式切换后保留的口播草稿');
-    expect(studioSpeechField('输出格式', 'clone')).toHaveValue('mp3');
+    expect(studioSpeechField('口播文字')).toHaveValue('主模式切换后保留的口播草稿');
+    expect(studioSpeechField('输出格式')).toHaveValue('mp3');
     expect(
-      within(screen.getByRole('tabpanel', { name: '声音克隆' })).getByText('speech-clone.wav'),
+      within(studioModePanel('语音')).getByText('speech-clone.wav'),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '参考音合成' }));
     expect(studioSpeechField('情绪/语气')).toHaveValue('亲切自然');
     expect(studioSpeechField('语速')).toHaveValue('1.5');
 
@@ -1833,8 +1830,9 @@ describe('text-to-video studio', () => {
     expect(studioSpeechField('语言')).toHaveValue('Chinese');
     smo.files.selectAudio.mockResolvedValueOnce('G:\\recordings\\capabilities.wav');
     fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-    const customPanel = screen.getByRole('tabpanel', { name: '参考音合成' });
-    expect(await within(customPanel).findByText('capabilities.wav')).toBeInTheDocument();
+    expect(
+      await within(studioModePanel('语音')).findByText('capabilities.wav'),
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled();
   });
 
