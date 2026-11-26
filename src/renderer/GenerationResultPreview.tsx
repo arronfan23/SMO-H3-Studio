@@ -14,19 +14,28 @@ export function GenerationResultPreview({
   const outputPath = work?.status === 'done' ? work.outputPath : null;
   const { url, error } = useMediaUrl(outputPath);
 
-  if (work === null || outputPath === null) return null;
+  if (work === null || outputPath === null) {
+    return (
+      <section className="generation-result" aria-label="生成结果预览">
+        <h3>生成结果</h3>
+        <div className="generation-result-empty">完成生成后在这里预览</div>
+      </section>
+    );
+  }
 
   return (
     <section className="generation-result" aria-label="生成结果预览">
       <h3>生成结果</h3>
       {url ? (
         <>
-          {work.mode === 'speech' && <audio aria-label="生成语音结果" controls src={url} />}
+          {work.mode === 'speech' && (
+            <audio className="generation-result-audio" aria-label="生成语音结果" controls src={url} />
+          )}
           {work.mode === 'image' && (
-            <img aria-label="生成图像结果" src={url} style={{ objectFit: 'contain' }} />
+            <img className="generation-result-image" aria-label="生成图像结果" src={url} />
           )}
           {(work.mode === 'text' || work.mode === 'audio') && (
-            <video aria-label="生成视频结果" controls src={url} />
+            <video className="generation-result-video" aria-label="生成视频结果" controls src={url} />
           )}
         </>
       ) : (

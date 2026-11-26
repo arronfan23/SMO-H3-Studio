@@ -360,6 +360,11 @@ body[data-window-maximized='true'] .window-resize-handle {
   margin: 0 auto;
 }
 
+.studio-page {
+  max-width: 1440px;
+  container-type: inline-size;
+}
+
 .studio-layout {
   display: grid;
   grid-template-columns: minmax(250px, 0.85fr) minmax(400px, 1.15fr);
@@ -453,6 +458,12 @@ body[data-window-maximized='true'] .window-resize-handle {
   padding: 18px;
 }
 
+.studio-page .production-controls {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
 .tab-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -504,11 +515,95 @@ body[data-window-maximized='true'] .window-resize-handle {
 
 .speech-controls,
 .image-controls {
-  max-width: 780px;
+  max-width: none;
 }
 
 .image-workspace {
   min-width: 0;
+}
+
+.studio-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.studio-editor-pane,
+.studio-output-pane {
+  min-width: 0;
+  padding: 18px;
+  background: #fff;
+  border: 1px solid #dce3dd;
+  border-radius: var(--radius-panel);
+}
+
+.studio-output-title {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+
+.generation-result {
+  min-width: 0;
+}
+
+.generation-result-empty {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  padding: 24px;
+  color: #536058;
+  text-align: center;
+  background: #f2f5f2;
+  border-radius: var(--radius-control);
+}
+
+.generation-result-image,
+.generation-result-video {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: min(62vh, 720px);
+  margin-inline: auto;
+  object-fit: contain;
+}
+
+.generation-result-video {
+  width: 100%;
+  background: #1d211e;
+}
+
+.generation-result-audio {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
+
+.generation-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.generation-result-actions .button {
+  flex: 1 1 140px;
+}
+
+@container (min-width: 1040px) {
+  .studio-workspace-grid {
+    grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
+  }
+}
+
+@media (min-height: 700px) {
+  @container (min-width: 1040px) {
+    .studio-output-pane {
+      position: sticky;
+      top: 0;
+    }
+  }
 }
 
 .speech-mode-fields {

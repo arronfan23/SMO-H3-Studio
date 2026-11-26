@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { GenerationResultPreview } from '../../src/renderer/GenerationResultPreview';
@@ -40,10 +40,11 @@ afterEach(() => {
 
 describe('GenerationResultPreview', () => {
   test.each([
-    ['speech', 'G:\\output\\voice.wav', '生成语音结果', 'audio'],
-    ['image', 'G:\\output\\image.png', '生成图像结果', 'img'],
-    ['text', 'G:\\output\\video.mp4', '生成视频结果', 'video'],
-  ] as const)('renders the completed %s result with native controls', (mode, outputPath, label, selector) => {
+    ['speech', 'G:\\output\\voice.wav', '生成语音结果', 'audio', 'generation-result-audio'],
+    ['image', 'G:\\output\\image.png', '生成图像结果', 'img', 'generation-result-image'],
+    ['text', 'G:\\output\\video.mp4', '生成视频结果', 'video', 'generation-result-video'],
+    ['audio', 'G:\\output\\digital-human.mp4', '生成视频结果', 'video', 'generation-result-video'],
+  ] as const)('renders the completed %s result with native controls', (mode, outputPath, label, selector, className) => {
     mockApi(completedWork(mode, outputPath));
 
     render(<GenerationResultPreview jobId="job-1" onOpenWorks={vi.fn()} />);
@@ -51,8 +52,10 @@ describe('GenerationResultPreview', () => {
     return waitFor(() => {
       const media = screen.getByLabelText(label);
       expect(media.tagName.toLowerCase()).toBe(selector);
+      expect(media).toHaveClass(className);
+      expect(media).not.toHaveAttribute('style');
       if (mode === 'image') {
-        expect(media).toHaveStyle({ objectFit: 'contain' });
+        expect(media).not.toHaveAttribute('controls');
       } else {
         expect(media).toHaveAttribute('controls');
       }
@@ -71,11 +74,32 @@ describe('GenerationResultPreview', () => {
     expect(onOpenWorks).toHaveBeenCalledTimes(1);
   });
 
-  test('does not render an unfinished result or query without a job id', () => {
+  test('renders the empty result preview without querying without a job id', () => {
     const api = mockApi(null);
-    const { container } = render(<GenerationResultPreview jobId={null} onOpenWorks={vi.fn()} />);
+    render(<GenerationResultPreview jobId={null} onOpenWorks={vi.fn()} />);
 
-    expect(container).toBeEmptyDOMElement();
+    const result = screen.getByRole('region', { name: '生成结果预览' });
+    expect(result).toHaveClass('generation-result');
+    expect(within(result).getByRole('heading', { name: '生成结果' })).toBeVisible();
+    expect(within(result).getByText('完成生成后在这里预览')).toHaveClass('generation-result-empty');
     expect(api.works.list).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    {
+      name: 'unfinished',
+      work: { ...completedWork('image', ''), status: 'running' as const, outputPath: null },
+    },
+    {
+      name: 'completed without an output path',
+      work: { ...completedWork('image', ''), outputPath: null },
+    },
+  ])('renders the empty result preview for $name work', async ({ work }) => {
+    mockApi(work);
+    render(<GenerationResultPreview jobId="job-1" onOpenWorks={vi.fn()} />);
+
+    const empty = await screen.findByText('完成生成后在这里预览');
+    expect(empty).toHaveClass('generation-result-empty');
+    expect(screen.getByRole('region', { name: '生成结果预览' })).toContainElement(empty);
   });
 });
