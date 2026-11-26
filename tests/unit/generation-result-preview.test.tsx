@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { GenerationResultPreview } from '../../src/renderer/GenerationResultPreview';
@@ -95,10 +95,24 @@ describe('GenerationResultPreview', () => {
       work: { ...completedWork('image', ''), outputPath: null },
     },
   ])('renders the empty result preview for $name work', async ({ work }) => {
-    mockApi(work);
+    const api = mockApi(null);
+    let resolveWorks!: (works: Work[]) => void;
+    const worksResponse = new Promise<Work[]>((resolve) => {
+      resolveWorks = resolve;
+    });
+    api.works.list.mockReturnValue(worksResponse);
+
     render(<GenerationResultPreview jobId="job-1" onOpenWorks={vi.fn()} />);
 
-    const empty = await screen.findByText('完成生成后在这里预览');
+    await waitFor(() => expect(api.works.list).toHaveBeenCalledTimes(1));
+    expect(screen.getByText('完成生成后在这里预览')).toHaveClass('generation-result-empty');
+
+    await act(async () => {
+      resolveWorks([work]);
+      await worksResponse;
+    });
+
+    const empty = screen.getByText('完成生成后在这里预览');
     expect(empty).toHaveClass('generation-result-empty');
     expect(screen.getByRole('region', { name: '生成结果预览' })).toContainElement(empty);
   });

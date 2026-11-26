@@ -587,7 +587,7 @@ body[data-window-maximized='true'] .window-resize-handle {
   margin-top: 12px;
 }
 
-.generation-result-actions .button {
+.generation-result-actions > button {
   flex: 1 1 140px;
 }
 
