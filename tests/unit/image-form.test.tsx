@@ -877,7 +877,7 @@ describe('图像工作区', () => {
     fireEvent.click(screen.getByRole('tab', { name: '语音' }));
     smo.files.selectAudio.mockResolvedValueOnce('G:\\references\\speech-reference.wav');
     fireEvent.click(screen.getByRole('button', { name: '选择音频' }));
-    const speechPanel = screen.getByRole('tabpanel', { name: '参考音合成' });
+    const speechPanel = screen.getByRole('region', { name: '语音制作' });
     expect(await within(speechPanel).findByText('speech-reference.wav')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: '生成语音' })).toBeEnabled());
     fireEvent.click(screen.getByRole('tab', { name: '视频' }));
