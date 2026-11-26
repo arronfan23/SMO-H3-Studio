@@ -353,6 +353,16 @@ function readWindowBounds(
   });
 }
 
+function readWindowMaximized(page: Page): Promise<boolean> {
+  return page.evaluate(() =>
+    (
+      window as unknown as {
+        smo: { window: { isMaximized(): Promise<boolean> } };
+      }
+    ).smo.window.isMaximized(),
+  );
+}
+
 async function assertViewLayout(
   page: Page,
   viewName: string,
@@ -646,6 +656,159 @@ async function assertStudioAvatarLayout(page: Page, viewName: string): Promise<v
   expect(layout!.documentOverflow, viewName).toBe(false);
 }
 
+async function readImageFormAcceptanceState(page: Page): Promise<{
+  prompt: string;
+  aspect: string;
+  resolution: string;
+  seed: string;
+  steps: string;
+  jobId: string | null;
+  resultReady: boolean;
+}> {
+  return page.evaluate(() => {
+    const value = (selector: string): string =>
+      (document.querySelector(selector) as HTMLInputElement | HTMLSelectElement).value;
+    const image = document.querySelector<HTMLImageElement>('.generation-result-image');
+    return {
+      prompt: value('#text-image-prompt'),
+      aspect: value('#image-aspect'),
+      resolution: value('#image-resolution'),
+      seed: value('#image-seed'),
+      steps: value('#image-steps'),
+      jobId: document.querySelector(
+        '#image-main-panel section[aria-label="任务状态"] code',
+      )?.textContent ?? null,
+      resultReady: image !== null && image.complete && image.naturalWidth > 0,
+    };
+  });
+}
+
+async function assertImageWorkspaceLayout(
+  page: Page,
+  jobId: string,
+  expected: { width: number; height: number },
+  viewport: { width: number; height: number },
+): Promise<void> {
+  await page.locator('.main-content').evaluate((element) => {
+    element.scrollTo({ top: 0, left: 0 });
+  });
+  const image = page.getByLabel('生成图像结果');
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element) => ({
+    width: (element as HTMLImageElement).naturalWidth,
+    height: (element as HTMLImageElement).naturalHeight,
+  }))).toEqual(expected);
+
+  const viewName = `studio-image-${expected.width}x${expected.height}-${viewport.width}x${viewport.height}`;
+  const layout = await page.evaluate(({ jobId: id }) => {
+    const readRect = (element: Element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+    const editor = document.querySelector('#image-main-panel .studio-editor-pane')!;
+    const output = document.querySelector('#image-main-panel .studio-output-pane')!;
+    const media = document.querySelector<HTMLImageElement>('.generation-result-image')!;
+    const jobId = document.querySelector<HTMLElement>(
+      '#image-main-panel section[aria-label="任务状态"] code',
+    )!;
+    const progress = document.querySelector(
+      `#image-main-panel [role="progressbar"][aria-label="生成进度 ${id}"]`,
+    )!;
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>(
+      '#image-main-panel .generation-result-actions button',
+    ));
+    const controls = [
+      { name: 'jobId', element: jobId },
+      { name: 'progress', element: progress },
+      ...buttons.map((element, index) => ({ name: `resultButton${index + 1}`, element })),
+    ];
+    const overlaps: string[] = [];
+    for (let first = 0; first < controls.length; first += 1) {
+      for (let second = first + 1; second < controls.length; second += 1) {
+        const a = controls[first].element.getBoundingClientRect();
+        const b = controls[second].element.getBoundingClientRect();
+        const overlapWidth = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+        const overlapHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+        if (overlapWidth > 2 && overlapHeight > 2) {
+          overlaps.push(`${controls[first].name} / ${controls[second].name}`);
+        }
+      }
+    }
+    const jobIdStyle = getComputedStyle(jobId);
+    const actions = document.querySelector('.generation-result-actions')!;
+    return {
+      editor: readRect(editor),
+      output: readRect(output),
+      media: readRect(media),
+      naturalRatio: media.naturalWidth / media.naturalHeight,
+      renderedRatio: media.getBoundingClientRect().width / media.getBoundingClientRect().height,
+      objectFit: getComputedStyle(media).objectFit,
+      outputPosition: getComputedStyle(output).position,
+      documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 2,
+      overlaps,
+      resultButtonCount: buttons.length,
+      jobIdOverflow: jobId.scrollWidth > jobId.clientWidth + 2,
+      jobIdWrap: {
+        overflowWrap: jobIdStyle.overflowWrap,
+        wordBreak: jobIdStyle.wordBreak,
+      },
+      actionsWrap: getComputedStyle(actions).flexWrap,
+      buttonOverflow: buttons.some((button) => button.scrollWidth > button.clientWidth + 2),
+      buttonWrap: buttons.every((button) => {
+        const style = getComputedStyle(button);
+        return style.whiteSpace === 'normal' && style.overflowWrap === 'anywhere';
+      }),
+    };
+  }, { jobId });
+
+  const details = `${viewName}: ${JSON.stringify(layout)}`;
+  if (viewport.width >= 1280) {
+    expect(Math.abs(layout.editor.top - layout.output.top), details).toBeLessThanOrEqual(2);
+    expect(layout.output.left, details).toBeGreaterThanOrEqual(layout.editor.right - 2);
+  } else {
+    expect(layout.output.top, details).toBeGreaterThanOrEqual(layout.editor.bottom - 2);
+    expect(layout.outputPosition, details).not.toBe('sticky');
+  }
+  expect(layout.media.left, details).toBeGreaterThanOrEqual(layout.output.left - 2);
+  expect(layout.media.top, details).toBeGreaterThanOrEqual(layout.output.top - 2);
+  expect(layout.media.right, details).toBeLessThanOrEqual(layout.output.right + 2);
+  expect(layout.media.bottom, details).toBeLessThanOrEqual(layout.output.bottom + 2);
+  expect(layout.renderedRatio, details).toBeCloseTo(layout.naturalRatio, 2);
+  expect(layout.objectFit, details).toBe('contain');
+  expect(layout.documentOverflow, details).toBe(false);
+  expect(layout.overlaps, details).toEqual([]);
+  expect(layout.resultButtonCount, details).toBe(2);
+  expect(layout.jobIdOverflow, details).toBe(false);
+  expect(layout.jobIdWrap, details).toEqual({ overflowWrap: 'anywhere', wordBreak: 'break-all' });
+  expect(layout.actionsWrap, details).toBe('wrap');
+  expect(layout.buttonOverflow, details).toBe(false);
+  expect(layout.buttonWrap, details).toBe(true);
+}
+
+async function assertEmptyStudioWorkspace(
+  page: Page,
+  panelSelector: string,
+  generateButtonName: string,
+): Promise<void> {
+  const panel = page.locator(panelSelector);
+  const editor = panel.locator('.studio-editor-pane');
+  const output = panel.getByRole('complementary', { name: '任务与结果' });
+  await expect(editor).toBeVisible();
+  await expect(editor.getByRole('button', { name: generateButtonName, exact: true })).toBeVisible();
+  await expect(output).toBeVisible();
+  await expect(output.locator('.generation-result-empty')).toHaveText('完成生成后在这里预览');
+  await expect(output.locator('.job-status')).toHaveCount(0);
+  await expect(output.locator('.generation-result-image, .generation-result-video, .generation-result-audio'))
+    .toHaveCount(0);
+}
+
 async function readVisibleTextJobId(page: Page): Promise<string> {
   const jobId = page.locator(
     '#text-mode-panel section[aria-label="任务状态"]:visible code',
@@ -833,8 +996,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await page!.reload();
     const dialog = page!.getByRole('dialog', { name: '更新内容' });
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('版本 0.6.0');
-    await expect(dialog).toContainText('三脚猫支持多轮工具调用');
+    await expect(dialog).toContainText('版本 0.6.2');
+    await expect(dialog).toContainText('优化了稳定性与使用体验');
     await dialog.getByRole('button', { name: '开始使用' }).click();
     await expect(dialog).toHaveCount(0);
 
@@ -1521,11 +1684,28 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     expect(promptNode.inputs.prompt).toBe(editedPrompt);
   });
 
-  test('图像生成使用模拟 ComfyUI PNG 并在作品页保持原始比例', async () => {
+  for (const scenario of [
+    {
+      slug: 'landscape',
+      label: '横图',
+      width: 1376,
+      height: 768,
+      aspect: '16:9 (Widescreen)',
+    },
+    {
+      slug: 'portrait',
+      label: '竖图',
+      width: 768,
+      height: 1376,
+      aspect: '9:16 (Portrait Widescreen)',
+    },
+  ] as const) {
+  test(`图像生成使用模拟 ComfyUI PNG 并在作品页保持原始比例（${scenario.label}）`, async () => {
+    const testInfo = test.info();
     const png = await sharp({
       create: {
-        width: 96,
-        height: 48,
+        width: scenario.width,
+        height: scenario.height,
         channels: 3,
         background: { r: 24, g: 150, b: 112 },
       },
@@ -1551,13 +1731,15 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     });
     await page.reload();
     await expect(page).toHaveTitle('SMO.H3 Studio');
+    await setViewport(app, page, 1280, 820);
 
     await page.click('#studio-image-button');
     await expect(page.locator('#image-main-panel')).toBeVisible();
     await expect(page.locator('.person-preview:visible')).toHaveCount(0);
     await expect(page.locator('#image-main-panel button:has-text("生成图像")')).toBeEnabled();
-    await page.fill('#text-image-prompt', 'A clean geometric image from the simulated backend.');
-    await page.selectOption('#image-aspect', '16:9 (Widescreen)');
+    const prompt = `A clean geometric ${scenario.label} image from the simulated backend.`;
+    await page.fill('#text-image-prompt', prompt);
+    await page.selectOption('#image-aspect', scenario.aspect);
     await page.selectOption('#image-resolution', '1');
     await page.fill('#image-seed', '7');
     await page.fill('#image-steps', '30');
@@ -1569,7 +1751,11 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(jobLocator).toHaveText(/^[0-9a-f-]{36}$/);
     const jobId = (await jobLocator.textContent())!;
     await waitForStableStatus(page, jobId, 'done');
-    await expect(page.getByLabel('生成图像结果')).toBeVisible();
+    const imageResult = page.getByLabel('生成图像结果');
+    await expect(imageResult).toBeVisible();
+    await expect.poll(() => imageResult.evaluate(
+      (element) => (element as HTMLImageElement).naturalWidth,
+    )).toBe(scenario.width);
     const outputPath = join(outputDirectory, 'SMO-Image', `${jobId}_00001.png`);
     expect(existsSync(outputPath)).toBe(true);
 
@@ -1584,10 +1770,58 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       };
     });
     expect(submitted.prompt).toMatchObject({
-      prompt: 'A clean geometric image from the simulated backend.',
+      prompt,
     });
-    expect(submitted.latent).toMatchObject({ width: 1376, height: 768 });
+    expect(submitted.latent).toMatchObject({ width: scenario.width, height: scenario.height });
     expect(submitted.sampler).toMatchObject({ seed: 7, steps: 30 });
+    expect(await sharp(outputPath).metadata()).toMatchObject({
+      width: scenario.width,
+      height: scenario.height,
+      format: 'png',
+    });
+
+    const beforeWindowCycle = await readImageFormAcceptanceState(page);
+    expect(beforeWindowCycle).toMatchObject({
+      prompt,
+      aspect: scenario.aspect,
+      resolution: '1',
+      seed: '7',
+      steps: '30',
+      jobId,
+      resultReady: true,
+    });
+
+    await page.getByRole('button', { name: '最大化', exact: true }).click();
+    await expect(page.getByRole('button', { name: '还原', exact: true })).toBeVisible();
+    await expect.poll(() => readWindowMaximized(page!)).toBe(true);
+    expect(await readImageFormAcceptanceState(page)).toEqual(beforeWindowCycle);
+
+    await page.getByRole('button', { name: '还原', exact: true }).click();
+    await expect(page.getByRole('button', { name: '最大化', exact: true })).toBeVisible();
+    await expect.poll(() => readWindowMaximized(page!)).toBe(false);
+    await setViewport(app, page, 1280, 820);
+    expect(await readImageFormAcceptanceState(page)).toEqual(beforeWindowCycle);
+
+    for (const viewport of [
+      { width: 1280, height: 820 },
+      { width: 1920, height: 1080 },
+      { width: 960, height: 640 },
+    ]) {
+      await setViewport(app, page, viewport.width, viewport.height);
+      expect(await readImageFormAcceptanceState(page)).toEqual(beforeWindowCycle);
+      await assertImageWorkspaceLayout(
+        page,
+        jobId,
+        { width: scenario.width, height: scenario.height },
+        viewport,
+      );
+      if (viewport.width === 960) {
+        await page.locator('#image-main-panel .studio-output-pane').scrollIntoViewIfNeeded();
+      }
+      await page.screenshot({
+        path: testInfo.outputPath(`image-${scenario.slug}-${viewport.width}x${viewport.height}.png`),
+      });
+    }
 
     await page.click('nav[aria-label="主导航"] button:has-text("我的作品")');
     const work = page.locator('.works-list article').filter({ hasText: jobId });
@@ -1595,8 +1829,10 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     await expect(work).toContainText('已完成');
     const image = work.getByRole('img', { name: `作品图像 ${jobId}` });
     await expect(image).toBeVisible();
-    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
-      .toBe(96);
+    await expect.poll(() => image.evaluate((element) => ({
+      width: (element as HTMLImageElement).naturalWidth,
+      height: (element as HTMLImageElement).naturalHeight,
+    }))).toEqual({ width: scenario.width, height: scenario.height });
     const display = await image.evaluate((element) => {
       const imageElement = element as HTMLImageElement;
       const rect = imageElement.getBoundingClientRect();
@@ -1606,7 +1842,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         objectFit: getComputedStyle(imageElement).objectFit,
       };
     });
-    expect(display.naturalRatio).toBe(2);
+    expect(display.naturalRatio).toBeCloseTo(scenario.width / scenario.height, 5);
     expect(display.renderedRatio).toBeCloseTo(display.naturalRatio, 2);
     expect(display.objectFit).toBe('contain');
 
@@ -1639,6 +1875,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     }
     expect(await readFile(outputPath)).toEqual(originalBytes);
   });
+  }
 
   test('参考生图 1 张横图按 1MP 端到端验收', async () => {
     const referenceDirectory = join(tempDirectory!, 'references');
@@ -2463,10 +2700,18 @@ test.describe('SMO.H3 Studio end-to-end', () => {
     const viewports = [
       { width: 1280, height: 820 },
       { width: 960, height: 640 },
+      { width: 1920, height: 1080 },
     ];
 
     for (const viewport of viewports) {
       await setViewport(app!, page!, viewport.width, viewport.height);
+      const captureWideMode = async (name: string): Promise<void> => {
+        if (viewport.width === 1920) {
+          await page!.screenshot({
+            path: testInfo.outputPath(`${name}-${viewport.width}x${viewport.height}.png`),
+          });
+        }
+      };
 
       // The rounded frame fills the viewport; tolerate the same fractional-DPI
       // rounding (0-2 px) that setViewport observes on a 1.75 scale display.
@@ -2511,6 +2756,16 @@ test.describe('SMO.H3 Studio end-to-end', () => {
       expect(contentInset).not.toBeNull();
       expect(contentInset!).toBeGreaterThanOrEqual(6);
 
+      await page!.locator('#studio-speech-button').click();
+      await expect(page!.locator('#speech-main-panel')).toBeVisible();
+      await assertViewLayout(page!, 'studio-speech', [
+        '#custom-speech-prompt',
+        '#custom-speech-instruct',
+        '#speech-main-panel .button-generate',
+      ]);
+      await assertEmptyStudioWorkspace(page!, '#speech-main-panel', '生成语音');
+      await captureWideMode('studio-speech');
+
       await page!.locator('#studio-video-button').click();
       // The studio preserves the previously selected mode, so switch back to
       // text mode explicitly instead of relying on an implicit reset.
@@ -2523,6 +2778,16 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#polished-tab',
         '#text-mode-panel .button-generate',
       ]);
+      await assertEmptyStudioWorkspace(page!, '#text-mode-panel', '生成视频');
+
+      await page!.click('#reference-mode-tab');
+      await expect(page!.locator('#reference-mode-panel')).toBeVisible();
+      await assertViewLayout(page!, 'studio-reference', [
+        '#reference-original-text',
+        '#reference-mode-panel .button-generate',
+      ]);
+      await assertEmptyStudioWorkspace(page!, '#reference-mode-panel', '生成视频');
+      await captureWideMode('studio-reference');
 
       await page!.click('#audio-mode-tab');
       await expect(page!.locator('#audio-mode-panel')).toBeVisible();
@@ -2531,6 +2796,8 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#audio-mode-tab',
         '#audio-mode-panel .button-generate',
       ]);
+      await assertEmptyStudioWorkspace(page!, '#audio-mode-panel', '生成视频');
+      await captureWideMode('studio-audio');
 
       await page!.click('#studio-image-button');
       await expect(page!.locator('#image-main-panel')).toBeVisible();
@@ -2550,6 +2817,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         { selector: 'label[for="image-steps"]', text: '采样步数' },
         { selector: '#image-main-panel .button-generate', text: '生成图像' },
       ]);
+      await assertEmptyStudioWorkspace(page!, '#image-main-panel', '生成图像');
       await assertCurrentOptionText(
         page!,
         'studio-image aspect',
@@ -2562,6 +2830,7 @@ test.describe('SMO.H3 Studio end-to-end', () => {
         '#image-resolution',
         '1024 × 1024 px',
       );
+      await captureWideMode('studio-image');
       await page!.click('#studio-video-button');
 
       await page!.click('nav[aria-label="主导航"] button:has-text("数字模特")');

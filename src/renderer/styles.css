@@ -636,14 +636,15 @@ body[data-window-maximized='true'] .window-resize-handle {
   flex: 1 1 140px;
 }
 
-@container (min-width: 1040px) {
+/* Keep 1280px windows in two columns when a vertical scrollbar consumes width. */
+@container (min-width: 1024px) {
   .studio-workspace-grid {
     grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
   }
 }
 
 @media (min-height: 700px) {
-  @container (min-width: 1040px) {
+  @container (min-width: 1024px) {
     .studio-output-pane {
       position: sticky;
       top: 0;
