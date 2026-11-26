@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import sharp from 'sharp';
+import packageManifest from '../../package.json' with { type: 'json' };
 import { seedAvatar } from '../fixtures/seed-avatar';
 import { startComfyMock } from '../fixtures/mock-comfy';
 import { startLlmMock } from '../fixtures/mock-llm';
@@ -807,6 +808,31 @@ test.describe('SMO.H3 Studio portable package', () => {
 
     const violations = await scanSensitiveFiles(packagedResourcesPath);
     expect(violations).toEqual([]);
+  });
+
+  test('packaged app shows the current version release notes instead of generic fallback', async () => {
+    const version = packageManifest.version;
+    expect(
+      await app!.evaluate(({ app: electronApp }) => electronApp.getVersion()),
+    ).toBe(version);
+
+    await page!.evaluate(() => {
+      window.localStorage.removeItem('smo-h3-studio:seen-version');
+    });
+    await page!.reload();
+
+    const dialog = page!.getByRole('dialog', { name: '更新内容' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(`版本 ${version}`);
+    await expect(dialog).toContainText('制作台支持自适应双栏');
+    await expect(dialog).toContainText('参考音合成与声音克隆合并为统一声音生成流程');
+    await expect(dialog).toContainText('音频数字人模特预览迁入编辑区');
+    await expect(dialog).not.toContainText('优化了稳定性与使用体验');
+
+    await dialog.getByRole('button', { name: '开始使用' }).click();
+    await expect(dialog).toHaveCount(0);
+    await page!.reload();
+    await expect(page!.getByRole('dialog', { name: '更新内容' })).toHaveCount(0);
   });
 
   test('packaged app completes a text-to-video work against local mocks', async () => {

@@ -7,7 +7,8 @@ import type { SmoApi } from '../../src/shared/ipc';
 const CURRENT_NOTES = [
   '制作台支持自适应双栏，宽屏并排、窄屏自动堆叠。',
   '图片与视频在输出区完整缩放，保持原始比例。',
-  '语音入口已合并到制作台，情绪与语气为可选项。',
+  '参考音合成与声音克隆合并为统一声音生成流程，情绪与语气为可选项。',
+  '音频数字人模特预览迁入编辑区，制作时可同步查看当前模特。',
   '旧作品保持兼容，可继续查看和使用已有结果。',
 ];
 
@@ -45,7 +46,9 @@ describe('ReleaseNotesDialog', () => {
     expect(dialog).toHaveTextContent('版本 0.6.0');
     expect(dialog).toHaveTextContent('三脚猫支持多轮工具调用');
     expect(dialog).toHaveTextContent('新增版本更新内容提示');
-    expect(dialog).not.toHaveTextContent(CURRENT_NOTES[0]);
+    for (const note of CURRENT_NOTES) {
+      expect(dialog).not.toHaveTextContent(note);
+    }
     expect(dialog).not.toHaveTextContent('优化了稳定性与使用体验');
   });
 });

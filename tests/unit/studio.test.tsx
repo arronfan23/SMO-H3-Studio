@@ -2697,9 +2697,10 @@ describe('制作台结果预览与模特区域', () => {
     expect(avatarMediaCalls()).toBe(callsBeforeSwitch);
   });
 
-  test('语音完成后在当前页显示音频预览', async () => {
+  test('语音完成后在当前页显示音频预览并可进入我的作品', async () => {
+    const onOpenWorks = vi.fn();
     completeJob('speech', 'G:\\output\\voice.wav');
-    renderStudioPage();
+    renderStudioPage(onOpenWorks);
     fireEvent.click(screen.getByRole('tab', { name: '语音' }));
     fireEvent.change(document.getElementById('custom-speech-language')!, {
       target: { value: 'Chinese' },
@@ -2714,11 +2715,14 @@ describe('制作台结果预览与模特区域', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成语音' }));
 
     expect(await screen.findByLabelText('生成语音结果')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '进入我的作品' }));
+    expect(onOpenWorks).toHaveBeenCalledTimes(1);
   });
 
-  test('图像完成后在当前页显示图片预览', async () => {
+  test('图像完成后在当前页显示图片预览并可进入我的作品', async () => {
+    const onOpenWorks = vi.fn();
     completeJob('image', 'G:\\output\\image.png');
-    renderStudioPage();
+    renderStudioPage(onOpenWorks);
     fireEvent.click(screen.getByRole('tab', { name: '图像' }));
     fireEvent.change(await screen.findByLabelText('图像提示词'), {
       target: { value: '预览这张图' },
@@ -2727,6 +2731,8 @@ describe('制作台结果预览与模特区域', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成图像' }));
 
     expect(await screen.findByLabelText('生成图像结果')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '进入我的作品' }));
+    expect(onOpenWorks).toHaveBeenCalledTimes(1);
   });
 
   test('文生视频完成后显示预览且没有当前模特区域', async () => {

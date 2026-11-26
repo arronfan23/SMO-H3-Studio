@@ -255,6 +255,7 @@ export function StudioPage({
             active={mode === 'speech'}
             pageActive={pageActive}
             busy={busy}
+            onOpenWorks={onOpenWorks}
             onJobStarted={refresh}
           />
         </section>
@@ -272,6 +273,7 @@ export function StudioPage({
             active={mode === 'image'}
             pageActive={pageActive}
             busy={busy}
+            onOpenWorks={onOpenWorks}
             syncRevision={syncRevision}
             onJobStarted={refresh}
           />
