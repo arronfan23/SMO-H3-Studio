@@ -115,7 +115,7 @@ git commit -m "Add responsive studio workspace structure"
 
 **文件：** `src/renderer/SpeechForm.tsx`、`tests/unit/speech-form.test.tsx`、`tests/unit/studio.test.tsx`
 
-- [ ] **步骤 1：把旧双入口测试改写为统一流程的失败测试**
+- [x] **步骤 1：把旧双入口测试改写为统一流程的失败测试**
 
 保留现有 `custom-speech-prompt`、`custom-speech-instruct`、`custom-speech-language`、`custom-speech-output`、`custom-speech-rate` ID，避免无关选择器 churn。`speechField()` 改为从 `.speech-mode-fields` 读取唯一字段。新核心断言：
 
@@ -129,13 +129,13 @@ expect(screen.getByLabelText('情绪/语气')).toBeInTheDocument();
 
 增加两个真实请求用例：情绪留空提交 `speechMode: 'clone'` 且不包含 `instruct`；输入“温暖而从容”提交 `speechMode: 'custom'` 且包含该 `instruct`。两个用例必须使用同一参考音和口播文字。录音用例不再点击克隆 tab，直接在当前唯一工作区录制。
 
-- [ ] **步骤 2：运行语音测试并确认旧双 tab 实现失败**
+- [x] **步骤 2：运行语音测试并确认旧双 tab 实现失败**
 
 运行：`npx vitest run tests/unit/speech-form.test.tsx tests/unit/studio.test.tsx --reporter=dot`
 
 预期：FAIL；旧实现仍出现两个语音 tab，空情绪仍提交 `custom`。
 
-- [ ] **步骤 3：最小化修改 SpeechForm**
+- [x] **步骤 3：最小化修改 SpeechForm**
 
 删除 `speechMode` UI 状态、双 tab、键盘切换、双语言状态和模式参数化渲染。保留单个 `language` 状态；capabilities 固定查询 `custom`，确保情绪能力已加载。保留全部组件安装、错误、轮询、录音和草稿逻辑。
 
@@ -155,13 +155,13 @@ const request: SpeechGenerationRequest = emotion.length > 0
 
 页面只渲染一组口播文字、参考音、情绪、语言、语速和格式控件。`AudioRecorder.active` 改为 `active && pageActive`，参考音暂停只依赖页面可见性和音频 revision。
 
-- [ ] **步骤 4：验证统一语音行为与旧后端兼容**
+- [x] **步骤 4：验证统一语音行为与旧后端兼容**
 
 运行：`npx vitest run tests/unit/speech-form.test.tsx tests/unit/studio.test.tsx tests/unit/speech-generation.test.ts tests/unit/speech-process.test.ts --reporter=dot`
 
 预期：PASS；主进程和 Python 请求文件未改动，旧 `custom` / `clone` 快照测试仍通过。
 
-- [ ] **步骤 5：提交语音合并**
+- [x] **步骤 5：提交语音合并**
 
 ```bash
 git add src/renderer/SpeechForm.tsx tests/unit/speech-form.test.tsx tests/unit/studio.test.tsx
