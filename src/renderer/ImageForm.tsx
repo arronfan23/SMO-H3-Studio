@@ -21,6 +21,7 @@ import { JobStatus } from './JobStatus';
 import { ReferenceImagePicker } from './ReferenceImagePicker';
 import { StepNumberField } from './StepNumberField';
 import { GenerationResultPreview } from './GenerationResultPreview';
+import { StudioWorkspace } from './StudioWorkspace';
 import { errorMessage } from './ui';
 import { useMediaUrl } from './useMediaUrl';
 
@@ -525,15 +526,17 @@ export function ImageForm({
         cancel={cancelComponent}
         retry={refreshComponent}
       />
-      <form
-        className="generation-form"
-        noValidate
-        aria-busy={submitting || busy}
-        onSubmit={(event) => {
-          event.preventDefault();
-          void startGeneration();
-        }}
-      >
+      <StudioWorkspace
+        editor={
+          <form
+            className="generation-form"
+            noValidate
+            aria-busy={submitting || busy}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void startGeneration();
+            }}
+          >
         <div
           className="tab-list"
           role="tablist"
@@ -593,7 +596,7 @@ export function ImageForm({
           hidden={imageMode !== 'text'}
         >
           {imageMode === 'text' && (
-            <div className="form-row image-option-row">
+            <div className="form-row image-option-row studio-parameter-grid">
               <div className="field">
                 <label htmlFor="image-aspect">图像比例</label>
                 <select
@@ -642,12 +645,12 @@ export function ImageForm({
                 onChange={changeReferenceImages}
                 onError={setError}
               />
-              <div className="form-row image-option-row">{resolutionField}</div>
+              <div className="form-row image-option-row studio-parameter-grid">{resolutionField}</div>
             </>
           )}
         </div>
 
-        <div className="form-row image-parameter-row">
+        <div className="form-row image-parameter-row studio-parameter-grid">
           <div className="field">
             <label htmlFor="image-seed">随机种子</label>
             <input
@@ -698,9 +701,13 @@ export function ImageForm({
           <ImageIcon size={17} aria-hidden="true" />
           {submitting ? '正在提交…' : '生成图像'}
         </button>
-        <JobStatus jobId={jobId} active={active && pageActive} allowCancel />
-        <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
-      </form>
+          </form>
+        }
+        output={<>
+          <JobStatus jobId={jobId} active={active && pageActive} allowCancel />
+          <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
+        </>}
+      />
     </section>
   );
 }

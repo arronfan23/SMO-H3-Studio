@@ -13,6 +13,7 @@ import { JobStatus } from './JobStatus';
 import { ReferenceImagePicker } from './ReferenceImagePicker';
 import { StepNumberField } from './StepNumberField';
 import { GenerationResultPreview } from './GenerationResultPreview';
+import { StudioWorkspace } from './StudioWorkspace';
 import { errorMessage } from './ui';
 import { estimateNarrationDuration } from '../shared/duration';
 
@@ -256,14 +257,16 @@ export function TextToVideoForm({
   };
 
   return (
-    <form
-      className="generation-form"
-      noValidate
-      onSubmit={(event) => {
-        event.preventDefault();
-        void startGeneration();
-      }}
-    >
+    <StudioWorkspace
+      editor={
+        <form
+          className="generation-form"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            void startGeneration();
+          }}
+        >
       {mode === 'reference' && (
         <div className="field">
           {/* Late authorization must still call onChange so it can invalidate this polish. */}
@@ -322,7 +325,7 @@ export function TextToVideoForm({
         disabled={submitting}
       />
 
-      <div className="form-row">
+      <div className="form-row studio-parameter-grid">
         <div className="field">
           <label htmlFor={`${idPrefix}-duration`}>视频时长（秒）</label>
           <input
@@ -424,8 +427,14 @@ export function TextToVideoForm({
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>
-      <JobStatus jobId={jobId} active={active} />
-      <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
-    </form>
+        </form>
+      }
+      output={
+        <>
+          <JobStatus jobId={jobId} active={active} />
+          <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
+        </>
+      }
+    />
   );
 }

@@ -1493,8 +1493,10 @@ describe('text-to-video studio', () => {
     expect(screen.queryByRole('region', { name: '当前人物预览' })).not.toBeInTheDocument();
 
     fireEvent.click(audioTab);
-    const preview = screen.getByRole('region', { name: '当前人物预览' });
-    expect(controls).not.toContainElement(preview);
+    const editor = document.querySelector('#audio-mode-panel .studio-editor-pane');
+    expect(editor).not.toBeNull();
+    expect(within(editor as HTMLElement).getByRole('region', { name: '当前人物预览' })).toBeVisible();
+    expect(document.querySelector('#video-main-panel > .studio-layout > .person-preview')).toBeNull();
     expect(textPanel).not.toBeVisible();
     expect(referencePanel).not.toBeVisible();
     expect(audioPanel).toBeVisible();
@@ -2599,6 +2601,85 @@ describe('制作台结果预览与模特区域', () => {
       createWork({ id: 'job-1', mode, outputPath, status: 'done' }),
     ]);
   }
+
+  function expectVideoWorkspace(panel: HTMLElement) {
+    const editor = panel.querySelector('.studio-editor-pane');
+    expect(editor).not.toBeNull();
+    const output = within(panel).getByRole('complementary', { name: '任务与结果' });
+    expect(within(editor as HTMLElement).getByRole('button', { name: '生成视频' })).toBeInTheDocument();
+    expect(editor?.nextElementSibling).toBe(output);
+    expect(output.closest('form')).toBeNull();
+    expect(within(output).getByRole('region', { name: '生成结果预览' })).toHaveTextContent(
+      '完成生成后在这里预览',
+    );
+    return { editor: editor as HTMLElement, output };
+  }
+
+  async function expectVideoJobInOutput(output: HTMLElement) {
+    await waitFor(() =>
+      expect(within(output).getByRole('region', { name: '任务状态' })).toBeInTheDocument(),
+    );
+    expect(within(output).getByRole('region', { name: '生成结果预览' })).toHaveTextContent(
+      '完成生成后在这里预览',
+    );
+    expect(within(output).queryByLabelText('生成视频结果')).not.toBeInTheDocument();
+  }
+
+  test('文生视频编辑与任务结果接入共享工作区', async () => {
+    await renderStudio();
+    const panel = document.getElementById('text-mode-panel') as HTMLElement;
+    const { editor, output } = expectVideoWorkspace(panel);
+    expect(within(editor).getByLabelText('视频时长（秒）').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(within(editor).getByLabelText('随机种子').closest('.studio-parameter-grid')).not.toBeNull();
+
+    fireEvent.change(within(editor).getByLabelText('原始文字'), {
+      target: { value: '共享工作区文生视频任务' },
+    });
+    fireEvent.click(within(editor).getByRole('button', { name: '生成视频' }));
+
+    await expectVideoJobInOutput(output);
+  });
+
+  test('图片生视频编辑与任务结果接入共享工作区', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '图片生视频' }));
+    const panel = document.getElementById('reference-mode-panel') as HTMLElement;
+    const { editor, output } = expectVideoWorkspace(panel);
+    expect(within(editor).getByLabelText('视频时长（秒）').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(within(editor).getByLabelText('随机种子').closest('.studio-parameter-grid')).not.toBeNull();
+
+    smo.files.selectImage.mockResolvedValue('G:\\refs\\workspace-reference.png');
+    fireEvent.click(within(editor).getByRole('button', { name: '选择参考图' }));
+    expect(await within(editor).findByText('workspace-reference.png')).toBeInTheDocument();
+    fireEvent.change(within(editor).getByLabelText('原始文字'), {
+      target: { value: '共享工作区图片生视频任务' },
+    });
+    fireEvent.click(within(editor).getByRole('button', { name: '生成视频' }));
+
+    await expectVideoJobInOutput(output);
+  });
+
+  test('音频数字人编辑与任务结果接入共享工作区', async () => {
+    await renderStudio();
+    fireEvent.click(screen.getByRole('tab', { name: '音频数字人' }));
+    const panel = document.getElementById('audio-mode-panel') as HTMLElement;
+    const { editor, output } = expectVideoWorkspace(panel);
+    expect(within(editor).getByLabelText('起始截取（秒）').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(within(editor).getByLabelText('截取时长（秒）').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(within(editor).getByLabelText('随机种子').closest('.studio-parameter-grid')).not.toBeNull();
+
+    smo.files.selectAudio.mockResolvedValue('G:\\input\\workspace-audio.wav');
+    fireEvent.click(within(editor).getByRole('button', { name: '选择音频' }));
+    const source = await within(editor).findByLabelText('所选音频');
+    Object.defineProperty(source, 'duration', { configurable: true, value: 8 });
+    fireEvent.loadedMetadata(source);
+    fireEvent.change(within(editor).getByLabelText('动作/画面提示词'), {
+      target: { value: '共享工作区音频数字人任务' },
+    });
+    fireEvent.click(within(editor).getByRole('button', { name: '生成视频' }));
+
+    await expectVideoJobInOutput(output);
+  });
 
   test('语音完成后在当前页显示音频预览', async () => {
     completeJob('speech', 'G:\\output\\voice.wav');

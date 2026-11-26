@@ -11,6 +11,7 @@ import { AudioRecorder } from './AudioRecorder';
 import { ComponentGate } from './ComponentGate';
 import { JobStatus } from './JobStatus';
 import { GenerationResultPreview } from './GenerationResultPreview';
+import { StudioWorkspace } from './StudioWorkspace';
 import { errorMessage } from './ui';
 import { useMediaUrl } from './useMediaUrl';
 
@@ -476,15 +477,17 @@ export function SpeechForm({
         cancel={cancelComponent}
         retry={refreshComponent}
       />
-      <form
-        className="generation-form"
-        noValidate
-        aria-busy={submitting}
-        onSubmit={(event) => {
-          event.preventDefault();
-          void startGeneration();
-        }}
-      >
+      <StudioWorkspace
+        editor={
+          <form
+            className="generation-form"
+            noValidate
+            aria-busy={submitting}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void startGeneration();
+            }}
+          >
         {capabilitiesLoading && (
           <p className="form-notice" role="status">正在加载音色与语言…</p>
         )}
@@ -520,7 +523,7 @@ export function SpeechForm({
               placeholder="例如：温暖、从容，富有感染力"
             />
           </div>
-          <div className="form-row form-row-three">
+          <div className="form-row form-row-three studio-parameter-grid">
             {renderLanguageField()}
             {renderSpeechRateField()}
             {renderOutputField()}
@@ -536,9 +539,15 @@ export function SpeechForm({
           <Play size={17} aria-hidden="true" />
           {submitting ? '正在提交…' : '生成语音'}
         </button>
-        <JobStatus jobId={jobId} active={active && pageActive} allowCancel />
-        <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
-      </form>
+          </form>
+        }
+        output={
+          <>
+            <JobStatus jobId={jobId} active={active && pageActive} allowCancel />
+            <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
+          </>
+        }
+      />
     </section>
   );
 }

@@ -136,6 +136,38 @@ afterEach(() => {
 });
 
 describe('图像工作区', () => {
+  test('图像编辑与任务结果接入共享工作区', async () => {
+    const { panel } = await renderImage();
+    await waitForImageReady();
+    const panelElement = document.getElementById('image-main-panel') as HTMLElement;
+    const editor = panelElement.querySelector('.studio-editor-pane');
+    expect(editor).not.toBeNull();
+    const output = within(panelElement).getByRole('complementary', { name: '任务与结果' });
+    expect(within(editor as HTMLElement).getByRole('button', { name: '生成图像' })).toBeInTheDocument();
+    expect(editor?.nextElementSibling).toBe(output);
+    expect(output.closest('form')).toBeNull();
+    expect(within(output).getByRole('region', { name: '生成结果预览' })).toHaveTextContent(
+      '完成生成后在这里预览',
+    );
+    expect(panel.getByLabelText('图像比例').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(panel.getByLabelText('分辨率').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(panel.getByLabelText('随机种子').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(panel.getByRole('spinbutton', { name: '采样步数' }).closest('.studio-parameter-grid')).not.toBeNull();
+
+    fireEvent.change(panel.getByLabelText('图像提示词'), {
+      target: { value: '共享工作区图像任务' },
+    });
+    fireEvent.click(within(editor as HTMLElement).getByRole('button', { name: '生成图像' }));
+
+    await waitFor(() =>
+      expect(within(output).getByRole('region', { name: '任务状态' })).toBeInTheDocument(),
+    );
+    expect(within(output).getByRole('region', { name: '生成结果预览' })).toHaveTextContent(
+      '完成生成后在这里预览',
+    );
+    expect(within(output).queryByLabelText('生成图像结果')).not.toBeInTheDocument();
+  });
+
   test('文字生图与参考生图切换对应控件', async () => {
     const { panel } = await renderImage();
     await waitForImageReady();

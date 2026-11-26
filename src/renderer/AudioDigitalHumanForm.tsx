@@ -1,6 +1,7 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Sparkles, Video } from 'lucide-react';
 import { SKILL_NAMES, type SkillName } from '../shared/skills';
+import type { Avatar } from '../shared/types';
 import {
   DEFAULT_GENERATION_OPTIONS,
   buildHardwareProfile,
@@ -8,11 +9,13 @@ import {
 } from '../shared/generation-options';
 import { GenerationOptions } from './GenerationOptions';
 import type { StudioIntent } from './App';
+import { AvatarImage } from './AvatarImage';
 import { AudioInput } from './AudioInput';
 import { AudioRecorder } from './AudioRecorder';
 import { JobStatus } from './JobStatus';
 import { StepNumberField } from './StepNumberField';
 import { GenerationResultPreview } from './GenerationResultPreview';
+import { StudioWorkspace } from './StudioWorkspace';
 import { AUTO_SKILL_OPTION, SKILL_OPTIONS } from './skill-options';
 import { useMediaUrl } from './useMediaUrl';
 import { errorMessage } from './ui';
@@ -39,6 +42,7 @@ function isHundredth(value: number): boolean {
 
 export function AudioDigitalHumanForm({
   avatarId,
+  avatar,
   modelDirectory,
   active = true,
   pageActive = true,
@@ -51,6 +55,7 @@ export function AudioDigitalHumanForm({
   intent = null,
 }: {
   avatarId: string;
+  avatar?: Avatar | null;
   modelDirectory: string;
   active?: boolean;
   pageActive?: boolean;
@@ -351,14 +356,26 @@ export function AudioDigitalHumanForm({
   };
 
   return (
-    <form
-      className="generation-form"
-      noValidate
-      onSubmit={(event) => {
-        event.preventDefault();
-        void startGeneration();
-      }}
-    >
+    <StudioWorkspace
+      editor={
+        <form
+          className="generation-form"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            void startGeneration();
+          }}
+        >
+          {active && avatar && (
+            <section className="person-preview" aria-label="当前人物预览">
+              <div className="section-heading">
+                <span>当前模特</span>
+                <h2>{avatar.name}</h2>
+              </div>
+              <AvatarImage avatar={avatar} />
+              <p className="reference-label">参考人物：&lt;Picture 1&gt;</p>
+            </section>
+          )}
       <AudioInput
         key={audioIntentToken ?? 'manual'}
         path={audioPath}
@@ -490,7 +507,7 @@ export function AudioDigitalHumanForm({
           </div>
         )}
       </div>
-      <div className="form-row form-row-three">
+      <div className="form-row form-row-three studio-parameter-grid">
         <div className="field">
           <label htmlFor="audio-trim">起始截取（秒）</label>
           <input
@@ -558,8 +575,14 @@ export function AudioDigitalHumanForm({
         <Video size={17} aria-hidden="true" />
         {submitting ? '正在提交…' : '生成视频'}
       </button>
-      <JobStatus jobId={jobId} active={active} allowCancel />
-      <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
-    </form>
+        </form>
+      }
+      output={
+        <>
+          <JobStatus jobId={jobId} active={active && pageActive} allowCancel />
+          <GenerationResultPreview jobId={jobId} onOpenWorks={onOpenWorks ?? (() => undefined)} />
+        </>
+      }
+    />
   );
 }

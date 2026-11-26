@@ -137,6 +137,39 @@ afterEach(() => {
 });
 
 describe('语音工作区', () => {
+  test('语音编辑与任务结果接入共享工作区', async () => {
+    await renderSpeech();
+    await waitForSpeechReady();
+    await selectReferenceAudio();
+    await screen.findByLabelText('参考音频');
+    const panel = document.getElementById('speech-main-panel') as HTMLElement;
+    const editor = panel.querySelector('.studio-editor-pane');
+    expect(editor).not.toBeNull();
+    const output = within(panel).getByRole('complementary', { name: '任务与结果' });
+    expect(within(editor as HTMLElement).getByRole('button', { name: '生成语音' })).toBeInTheDocument();
+    expect(editor?.nextElementSibling).toBe(output);
+    expect(output.closest('form')).toBeNull();
+    expect(within(output).getByRole('region', { name: '生成结果预览' })).toHaveTextContent(
+      '完成生成后在这里预览',
+    );
+    expect(speechField('语言').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(speechField('语速').closest('.studio-parameter-grid')).not.toBeNull();
+    expect(speechField('输出格式').closest('.studio-parameter-grid')).not.toBeNull();
+
+    fireEvent.change(speechField('口播文字'), {
+      target: { value: '共享工作区语音任务' },
+    });
+    fireEvent.click(within(editor as HTMLElement).getByRole('button', { name: '生成语音' }));
+
+    await waitFor(() =>
+      expect(within(output).getByRole('region', { name: '任务状态' })).toBeInTheDocument(),
+    );
+    expect(within(output).getByRole('region', { name: '生成结果预览' })).toHaveTextContent(
+      '完成生成后在这里预览',
+    );
+    expect(within(output).queryByLabelText('生成语音结果')).not.toBeInTheDocument();
+  });
+
   test('语音无需数字模特，仅音频数字人显示新建模特空状态', async () => {
     const { onCreateAvatar } = await renderSpeech();
     await waitForSpeechReady();

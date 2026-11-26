@@ -543,6 +543,49 @@ body[data-window-maximized='true'] .window-resize-handle {
   font-size: 18px;
 }
 
+.studio-editor-pane .person-preview {
+  position: static;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 0 0 14px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #e1e6e2;
+  border-radius: 0;
+}
+
+.studio-editor-pane .person-preview .section-heading {
+  grid-column: 2;
+  grid-row: 1;
+  margin: 0;
+}
+
+.studio-editor-pane .person-preview .avatar-image {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 120px;
+  min-height: 0;
+  max-height: 150px;
+  aspect-ratio: 1;
+  overflow: hidden;
+}
+
+.studio-editor-pane .person-preview .avatar-image img {
+  width: 100%;
+  height: 100%;
+  max-height: 150px;
+  object-fit: contain;
+}
+
+.studio-editor-pane .person-preview .reference-label {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+}
+
 .generation-result {
   min-width: 0;
 }
@@ -766,6 +809,12 @@ body[data-window-maximized='true'] .window-resize-handle {
 
 .form-row-three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.studio-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 12px;
 }
 
 .speech-rate-heading {
@@ -1416,6 +1465,18 @@ body[data-window-maximized='true'] .window-resize-handle {
   gap: 10px;
   padding-top: 14px;
   border-top: 1px solid #e1e6e2;
+}
+
+.job-summary,
+.work-progress,
+.generation-result-actions {
+  min-width: 0;
+}
+
+.job-summary code,
+.work-progress-detail,
+.form-error {
+  overflow-wrap: anywhere;
 }
 
 .job-summary,

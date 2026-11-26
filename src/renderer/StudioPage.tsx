@@ -3,7 +3,6 @@ import { Image as ImageIcon, Mic, UserPlus, Video } from 'lucide-react';
 import type { Avatar } from '../shared/types';
 import type { StudioIntent, StudioMode } from './App';
 import { AudioDigitalHumanForm } from './AudioDigitalHumanForm';
-import { AvatarImage } from './AvatarImage';
 import { ImageForm } from './ImageForm';
 import { SpeechForm } from './SpeechForm';
 import { TextToVideoForm } from './TextToVideoForm';
@@ -290,19 +289,7 @@ export function StudioPage({
         {loading ? (
           <div className="page-state">正在读取数字模特…</div>
         ) : (
-          <div className={`studio-layout${avatar === null || videoMode !== 'audio' ? ' studio-layout-without-avatar' : ''}`}>
-            {videoMode === 'audio' && avatar !== null && (
-              <section className="person-preview" aria-label="当前人物预览">
-                <div className="section-heading">
-                  <span>当前模特</span>
-                  <h2>{avatar.name}</h2>
-                </div>
-                <AvatarImage avatar={avatar} />
-                {videoMode === 'audio' && (
-                  <p className="reference-label">参考人物：&lt;Picture 1&gt;</p>
-                )}
-              </section>
-            )}
+          <div className="studio-layout studio-layout-without-avatar">
             <section className="production-controls" aria-label="制作控制区">
               <div
                 className="tab-list mode-tabs video-mode-tabs"
@@ -406,6 +393,7 @@ export function StudioPage({
                 ) : (
                   <AudioDigitalHumanForm
                     avatarId={avatar.id}
+                    avatar={avatar}
                     modelDirectory={modelDirectory}
                     active={mode === 'video' && videoMode === 'audio'}
                     pageActive={pageActive && mode === 'video'}
